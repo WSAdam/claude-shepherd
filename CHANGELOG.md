@@ -22,6 +22,9 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
 
 ## Unreleased — fixes after mining round 2
 
+- Fixed (2026-10-13): the 🔒 lock read "3 working" over four busy cards. A session whose turn had
+  ended with background work still going (its card "Running 1 job") wasn't counted and drew no
+  ring, though the cards rank it as running. `core.lockState` now counts `bg_active` as working.
 - Fixed (2026-10-13): after Adam clicked **Merge**, the unit's `git merge --ff-only <branch>` in
   main was refused by Claude Code's auto-mode classifier ("Merge Without Review"). Nothing Shepherd
   answered vouched for it: the fence only steps aside, and only from inside the worktree. The

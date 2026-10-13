@@ -15868,5 +15868,38 @@ do
   eq("mark all by lane: MASTER with no lane still marks everything open", core.worklistMarkAllEverywhere(s, 900), 6)
 end
 
+-- ---- The lock counts a session running background work as working (2026-10-13) ----
+-- 2026-10-13: Adam locked with four busy cards and the lock read "3 working". Cause: core.lockState
+-- counted only status == "working", but Shepherd's own card was "Running 1 job" -- its turn had ended
+-- with `make deploy` still running in the background (bg_active) -- which the cards rank as running
+-- (core.instanceTier) and the fleet idle alert counts as working. The fixture is that fleet.
+do
+  local B, S = core.lockBoard, core.lockSummary
+  local fleet = {
+    { key = "sh", projectKey = "-Users-adam-Programming-claude-instance-manager", stackKey = "repo:/r/shepherd/.git",
+      stackName = "Shepherd", status = "done", bg_active = true, bg_jobs = 1, bg_count = 0, needsYou = "no" },
+    { key = "ac", projectKey = "-Users-adam-Programming-Api-caddy", name = "Api-caddy", status = "working", needsYou = "no" },
+    { key = "ps", projectKey = "-Users-adam-Programming-Project-stupid", name = "Project stupid", status = "working", needsYou = "no" },
+    { key = "cs", projectKey = "-Users-adam-Programming-ChargebackSentinel", stackKey = "repo:/r/cs/.git",
+      stackName = "Chargeback Sentinel", status = "working", needsYou = "no" },
+  }
+  eq("lock: a finished session still running a background job is working", core.lockState(fleet[1]), "working")
+  local b = B(fleet, 6)
+  eq("lock: four busy cards count four working", b.counts.working, 4)
+  eq("lock: ...each with its ring", #b.entries, 4)
+  eq("lock: ...and the line under them says so", S(b.counts, #b.entries), "4 working")
+  -- background agents (not just shell jobs) count too, and idle without background work still doesn't
+  eq("lock: a finished session running background agents is working",
+     core.lockState({ status = "done", bg_active = true, bg_count = 2, needsYou = "no" }), "working")
+  eq("lock: an idle session running a background job is working",
+     core.lockState({ status = "idle", bg_active = true, bg_jobs = 1, needsYou = "no" }), "working")
+  eq("lock: a finished session with no background work still draws nothing",
+     core.lockState({ status = "done", needsYou = "no" }), nil)
+  -- what wants Adam still outranks it: a merge he can press on a session with a job running
+  eq("lock: a ready-to-merge still reads as a merge while a background job runs",
+     core.lockState({ status = "done", bg_active = true, needsYou = "needs", needsYouSource = "merge",
+                      merge = { phase = "requested" } }), "merge")
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

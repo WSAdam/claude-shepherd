@@ -430,4 +430,6 @@ While it's up, the lock shows the clock and one ring per project that has someth
 working project's ring spins in its own colour; one that needs you holds a full amber ring; one
 that's **ready to merge** holds a teal ring; an error holds a red ring. The line under the rings
 counts sessions (`2 working  ·  1 needs you  ·  1 ready to merge`) and reads "All quiet" only when
-nothing is running or waiting. It decides "needs you" the same way the cards do.
+nothing is running or waiting. It decides "needs you" the same way the cards do, and counts a
+session whose card reads **Running … job** or **… agents** (its turn ended, background work still
+going) as working, as the cards rank it.

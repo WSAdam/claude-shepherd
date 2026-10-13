@@ -6320,6 +6320,9 @@ end
 -- while its card said "Needs you". A merge he can press gets its own state; a blocked
 -- merge, a held question, a batch proposal and a prompt all read as "approval". A stamped
 -- verdict always wins ("fyi" and "no" included); an unstamped item asks needsYouKind.
+-- 2026-10-13: a finished session still running background agents or jobs (it.bg_active, its card
+-- "Running 1 job") is working here too, as core.instanceTier ranks it -- the lock read "3 working"
+-- over four busy cards.
 function M.lockState(it)
   if type(it) ~= "table" then return nil end
   local kind, source = it.needsYou, it.needsYouSource
@@ -6331,7 +6334,7 @@ function M.lockState(it)
     if source == "error" then return "error" end
     return "approval"
   end
-  if it.status == "working" then return "working" end
+  if it.status == "working" or it.bg_active then return "working" end
   return nil
 end
 
