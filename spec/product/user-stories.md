@@ -64,6 +64,8 @@ delegation, idle/auto-spawn routing targets) are intentionally omitted until the
 
 ## Merge evidence & batches
 
+- As a **fleet operator**, I want my Merge click to carry the unit's own fast-forward of main even in Claude Code's auto mode, and the card to read Working while Shepherd is still checking the request, so that approving a merge in Shepherd is enough and a card only asks me when there's something to press.
+
 - As a **fleet operator**, I want Shepherd to run a project's test suite itself in the worktree before a merge review calls the unit ready, one gate per repo at a time, so that "tests pass" is Shepherd's evidence rather than the session's claim.
 - As a **fleet operator**, I want a gate that couldn't run (a locked suite, a missing command) reported as couldn't-run, never as a failure, so that I don't learn to dismiss red gates.
 - As a **reviewer**, I want every merge request scanned for red flags in its diff and reviewed by a read-only headless model, with 🔎 Verify to run the same review on any session, so that a merge nobody read still gets a second pair of eyes.
@@ -284,6 +286,10 @@ delegation, idle/auto-spawn routing targets) are intentionally omitted until the
 - As a **fleet operator**, I want ▶ Run… to work through items I pick one at a time, each in a fresh session in the repo's main checkout with its brief typed in for me to send, and its tab closed once the item is done, so that a list of small jobs gets done while I verify.
 - As a **fleet operator**, I want a run I started to set my checkmark (✓ by run) only on Shepherd's own evidence (the box ticked in its file and a turn that did something, or the item's own session reporting done) and never on import, so that a checkmark still means I, or a run I started, checked it.
 - As a **fleet operator**, I want a run to stop after three items in a row finish nothing, and to pause for a live-run item, a blocked report or a batch in the repo and wait out a hold or freeze, so that a run never churns through my list unattended.
+- As a **fleet operator**, I want To do / To verify / All lanes under the import row, with Mark all marking only the lane I'm looking at, so that the work an automation says it finished doesn't bury the work still to do.
+- As a **fleet operator**, I want a `[~]` line (the work is in, only a live run is left) to sit in To verify, so that what waits on my live check is with the rest of what waits on me.
+- As a **fleet operator**, I want a heads-up on a project's card and a count on 📋 My List once 30 items wait for my check or one has waited a day, with one banner per crossing, so that I look before the pile grows to hundreds.
+- As a **fleet operator**, I want double-clicking a card that shows that heads-up to open My List on that project's To verify lane, so that the alert takes me straight to what to review.
 
 ## Keeping the Mac & fleet running
 

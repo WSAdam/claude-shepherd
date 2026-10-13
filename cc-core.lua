@@ -26003,9 +26003,11 @@ M.FEATURES = {
   { key = "worklist", cat = "Control", new = true, title = "Worklist (My List)",
     what = "A personal checklist of things to hand to sessions. Imports each project's "
         .. "TODO.md checkboxes and keeps them synced as automations tick them off. The To do / To verify / "
-        .. "All lanes split real work from what an automation says it finished, and Mark all marks one lane.",
+        .. "All lanes split real work from what an automation says it finished, and Mark all marks one lane. "
+        .. "A project with 30 items to verify, or one waiting a day, puts a heads-up on its card (double-click "
+        .. "it to review) and a count on 📋 My List.",
     why = "Keep your own to-dos right next to the fleet that does them -- and click-verify "
-        .. "what an automation claims it finished." },
+        .. "what an automation claims it finished, before the pile grows." },
   { key = "liverun", cat = "Control", new = true, title = "Needs a live run",
     what = "A TODO.md line written `- [~] text`, or carrying `(needs live run)` / `(live check)`, is one only a live run can check. My List marks it with a ▶ live run chip, and a `[~]` line waits in the To verify lane, since the work is in and only your live run is left. A `[~]` line is never done; a marked `[x]` keeps its ✓ auto badge.",
     why = "The checks that need you to deploy and look don't hide among the ones a test already proved." },

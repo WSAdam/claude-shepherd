@@ -31,7 +31,9 @@ Instances rows and the Stream Deck show an errored session as **Error** in magen
   (*Working - Bash 9m*), so a long build reads as work.
 - A done or idle session with live subagents or a Workflow reads **Running N agents**, one with a
   background shell job still going reads **Running 1 job** (both: *Running 2 agents · 1 job*), and
-  a batch driver whose units are working reads **Driving N units**. The underlying status is unchanged;
+  a batch driver whose units are working reads **Driving N units**. A card whose merge request
+  Shepherd is still checking (its test gate running or queued) reads **Working** too: nothing on it
+  is yours to press until the checks finish. The underlying status is unchanged;
   this is display only.
 - A **Ready for you** card says how its last turn went, read from the transcript since the newest
   prompt: **done** (a `TODO.md` line ticked to `[x]` by an edit or a `sed -i`, a commit, or a merge

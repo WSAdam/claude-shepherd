@@ -4,7 +4,9 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
-## Unreleased — My List lanes (2026-10-13)
+## 2026-10-13 — My List lanes and review, merges in auto mode
+
+### My List
 
 - Added: the **My List review heads-up**. A project whose My List has 30 items to verify, or one
   waiting more than 24 hours, shows a Heads-up on its cards at rest ("31 to verify in My List ·
@@ -30,30 +32,34 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
   (`ccTodoParseRev`), so `[~]` items imported earlier reach To verify without waiting for their
   file to change.
 
-## Unreleased — fixes after mining round 2
+### Merging
 
-- Fixed (2026-10-13): **Close selected** closed nothing when Adam picked the two never-used sessions
-  in Shepherd's own window. One of their tabs read "Report merged unit to dr…", an old chat's title
+- Fixed: after Adam clicked **Merge**, the unit's `git merge --ff-only <branch>` in main was
+  refused by Claude Code's auto-mode classifier ("Merge Without Review"). Nothing Shepherd answered
+  vouched for it: the fence only steps aside, and only from inside the worktree. The approval hook
+  now answers **allow** for exactly the session's own approved merge: its branch, into its repo's
+  main checkout, with nothing else in the command (`cc_approved_merge`, ledger `by: "merge"`). A
+  hook's allow skips the classifier, and an armed gate no longer asks a second time
+  (`tests/gate.test.sh`, "an approved merge runs in auto mode").
+- Changed: a card whose merge request Shepherd is still checking (its test gate running or queued)
+  reads **Working**, with the working dot, ranks with the working sessions, and draws a working
+  ring on the lock. It used to read **Heads-up**. Adam: "if something is still working i expect it
+  to say working not heads-up". Nothing on it is his to press until the checks finish, and then it
+  turns red as before (`core.mergeChecking`).
+
+### Fleet
+
+- Fixed: the 🔒 lock read "3 working" over four busy cards. A session whose turn had ended with
+  background work still going (its card "Running 1 job") wasn't counted and drew no ring, though
+  the cards rank it as running. `core.lockState` now counts `bg_active` as working.
+- Fixed: **Close selected** closed nothing when Adam picked the two never-used sessions in
+  Shepherd's own window. One of their tabs read "Report merged unit to dr…", an old chat's title
   left by a session-link reopen, not "Claude Code", so the window's count (1) didn't match
   Shepherd's (2). Adam's call widens the rule (`core.unclaimedTabs`): when a window's Claude tabs
   equal its live sessions with a tab, and every unnamed session is selected, the tabs no named
   session claims close. "Claude Code" ones close by count, any other by its own single-match name.
-- Changed (2026-10-13): a card whose merge request Shepherd is still checking (its test gate
-  running or queued) reads **Working**, with the working dot, ranks with the working sessions, and
-  draws a working ring on the lock. It used to read **Heads-up**. Adam: "if something is still
-  working i expect it to say working not heads-up". Nothing on it is his to press until the checks
-  finish, and then it turns red as before (`core.mergeChecking`).
 
-- Fixed (2026-10-13): the 🔒 lock read "3 working" over four busy cards. A session whose turn had
-  ended with background work still going (its card "Running 1 job") wasn't counted and drew no
-  ring, though the cards rank it as running. `core.lockState` now counts `bg_active` as working.
-- Fixed (2026-10-13): after Adam clicked **Merge**, the unit's `git merge --ff-only <branch>` in
-  main was refused by Claude Code's auto-mode classifier ("Merge Without Review"). Nothing Shepherd
-  answered vouched for it: the fence only steps aside, and only from inside the worktree. The
-  approval hook now answers **allow** for exactly the session's own approved merge: its branch, into
-  its repo's main checkout, with nothing else in the command (`cc_approved_merge`, ledger
-  `by: "merge"`). A hook's allow skips the classifier, and an armed gate no longer asks a second
-  time (`tests/gate.test.sh`, "an approved merge runs in auto mode").
+## 2026-10-04 — Fixes after mining round 2
 
 - Fixed: the stub check (the fake-completion Stop guard and the merge checker's red flags) took a
   path or route for a TODO comment, because a "/" counted as a comment opener: the checklist

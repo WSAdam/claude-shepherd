@@ -295,6 +295,21 @@ git history of `todos.md` and `docs/feature-mining/*`.
   per-project $ + budget-alert rules; DR6 an LLM classify pass + fleet-wide opt-in once trusted; DR7 worktree
   cleanup of an abandoned (never-kept) cohort (`git worktree prune`).
 
+## State (2026-10-13) — My List lanes and review, merges in auto mode
+
+- **Mining round 3** (2026-10-10): 30 new fleet-manager repos plus NCC Group's research, compared
+  against Shepherd. The report is `docs/feature-mining/round3/SUMMARY.md` (gitignored), and its
+  confirmed bugs are logged in TODO.md.
+- **My List** gets **To do · To verify · All** lanes (Mark all marks the lane shown; the filter box
+  is the Archive's alone; `[~]` lines are To verify) and the **review heads-up**: 30 items to
+  verify, or one waiting a day, puts a heads-up on the project's cards and a count on 📋. The
+  clock is `claimTs`, which the import stamps from file facts.
+- **Merges in auto mode**: the approval hook answers allow for the session's own approved
+  fast-forward (`cc_approved_merge`), because the classifier refused it ("Merge Without Review"). A
+  merge Shepherd is still checking reads **Working**, not a heads-up (`core.mergeChecking`).
+- **Fixes**: the lock counts a session running background work as working, and Close selected
+  closes an unnamed session whose tab shows a leftover name (Adam's widening, `core.unclaimedTabs`).
+
 ## State (2026-10-04) — the worktree method, the build program, mining round 2
 
 Since 2026-06-29 Shepherd went from a fleet monitor to the console that runs Adam's parallel-worktree

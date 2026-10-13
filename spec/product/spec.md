@@ -236,7 +236,11 @@ title, else AI title, cut to 24 UTF-16 units + "…"), and close uses only that 
 all read "Claude Code" and are interchangeable, so close may carry a count and close an untagged
 "Claude Code" tab only while the window shows exactly as many as Shepherd counts empty sessions
 there; Instances' **Close selected** (2026-09-25, Adam confirms first) closes unnamed sessions by
-that count only when every unnamed session in the window is selected. Bridge 0.6.0 carries the
+that count only when every unnamed session in the window is selected. Widened again 2026-10-13
+(Adam's call): an unnamed session's tab can show a leftover name (an old chat's title after a
+session-link reopen), so when a window's Claude tabs equal its live sessions with a tab (no restored
+old chat), the tabs no named session claims close too: "Claude Code" by count, any other by its own
+single-match name (`core.unclaimedTabs`). The bridge gains no op. Bridge 0.6.0 carries the
 tags over when VS Code rebuilds its tab objects on a tab switch. It is installed locally with VS
 Code's own CLI, never published. **[DECISION D-15]**
 
@@ -248,7 +252,13 @@ reviews it on the card, and answers with a decision file bound to the request's 
 `mv` like the gate's. Approving means "go": the **session** that did the work rebases, settles
 conflicts with the tests, fast-forwards main and runs `cc-merge.sh done` (which removes the
 worktree and branch only once the branch is in main, never forced) — one merge per repo at a time,
-in click order. Shepherd re-verifies with git before the tab bridge closes the tab. **[DECISION D-16]**
+in click order. Shepherd re-verifies with git before the tab bridge closes the tab. In Claude Code's
+auto mode the classifier refused that fast-forward ("Merge Without Review"), because the only sign
+of approval it could see was the script's own output. So since 2026-10-13 the approval hook answers
+**allow** for exactly the session's own approved `git merge --ff-only <branch>` into main, checked
+against the request on disk (`cc_approved_merge`); a hook's allow skips the classifier. While
+Shepherd is still checking a request (its test gate running or queued), the card reads **Working**,
+not a heads-up: nothing on it is Adam's to press yet. **[DECISION D-16]**
 
 Around a merge Shepherd gathers more of its own evidence (D-5):
 
