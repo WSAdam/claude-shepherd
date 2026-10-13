@@ -4,6 +4,22 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## Unreleased — My List lanes (2026-10-13)
+
+- Changed: My List splits open items into **To do · To verify · All**, a row of chips under
+  **⇪ All projects** / **✓ Mark all N done**. To verify is every open item whose file claims it: a
+  ticked line (**✓ auto**) or a `[~]` line, whose work is in and only the live run is left. To do is
+  everything else. Each chip counts its items, the pick is remembered across tabs and reloads, and
+  **✓ Mark all N done** counts and marks only the lane you're looking at (MASTER: that lane in every
+  project). Adam's list had reached 262 open items, 243 of them claims waiting for his check, with
+  the ~19 items of real work buried among them.
+- Changed: the **Filter this list…** box now shows on the 🗄 Archive tab only, and the
+  **▶ live run** toggle is gone; the ▶ chip on each such row stays.
+- Changed: `core.parseTodoFile` notes a `[~]` box (`wait`), and the import stores it as `fileWait`.
+  On the first tick after the upgrade, Shepherd re-reads every enrolled `TODO.md` once
+  (`ccTodoParseRev`), so `[~]` items imported earlier reach To verify without waiting for their
+  file to change.
+
 ## Unreleased — fixes after mining round 2
 
 - Fixed: the stub check (the fake-completion Stop guard and the merge checker's red flags) took a

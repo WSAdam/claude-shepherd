@@ -2378,13 +2378,16 @@ do
           and src:find("worklistQuery,", 1, true) == nil
           and src:find("worklistQuery;", 1, true) == nil)
   end
-  -- All THREE render branches consult the matcher, each with its own row shape.
-  check("wl-search: MASTER filters the rollup",
-        src:find("return wlMatches(toks, r.it.text, r.it.details, r.it.due, r.label);", 1, true) ~= nil)
+  -- REQUIREMENT CHANGE 2026-10-13 (Adam: remove "Filter this list…" everywhere but the Archive):
+  -- MASTER and the project/Generic tabs filtered by the box; they filter by lane now (the My List
+  -- lanes section below). The Archive's search stays, and the box shows there alone.
   check("wl-search: the Archive is searched whole, its never-displayed details included",
         src:find("return wlMatches(toks, r.text, r.details, r.due, r.label || r.scope);", 1, true) ~= nil)
-  check("wl-search: a project/Generic tab filters its ACTIVE items",
-        src:find('return wlMatches(toks, it.text, it.details, it.due, "");', 1, true) ~= nil)
+  check("wl-search: MASTER and the project/Generic tabs no longer match the box",
+        src:find("return wlMatches(toks, r.it.text, r.it.details, r.it.due, r.label);", 1, true) == nil
+        and src:find('return wlMatches(toks, it.text, it.details, it.due, "");', 1, true) == nil)
+  check("wl-search: the box's row shows on the Archive only",
+        src:find('if(sr) sr.style.display = (worklistScope === "archive") ? "" : "none";', 1, true) ~= nil)
   check("wl-search: the JS twin mirrors core.worklistMatches positionally",
         src:find("function wlMatches(toks, text, details, due, label){", 1, true) ~= nil
         and src:find("function wlSearchToks(){", 1, true) ~= nil)
@@ -2399,14 +2402,45 @@ do
         and src:find('document.getElementById("wl-donecount").textContent = done.length', 1, true) ~= nil
         and src:find("done = done.filter", 1, true) == nil
         and src:find("done.filter(function", 1, true) == nil)
-  -- THE FOOTGUN: wlOpenCount counts the UNFILTERED list, so while a filter is on the
-  -- button would read "Mark all 442 done" beside three rows -- and do exactly that.
-  check("wl-search: Mark all steps aside while a filter is on",
-        src:find('mb.style.display = (openN && !wlSearchToks().length) ? "" : "none";', 1, true) ~= nil)
-  -- A filter that matches nothing must not read like an empty list.
-  check("wl-search: an empty result says so, and doesn't say 'add one above'",
-        src:find('"Nothing matches the filter."', 1, true) ~= nil
-        and src:find('"Nothing archived matches the filter."', 1, true) ~= nil)
+  -- THE FOOTGUN (2026-09-22): a Mark all that counted the UNFILTERED list beside three filtered
+  -- rows would read "Mark all 442 done" -- and do exactly that. REQUIREMENT CHANGE 2026-10-13: the
+  -- filter is the lane now, and Mark all counts and marks that lane, so the guard is that the count
+  -- comes from the lane, never from an unfiltered total.
+  check("wl-search: Mark all counts the lane the tab shows",
+        src:find("var openN = wlLaneCounts(worklistScope)[worklistLane] | 0;", 1, true) ~= nil
+        and src:find("function wlOpenCount(", 1, true) == nil)
+  -- An archive filter that matches nothing must not read like an empty archive.
+  check("wl-search: an empty archive result says so",
+        src:find('"Nothing archived matches the filter."', 1, true) ~= nil)
+end
+
+-- ---- My List lanes: To do / To verify / All (2026-10-13) ----
+-- Adam's My List reached 262 open items, 243 of them "✓ auto" claims, burying ~19 items of real work.
+-- A lane row under the import row picks what a tab shows, and Mark all marks that lane. Behaviour:
+-- tests/worklist-lanes.browser.test.js; the twin: tests/worklist-lanes.test.js. These pin the wiring.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local iTodo = src:find('<div id="wl-todorow">', 1, true)
+  local iLane = src:find('<div id="wl-lanerow"></div>', 1, true)
+  local iRun = src:find('<div id="wl-runbar"', 1, true)
+  check("lanes: the lane row sits right under the import row",
+        iTodo and iLane and iRun and iTodo < iLane and iLane < iRun or false)
+  check("lanes: Mark all sends the lane the tab shows",
+        src:find('send("worklist-mark-all", worklistScope, worklistLane);', 1, true) ~= nil)
+  check("lanes: Lua reads the lane from the payload, and refuses one it doesn't know",
+        src:find("local lane = core.worklistLaneArg(payload.text)", 1, true) ~= nil
+        and src:find("core.worklistMarkAllEverywhere(st, FX.now(), lane)", 1, true) ~= nil
+        and src:find("core.worklistMarkAllDone(st, scope, FX.now(), lane)", 1, true) ~= nil)
+  check("lanes: the remembered lane is read inside a try (storage can be missing or throw)",
+        src:find('var savedLane = window.localStorage && window.localStorage.getItem("cc-wlLane");', 1, true) ~= nil
+        and src:find("try {\n      var savedLane", 1, true) ~= nil)
+  check("lanes: a project tab and MASTER both filter their open rows by lane",
+        src:find("active = active.filter(wlLaneOk);", 1, true) ~= nil
+        and src:find("rows = rows.filter(function(r){ return wlLaneOk(r.it); });", 1, true) ~= nil)
+  check("lanes: the chips are a class of their own, so the tab-click handler never takes one for a tab",
+        src:find('<button class="wl-lane', 1, true) ~= nil and src:find('<button class="wl-scope wl-lane', 1, true) == nil)
 end
 
 -- ---- Per-session tile identity (two chats in ONE project) ----
@@ -4840,17 +4874,11 @@ do
   if f then f:close() end
   check("live run: the chip rides with the row's other file badges",
         src:find("function wlLiveRunChip(it){", 1, true) ~= nil and src:find("h += wlLiveRunChip(it);", 1, true) ~= nil)
-  check("live run: the toggle sits in the filter row, outside every node the render rewrites",
-        src:find('<button id="wl-liveonly" onclick="wlLiveToggle()"', 1, true) ~= nil
-        and (src:find('<div id="wl-searchrow">', 1, true) or 0) < (src:find('id="wl-liveonly"', 1, true) or 0)
-        and (src:find('id="wl-liveonly"', 1, true) or 0) < (src:find('<div id="wl-todorow">', 1, true) or 0))
-  check("live run: a project tab and MASTER both filter by it",
-        src:find("if(wlLiveApplies()) active = active.filter(wlIsLiveRun);", 1, true) ~= nil
-        and src:find("if(wlLiveApplies()) rows = rows.filter(function(r){ return wlIsLiveRun(r.it); });", 1, true) ~= nil)
-  check("live run: Mark all steps aside while it's on (wlOpenCount counts the unfiltered list)",
-        src:find('if(wlLiveApplies()) mb.style.display = "none";', 1, true) ~= nil)
-  check("live run: the toggle's label is set as text, never HTML",
-        src:find("lb.textContent = ", 1, true) ~= nil and src:find("lb.innerHTML", 1, true) == nil)
+  -- REQUIREMENT CHANGE 2026-10-13 (Adam: remove the "▶ live run" toggle): the toggle and its filter
+  -- are gone -- the [~] lines are To verify in My List's lanes. Negative pins, so it stays gone.
+  check("live run: the toggle is gone, button and state alike",
+        src:find('id="wl-liveonly"', 1, true) == nil and src:find("function wlLiveToggle(", 1, true) == nil
+        and src:find("var worklistLiveOnly", 1, true) == nil and src:find("function wlLiveApplies(", 1, true) == nil)
   check("live run: the Done drawer is still never filtered",
         src:find("done = done.filter", 1, true) == nil and src:find("done.filter(function", 1, true) == nil)
 end

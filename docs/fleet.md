@@ -475,17 +475,19 @@ the FLEET row swaps the session tiles for the list (click again to go back).
 - **▶ live run**: some lines can only be checked by a live run (deploy, then look). A `TODO.md` line
   written `- [~] text`, or carrying `(needs live run)` / `(live check)` on a `[ ]` or `[x]` line, shows
   a **▶ live run** chip. A `[~]` line is never done; a marked `[x]` keeps its **✓ auto** chip too.
-  Flipping only the checkbox (`[ ]` → `[~]` → `[x]`) keeps the same item. The **▶ live run N**
-  toggle beside the filter box keeps only those lines on a project tab or **MASTER**, together with
-  any filter text. It stays on across tab switches. It only appears where such a line is open, or
-  while it's on. The Done drawer and the Archive are never filtered, and **✓ Mark all N done** hides
-  itself while the toggle is on.
-- **Filter**: the box under the tabs filters **whichever tab you're on**: a project tab that
-  project, **MASTER** the rollup, **🗄 Archive** every archived row. It is case-insensitive and
-  every word must match. It searches the subject, the **details**, the expected date (`2026-09`
-  filters a month) and, on MASTER and Archive, the project the row came from. The count beside it
-  reads **N / M shown**; **Esc** clears it. Done drawers are not filtered, and **✓ Mark all N done**
-  hides itself while a filter is on.
+  Flipping only the checkbox (`[ ]` → `[~]` → `[x]`) keeps the same item. A `[~]` line is in
+  **To verify** (the work is in; only your live run is left). A `[ ]` line with the marker is still
+  work, so it stays in **To do**.
+- **Lanes: To do · To verify · All**: the row under **⇪ All projects** and **✓ Mark all N done**
+  picks what a project tab, **Generic** or **MASTER** shows. **To verify** is every open item whose
+  file claims it: a ticked line (**✓ auto**) or a `[~]` line. **To do** is every other open item:
+  unticked lines, your own items and audit findings. **All** is both. Each chip counts its open
+  items. The lane you pick stays across tab switches and panel reloads. The Done drawer is never
+  filtered, and the Archive has no lanes.
+- **Filter**: on the **🗄 Archive** tab only, a box searches every archived row. It is
+  case-insensitive and every word must match. It searches the subject, the **details**, the expected
+  date (`2026-09` filters a month) and the project the row came from. The count beside it reads
+  **N / M shown**; **Esc** clears it.
 - **The item editor**: **＋ Add an item…** (or clicking a row) opens one editor with a **Subject**
   (Enter saves), **Details** (free-form notes), a **Checklist** of sub-steps (ticking a step saves
   immediately; the row shows a `2/5` chip that turns green when all are done), and an **Expected
@@ -495,9 +497,9 @@ the FLEET row swaps the session tiles for the list (click again to go back).
   **Tomorrow**, red once **overdue**), a 📝 when it has details, and its checklist progress.
   Checking a row moves it to a collapsed **Done** area (ordered by due date) with both its expected
   date and a **✓ completion date**. **✕** deletes it; **Clear** empties Done for that scope.
-- **✓ Mark all N done**: ticks off everything still open on the tab you're looking at, after a
-  confirm that states the count. On **MASTER** it marks every project's open items, each in its own
-  list.
+- **✓ Mark all N done**: ticks off every open item in the lane you're looking at, after a confirm
+  that states the count and the lane. On **MASTER** it marks that lane across every project, each
+  item in its own list.
 - **🗄 Archive**: once a day, work you finished more than **10 days** ago moves out of the live list
   into `~/.claude/cc-worklist-archive.json`, and the **Archive** tab shows it, newest first and
   read-only. Nothing is deleted. The archive is fetched **only when you open that tab**.

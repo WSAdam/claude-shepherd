@@ -166,8 +166,14 @@ echo ""
 echo "== node: My List -- the Archive tab, fetched only when opened (real browser) =="
 node "$DIR/worklist-archive.browser.test.js" || fail=1
 echo ""
-echo "== node: My List -- the filter box, filtering whichever tab is selected (real browser) =="
+echo "== node: My List -- the filter box, the Archive's alone since 2026-10-13 (real browser) =="
 node "$DIR/worklist-search.browser.test.js" || fail=1
+echo ""
+echo "== node: My List lanes -- the panel's wlLane twin answers to tests/fixtures/worklist-lanes.tsv like core.worklistLane (behavioral, runs the shipped wlLane) =="
+node "$DIR/worklist-lanes.test.js" || fail=1
+echo ""
+echo "== node: My List lanes -- To do / To verify / All under the import row, Mark all marks the lane, MASTER, Archive, remembered across a reload (real browser) =="
+node "$DIR/worklist-lanes.browser.test.js" || fail=1
 echo ""
 echo "== node: project-card layout geometry in a real browser (skips without Playwright) =="
 node "$DIR/card-layout.browser.test.js" || fail=1
@@ -248,6 +254,9 @@ HOME="$(mktemp -d)" lua "$DIR/smoke.test.lua" || fail=1
 echo ""
 echo "== lua: My List auto-sync keeps renamed tabs (behavioral, stubbed hs) =="
 HOME="$(mktemp -d)" lua "$DIR/worklist-autosync.test.lua" || fail=1
+echo ""
+echo "== lua: My List re-reads every enrolled TODO.md once when the parser learns a fact ([~] -> fileWait), never again (behavioral, stubbed hs) =="
+HOME="$(mktemp -d)" lua "$DIR/worklist-parserev.test.lua" || fail=1
 echo ""
 echo "== lua: My List -- a check-off doesn't re-decode the whole store (behavioral, stubbed hs) =="
 HOME="$(mktemp -d)" lua "$DIR/worklist-perf.test.lua" || fail=1
@@ -506,7 +515,7 @@ echo ""
 echo "== node: the ▶ live run chip on My List -- only a real flag shows it, no item text reaches it, never a done claim (behavioral, runs the shipped wlLiveRunChip) =="
 node "$DIR/live-run-view.test.js" || fail=1
 echo ""
-echo "== node: My List -- the ▶ live run toggle keeps only the lines a live run has to check, on a tab and on MASTER (real browser) =="
+echo "== node: My List -- the ▶ live run lines: chip on every one, [~] in To verify, the toggle gone (real browser) =="
 node "$DIR/worklist-liverun.browser.test.js" || fail=1
 echo ""
 echo "== lua: the scheduled-tasks lock verdict -- literal locks plus ps and git output: live, dead pid, reused pid (another start time), committed, held by another card, malformed JSON, the per-HEAD cache, the fix text =="

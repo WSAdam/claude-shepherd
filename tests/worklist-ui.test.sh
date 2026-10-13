@@ -177,9 +177,11 @@ assert_eq "no due-date-only done comparator"         "no"  "$(has 'return wlDueS
 assert_eq "My List has a filter box"                 "yes" "$(has '<input type="text" id="wl-search"')"
 assert_eq "typing re-renders the current tab"        "yes" "$(has 'oninput="renderWorklist()"')"
 assert_eq "Escape clears the filter"                 "yes" "$(has 'function wlSearchKey(e){')"
-# wlOpenCount counts the UNFILTERED list, so a visible Mark-all would claim a count the
-# screen contradicts -- and act on it.
-assert_eq "Mark all hides while a filter is on"      "yes" "$(has 'mb.style.display = (openN && !wlSearchToks().length) ? "" : "none";')"
+# A Mark-all counting the UNFILTERED list would claim a count the screen contradicts -- and act on
+# it. REQUIREMENT CHANGE 2026-10-13 (Adam): the box is the Archive's alone and the other tabs filter
+# by lane, so Mark all counts (and Lua marks) the lane the tab shows.
+assert_eq "Mark all counts the lane"                 "yes" "$(has 'var openN = wlLaneCounts(worklistScope)[worklistLane] | 0;')"
+assert_eq "the box shows on the Archive only"        "yes" "$(has 'if(sr) sr.style.display = (worklistScope === "archive") ? "" : "none";')"
 
 # ---- Feature 7: playbooks as My List sources (2026-10-03) ---------------------------
 # Mining round 2 D3a: a picked markdown checklist imports like TODO.md (behaviour:

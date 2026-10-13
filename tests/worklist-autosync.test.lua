@@ -138,4 +138,10 @@ check("live run: the [~] line arrives flagged, open and unclaimed",
 check("live run: the marked [x] line arrives flagged and claimed done, never ticked",
       marked ~= nil and marked.liveRun == true and marked.fileDone == true and marked.done == false)
 check("live run: a plain line carries no flag", plain ~= nil and plain.liveRun == nil)
+
+-- ---- My List lanes: [~] reaches the panel as To verify (2026-10-13) ----
+check("lanes: the [~] line arrives waiting on its live run (fileWait), so it's To verify",
+      tilde ~= nil and tilde.fileWait == true)
+check("lanes: the marked [x] line doesn't wait (it claims done instead)", marked ~= nil and marked.fileWait == nil)
+check("lanes: a plain line doesn't wait", plain ~= nil and plain.fileWait == nil)
 finish()

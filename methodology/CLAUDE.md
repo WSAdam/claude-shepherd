@@ -213,9 +213,9 @@ inspecting the work. Follow this contract in every project:
   deploy and look at the panel, click through the running app, probe the live
   process. Write `(needs live run)` (or `(live check)`) in such an item's text when you
   add the line: My List shows it with a ▶ live run chip for its whole life, `[x]`
-  included, and can filter to those lines. When the work is in but the live run that
-  proves it hasn't happened (a worktree can't deploy, say), flip `[ ]` → `[~]`, and
-  `[~]` → `[x]` once that run has passed. `[~]` is never done. Only the checkbox token
+  included. When the work is in but the live run that proves it hasn't happened (a
+  worktree can't deploy, say), flip `[ ]` → `[~]` (My List then lists it under To
+  verify), and `[~]` → `[x]` once that run has passed. `[~]` is never done. Only the checkbox token
   changes: never add the marker to an existing line later, because that rewords it.
 - **Never clear the list.** Don't delete `TODO.md` or strip completed items when the
   run ends — the done-but-unverified items are exactly what I walk through afterwards.

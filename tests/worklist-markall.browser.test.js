@@ -119,6 +119,8 @@ const payload = {
   const msg = (accepted.sent || []).filter(function (m) { return m.a === "worklist-mark-all"; });
   check("saying yes sends one mark-all for this tab", msg.length === 1 && msg[0].v === "P1");
   check("...and sends nothing else", accepted.sent.length === 1);
+  // 2026-10-13: the message names the lane the tab shows; with no lane picked that's All.
+  check("...naming the All lane  (" + (msg[0] && msg[0].text) + ")", msg.length === 1 && msg[0].text === "all");
 
   // Lua answers with the real count; the panel says what happened.
   const flashed = await page.evaluate((p) => {

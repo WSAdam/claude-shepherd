@@ -154,16 +154,17 @@ const VIEW = () => {
   check("...and never ticks the checkbox", badge.checked === false);
 
   // 3. A filter drops a header with no rows left under it.
+  // REQUIREMENT CHANGE 2026-10-13 (Adam: the "Filter this list…" box is Archive-only now): the
+  // filter here is the To verify lane, which keeps only the two ticked playbook rows (headers in the
+  // order their first surviving row comes, as ever: h1 is listed before r2).
   const filtered = await page.evaluate((S) => {
-    document.getElementById("wl-search").value = "cherry";
-    renderWorklist();
+    wlLanePick("verify");
     const r = (0, eval)("(" + S + ")")();
-    document.getElementById("wl-search").value = "";
-    renderWorklist();
+    wlLanePick("all");
     return r.seq;
   }, VIEW.toString());
-  check("a filter keeps only the headers with rows  (" + filtered.join(" / ") + ")",
-        JSON.stringify(filtered) === JSON.stringify(["# 📘 <b>hot</b>fix.md", "cherry-pick the fix"]));
+  check("a lane keeps only the headers with rows  (" + filtered.join(" / ") + ")",
+        JSON.stringify(filtered) === JSON.stringify(["# 📘 <b>hot</b>fix.md", "cherry-pick the fix", "# 📘 release.md", "write the notes"]));
 
   // 4. Add: the message names the tab, nothing else.
   const addMsg = await page.evaluate(() => {

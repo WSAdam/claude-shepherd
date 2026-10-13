@@ -15752,5 +15752,121 @@ do
   end
 end
 
+-- ---- My List lanes: To do / To verify (2026-10-13) ----
+-- Adam's My List reached 262 open items, 243 of them "✓ auto" (the automation ticked the line and the
+-- item waits for his check), burying the ~19 that were real work. The list splits into two lanes:
+-- To verify = an open item whose file claims it ([x] = fileDone, or [~] = fileWait: the work is in and
+-- only a live run is left), To do = every other open item. "✓ Mark all N done" marks one lane.
+do
+  check("core.worklistLane exists", type(core.worklistLane) == "function")
+  check("core.worklistLaneArg exists", type(core.worklistLaneArg) == "function")
+  if type(core.worklistLane) == "function" then
+    -- the shared table: the panel's wlLane (tests/worklist-lanes.test.js) answers to the same verdicts
+    local n = 0
+    local fh = io.open(HERE .. "fixtures/worklist-lanes.tsv", "r")
+    check("lanes: tests/fixtures/worklist-lanes.tsv is there", fh ~= nil)
+    for line in (fh and fh:read("*a") or ""):gmatch("[^\n]+") do
+      local want, js = line:match("^(%a+)\t(.*)$")
+      if want and line:sub(1, 1) ~= "#" then
+        n = n + 1
+        eq("worklist-lanes.tsv: " .. want .. "  " .. js, core.worklistLane(core.json.decode(js)), want)
+      end
+    end
+    if fh then fh:close() end
+    check("lanes: ...the table was read (12+ cases)", n >= 12)
+    eq("lanes: a nil item is To do, not an error", core.worklistLane(nil), "todo")
+  end
+
+  if type(core.worklistLaneArg) == "function" then
+    eq("lane arg: an empty lane (the old payload) means all", core.worklistLaneArg(""), "all")
+    eq("lane arg: nil means all", core.worklistLaneArg(nil), "all")
+    eq("lane arg: todo", core.worklistLaneArg("todo"), "todo")
+    eq("lane arg: verify", core.worklistLaneArg("verify"), "verify")
+    eq("lane arg: all", core.worklistLaneArg("all"), "all")
+    eq("lane arg: anything else is refused", core.worklistLaneArg("everything"), nil)
+    eq("lane arg: ...a done lane can't be marked", core.worklistLaneArg("done"), nil)
+    eq("lane arg: ...nor a non-string", core.worklistLaneArg(7), nil)
+  end
+
+  -- the parser: only the [~] box token makes a line wait; a marker on [ ] is unfinished work
+  local p = core.parseTodoFile("- [~] look at the chip\n- [ ] deploy, then look (needs live run)\n- [x] shipped\n")
+  check("lanes parse: a [~] line waits on a live run", (p[1] or {}).wait == true)
+  eq("lanes parse: ...a (needs live run) marker on a [ ] line doesn't wait", (p[2] or {}).wait, nil)
+  eq("lanes parse: ...nor does an [x] line (it claims done instead)", (p[3] or {}).wait, nil)
+  p = core.parseTodoFile("- [ ] dup\n- [~] dup\n")
+  check("lanes parse: a duplicate waits when any copy is [~]", #p == 1 and p[1].wait == true)
+  p = core.parseTodoFile("- [~] dup\n- [x] dup\n")
+  check("lanes parse: ...and keeps an [x] copy's claim too", #p == 1 and p[1].wait == true and p[1].done == true)
+
+  -- the import: [ ] -> [~] -> [x] keeps ONE item; fileWait follows the file; done is never touched
+  local st = { byProject = {}, todoMeta = {} }
+  local k = 0
+  local function idgen() k = k + 1; return "ln" .. k end
+  local function import(content, now)
+    return core.worklistImportTodoRoots(st, "shop", { { root = "/r", isMain = true,
+      parsed = core.parseTodoFile(content) } }, now, idgen)
+  end
+  import("- [ ] wire the lane row\n", 100)
+  local L = st.byProject.shop
+  local item = L[1]
+  eq("lanes import: a [ ] line is To do", core.worklistLane and core.worklistLane(item), "todo")
+  eq("lanes import: ...and carries no fileWait", item.fileWait, nil)
+  local c = import("- [~] wire the lane row\n", 200)
+  check("lanes import: [ ] -> [~] keeps the same item", #L == 1 and L[1] == item)
+  check("lanes import: ...now waiting on a live run", item.fileWait == true)
+  eq("lanes import: ...which is To verify", core.worklistLane and core.worklistLane(item), "verify")
+  eq("lanes import: ...and the flip counts as an update", c.updated, 1)
+  c = import("- [x] wire the lane row\n", 300)
+  check("lanes import: [~] -> [x] keeps the same item, claimed done", #L == 1 and L[1] == item and item.fileDone == true)
+  eq("lanes import: ...fileWait follows the file and clears", item.fileWait, nil)
+  eq("lanes import: ...still To verify", core.worklistLane and core.worklistLane(item), "verify")
+  eq("lanes import: ...and that flip is an update too", c.updated, 1)
+  check("lanes import: HARD RULE -- no state ever sets Adam's checkmark", item.done == false and item.doneTs == nil)
+  c = import("- [~] a new waiting line\n", 400)
+  check("lanes import: a new [~] line arrives waiting and open",
+        (L[2] or {}).fileWait == true and (L[2] or {}).done == false and (L[2] or {}).fileDone == nil)
+  local s2 = { byProject = {}, todoMeta = {} }
+  core.worklistImportTodoRoots(s2, "shop", {
+    { root = "/r", isMain = true, parsed = core.parseTodoFile("- [ ] shared line\n") },
+    { root = "/r-wt", branch = "feat/x", parsed = core.parseTodoFile("- [~] shared line\n") } }, 100, idgen)
+  check("lanes import: a worktree's [~] makes the shared line wait", ((s2.byProject.shop or {})[1] or {}).fileWait == true)
+
+  -- Mark all by lane: only the chosen lane's open items; done items keep their own doneTs
+  local function fresh()
+    return { generic = { { id = "g1", text = "own", done = false } },
+             byProject = {
+               a = { { id = "a1", text = "work", done = false },
+                     { id = "a2", text = "ticked", done = false, fileDone = true },
+                     { id = "a3", text = "live", done = false, fileWait = true },
+                     { id = "a4", text = "old", done = true, doneTs = 5, fileDone = true } },
+               b = { { id = "b1", text = "ticked", done = false, fileDone = true },
+                     { id = "b2", text = "work", done = false } } } }
+  end
+  local s = fresh()
+  eq("mark all by lane: To verify marks the two claimed items", core.worklistMarkAllDone(s, "a", 900, "verify"), 2)
+  check("mark all by lane: ...they're done, stamped now",
+        s.byProject.a[2].done == true and s.byProject.a[2].doneTs == 900 and s.byProject.a[3].done == true)
+  check("mark all by lane: ...the To do item is left open", s.byProject.a[1].done == false)
+  eq("mark all by lane: ...an already-done item keeps its own doneTs", s.byProject.a[4].doneTs, 5)
+  s = fresh()
+  eq("mark all by lane: To do marks only the unclaimed item", core.worklistMarkAllDone(s, "a", 900, "todo"), 1)
+  check("mark all by lane: ...the claimed ones stay open", s.byProject.a[2].done == false and s.byProject.a[3].done == false)
+  s = fresh()
+  eq("mark all by lane: all marks every open item", core.worklistMarkAllDone(s, "a", 900, "all"), 3)
+  s = fresh()
+  eq("mark all by lane: no lane (the old call) marks every open item", core.worklistMarkAllDone(s, "a", 900), 3)
+  s = fresh()
+  eq("mark all by lane: an unknown lane marks nothing", core.worklistMarkAllDone(s, "a", 900, "bogus"), 0)
+  s = fresh()
+  eq("mark all by lane: MASTER's To verify marks every project's claimed items",
+     core.worklistMarkAllEverywhere(s, 900, "verify"), 3)
+  check("mark all by lane: ...and no To do item anywhere",
+        s.generic[1].done == false and s.byProject.a[1].done == false and s.byProject.b[2].done == false)
+  s = fresh()
+  eq("mark all by lane: MASTER's To do marks Generic and every project's work", core.worklistMarkAllEverywhere(s, 900, "todo"), 3)
+  s = fresh()
+  eq("mark all by lane: MASTER with no lane still marks everything open", core.worklistMarkAllEverywhere(s, 900), 6)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

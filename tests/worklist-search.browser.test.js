@@ -3,15 +3,11 @@
 //
 // 2026-09-22: the 🗄 Archive tab holds 442 rows and gains ~440 every ten days, and My
 // List had no filter anywhere -- a reference list you cannot search is a list you
-// cannot use. ONE box filters whichever tab is selected: a project tab that project,
-// MASTER the cross-project rollup, Archive all archived rows.
-//
-// Two things must NOT happen here, and both are pinned below:
-//   * the Done drawer must stay UNFILTERED and lazily built (it is display:none until
-//     expanded, and building it behind the filter cost 614 hidden rows per click);
-//   * ✓ Mark all N done must step aside while a filter is on -- wlOpenCount counts the
-//     UNFILTERED list, so a visible button would read "Mark all 442 done" beside three
-//     rows, and do exactly that.
+// cannot use. ONE box filtered whichever tab was selected.
+// 2026-10-13 (requirement change, Adam's call): the box shows on the Archive tab only;
+// every other tab filters by lane (To do / To verify / All), pinned in
+// tests/worklist-lanes.browser.test.js. The Done drawer must still stay UNFILTERED and
+// lazily built (it is display:none until expanded; building it cost 614 hidden rows per click).
 //
 // Needs Playwright (the isolate runner's copy, or CC_PLAYWRIGHT=<module path>); without it
 // this prints an explicit skip, like `make lint` does for a missing luacheck.
@@ -86,13 +82,6 @@ const archiveRows = { rows: [
     details: "installer", doneTs: NOW - 40 * 86400 },
 ] };
 
-// Typing, as far as the panel is concerned: the input IS the query state, and
-// `oninput` is what re-renders. Passed to page.evaluate with the query as its arg.
-const TYPE = (query) => {
-  document.getElementById("wl-search").value = query;
-  renderWorklist();
-};
-
 (async () => {
   let browser;
   try { browser = await pw.chromium.launch({ headless: true }); }
@@ -115,90 +104,52 @@ const TYPE = (query) => {
     window.ccWorklist(p); worklistPick("P1");
   }, payload);
 
-  // The box is there, and sits outside every node renderWorklist rewrites.
+  // REQUIREMENT CHANGE 2026-10-13 (Adam: remove "Filter this list…" everywhere but the Archive):
+  // the box filtered every tab; it now shows on the 🗄 Archive tab alone, and the other tabs filter
+  // by lane (tests/worklist-lanes.browser.test.js). What this file still pins: the box sits outside
+  // the rebuilt nodes, it is hidden off the Archive, a query left in it never filters a project tab
+  // or MASTER, the Done drawer stays unfiltered, and the Archive search below.
   const box = await page.evaluate(() => {
     const el = document.getElementById("wl-search");
     const rebuilt = ["wl-scopes", "wl-active", "wl-done", "wl-mdone"];
+    const row = document.getElementById("wl-searchrow");
     return { there: !!el,
              inRebuilt: rebuilt.some(function (id) { const n = document.getElementById(id); return !!(n && n.contains(el)); }),
+             shown: !!row && row.style.display !== "none",
              rows: document.querySelectorAll("#wl-active .wl-item").length };
   });
-  check("My List has a filter box", box.there === true);
+  check("My List still has a filter box (for the Archive)", box.there === true);
   check("...outside every node the render rewrites, so typing can't lose focus", box.inRebuilt === false);
-  check("...and the unfiltered tab shows every active item  (rows=" + box.rows + ")", box.rows === 3);
+  check("...hidden on a project tab", box.shown === false);
+  check("...where every active item shows  (rows=" + box.rows + ")", box.rows === 3);
 
-  // 1. A project tab filters to the matching rows, and says how many of how many.
-  await page.evaluate(TYPE, "install");
-  const one = await page.evaluate(() => ({
-    rows: Array.from(document.querySelectorAll("#wl-active .wl-item")).map(function (r) { return r.textContent; }),
-    count: (document.getElementById("wl-search-count") || {}).textContent,
-  }));
-  check("filtering a project tab keeps only the matching rows  (rows=" + one.rows.length + ")", one.rows.length === 1);
-  check("...the right one  (" + String(one.rows[0] || "").slice(0, 28) + ")",
-        String(one.rows[0] || "").indexOf("Ship the installer fixes") >= 0);
-  check("...and the count says how many of how many  (" + one.count + ")", one.count === "1 / 3 shown");
+  // A query typed on the Archive and left in the box filters nothing elsewhere.
+  const left = await page.evaluate(() => {
+    worklistPick("archive");
+    document.getElementById("wl-search").value = "install";
+    worklistPick("P1");
+    const p1 = { rows: document.querySelectorAll("#wl-active .wl-item").length,
+                 mark: document.getElementById("wl-markall").textContent };
+    worklistPick("master");
+    const m = { rows: document.querySelectorAll("#wl-active .wl-item").length,
+                shown: document.getElementById("wl-searchrow").style.display !== "none" };
+    return { p1: p1, m: m };
+  });
+  check("a query left in the box doesn't filter a project tab  (rows=" + left.p1.rows + ")", left.p1.rows === 3);
+  check("...Mark all still counts the whole lane  (" + left.p1.mark + ")", left.p1.mark === "✓ Mark all 3 done");
+  check("MASTER ignores it too  (rows=" + left.m.rows + ")", left.m.rows === 5);
+  check("...and hides the box", left.m.shown === false);
 
-  // 2. THE DONE DRAWER IS NOT FILTERED. Opening it with a filter on shows every done row.
+  // THE DONE DRAWER stays unfiltered and lazily built.
   const drawer = await page.evaluate(() => {
+    worklistPick("P1");
     worklistToggleDone();
     return { rows: document.querySelectorAll("#wl-done .wl-item").length,
              count: (document.getElementById("wl-donecount") || {}).textContent };
   });
   check("the Done drawer is NOT filtered  (rows=" + drawer.rows + ")", drawer.rows === 2);
-  check("...and its count still reads the unfiltered total  (" + drawer.count + ")", drawer.count === "(2)");
+  check("...and its count reads the whole total  (" + drawer.count + ")", drawer.count === "(2)");
   await page.evaluate(() => { worklistToggleDone(); });
-
-  // 3. A filter that matches nothing reads as a filter, not as an empty list.
-  await page.evaluate(TYPE, "zzzznope");
-  const nobody = await page.evaluate(() => (document.getElementById("wl-active") || {}).textContent);
-  check("a no-match filter says nothing matches  (" + String(nobody).slice(0, 30) + ")",
-        /nothing matches/i.test(String(nobody)));
-  check("...and does NOT tell you to add one above", String(nobody).indexOf("add one above") < 0);
-
-  // 8. Mark all steps aside while the box is non-empty (wlOpenCount is unfiltered).
-  const markall = await page.evaluate(() => {
-    const mb = document.getElementById("wl-markall");
-    return { hidden: mb.style.display, label: mb.textContent };
-  });
-  check("Mark all is hidden while a filter is on  (display=" + markall.hidden + ")", markall.hidden === "none");
-  await page.evaluate(TYPE, "");
-  const backOn = await page.evaluate(() => {
-    const mb = document.getElementById("wl-markall");
-    return { hidden: mb.style.display, label: mb.textContent,
-             rows: document.querySelectorAll("#wl-active .wl-item").length,
-             count: (document.getElementById("wl-search-count") || {}).textContent };
-  });
-  check("...and back once the box is cleared  (display='" + backOn.hidden + "')", backOn.hidden === "");
-  check("...with its unfiltered count  (" + backOn.label + ")", backOn.label === "✓ Mark all 3 done");
-  check("...the full list is back  (rows=" + backOn.rows + ")", backOn.rows === 3);
-  check("...and the count blanks with an empty query  ('" + backOn.count + "')", backOn.count === "");
-
-  // 4. MASTER filters across projects, and keeps a bucket header only for survivors.
-  const master = await page.evaluate((q) => {
-    worklistPick("master");
-    const before = document.querySelectorAll("#wl-active .wl-item").length;
-    const hdrBefore = document.querySelectorAll("#wl-active .wl-mgroup").length;
-    document.getElementById("wl-search").value = q;
-    renderWorklist();
-    return { before: before, hdrBefore: hdrBefore,
-             rows: Array.from(document.querySelectorAll("#wl-active .wl-item")).map(function (r) { return r.textContent; }),
-             tags: Array.from(document.querySelectorAll("#wl-active .wl-tag")).map(function (r) { return r.textContent; }),
-             headers: document.querySelectorAll("#wl-active .wl-mgroup").length };
-  }, "refund");
-  check("MASTER rolls up every project unfiltered  (rows=" + master.before + ")", master.before === 5);
-  check("...and filters across them  (rows=" + master.rows.length + ")", master.rows.length === 1);
-  check("...to the row from the other project  (" + master.tags.join("|") + ")", master.tags[0] === "Chargeback");
-  check("...keeping a bucket header only where a row survived  (headers=" + master.headers + "/" + master.hdrBefore + ")",
-        master.headers === 1 && master.hdrBefore === 2);
-
-  // 7. The query survives a tab switch -- one box, filtering whatever tab you flick to.
-  const survives = await page.evaluate(() => {
-    worklistPick("P1");
-    return { value: document.getElementById("wl-search").value,
-             rows: document.querySelectorAll("#wl-active .wl-item").length };
-  });
-  check("the query survives a tab switch  (value=" + survives.value + ")", survives.value === "refund");
-  check("...and the tab you land on is filtered by it  (rows=" + survives.rows + ")", survives.rows === 0);
 
   // 5. THE ARCHIVE, searched whole -- including `details`, which is never displayed.
   const arch = await page.evaluate((a) => {

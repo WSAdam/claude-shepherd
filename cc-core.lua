@@ -17770,11 +17770,15 @@ end
 -- confirmation counts and what the panel reports afterwards.
 -- An item that was ALREADY done keeps its own doneTs: the Done drawer is ordered by it,
 -- so restamping would shuffle work finished days ago up to the top.
-function M.worklistMarkAllDone(state, scope, now)
+-- My List lanes (2026-10-13): `lane` ("todo" / "verify" / "all", nil = all) marks only the open items
+-- in that lane -- what the panel's lane filter shows. An unknown lane marks nothing.
+function M.worklistMarkAllDone(state, scope, now, lane)
   if type(state) ~= "table" then return 0 end
+  lane = lane == nil and "all" or lane
+  if lane ~= "all" and lane ~= "todo" and lane ~= "verify" then return 0 end
   local n = 0
   for _, it in ipairs(M.worklistScopeList(state, scope)) do
-    if not it.done then
+    if not it.done and (lane == "all" or M.worklistLane(it) == lane) then
       it.done = true
       it.doneTs = tonumber(now) or 0
       n = n + 1
@@ -17786,14 +17790,33 @@ end
 -- ...and the same across every scope, for the MASTER tab -- which is a rollup of every
 -- project's open work, so marking there marks each item in ITS OWN list, never master's
 -- (master has no list of its own). Returns the total marked.
-function M.worklistMarkAllEverywhere(state, now)
+function M.worklistMarkAllEverywhere(state, now, lane)
   if type(state) ~= "table" then return 0 end
-  local n = M.worklistMarkAllDone(state, "generic", now)
+  local n = M.worklistMarkAllDone(state, "generic", now, lane)
   local keys = {}
   for k in pairs(state.byProject or {}) do keys[#keys + 1] = k end
   table.sort(keys)                                  -- stable order, so a count is reproducible
-  for _, k in ipairs(keys) do n = n + M.worklistMarkAllDone(state, k, now) end
+  for _, k in ipairs(keys) do n = n + M.worklistMarkAllDone(state, k, now, lane) end
   return n
+end
+
+-- Which My List lane an item is in (2026-10-13): "done" once Adam (or a run he started) checked it,
+-- "verify" while it's open and its file claims it -- [x] (fileDone) or [~] (fileWait: the work is in,
+-- only a live run is left) -- and "todo" for every other open item. Only a real `true` claims; the
+-- panel's twin wlLane answers to the same table (tests/fixtures/worklist-lanes.tsv). Pure.
+function M.worklistLane(it)
+  if type(it) ~= "table" then return "todo" end
+  if it.done then return "done" end
+  if it.fileDone == true or it.fileWait == true then return "verify" end
+  return "todo"
+end
+
+-- The lane a Mark all request names: "" or nil (the payload before lanes) = "all"; "todo", "verify"
+-- and "all" as given; anything else nil (refused -- marks nothing). Pure.
+function M.worklistLaneArg(v)
+  if v == nil or v == "" then return "all" end
+  if v == "todo" or v == "verify" or v == "all" then return v end
+  return nil
 end
 
 -- Move done work older than `days` out of the live store and into `archive`, keeping its
@@ -18023,6 +18046,9 @@ end
 -- (any case) flags a `[ ]` or `[x]` line the same way. Either sets liveRun = true, OR'd across
 -- duplicates like done. The text keeps the marker: it is the item's identity, so flipping only
 -- the checkbox token keeps one item.
+-- My List lanes (2026-10-13): the `[~]` box token alone also sets wait = true (the work is in and
+-- only the live run is left, so the item belongs in To verify). A marker on a `[ ]` line is still
+-- unfinished work and does not wait. OR'd across duplicates; nil when false, like liveRun.
 function M.parseTodoFile(content)
   local out = {}
   if type(content) ~= "string" or content == "" then return out end
@@ -18037,12 +18063,14 @@ function M.parseTodoFile(content)
         local lower = text:lower()
         local live = mark == "~" or lower:find("(needs live run)", 1, true) ~= nil
           or lower:find("(live check)", 1, true) ~= nil
+        local wait = mark == "~"
         local e = byText[text]
         if e then
           e.done = e.done or done
           if live then e.liveRun = true end
+          if wait then e.wait = true end
         elseif #out < 500 then
-          e = { text = text, done = done, liveRun = live or nil }
+          e = { text = text, done = done, liveRun = live or nil, wait = wait or nil }
           out[#out + 1] = e
           byText[text] = e
         end
@@ -18167,6 +18195,8 @@ function M.worklistImportTodoRoots(state, key, sources, now, idgen, kind)
           u.done = u.done or e.done == true
           -- needs live run (unit 37): any copy's [~] or marker flags it, as any [x] claims it
           u.liveRun = u.liveRun or e.liveRun == true
+          -- My List lanes (2026-10-13): any copy's [~] makes the line wait on its live run
+          u.wait = u.wait or e.wait == true
           -- a find-only audit's finding (core.parseAuditFindings) keeps its tag in My List
           if type(e.audit) == "table" and not u.audit then u.audit = { sev = e.audit.sev, id = e.audit.id } end
           if not u.rootSet[root] then u.rootSet[root] = true; u.roots[#u.roots + 1] = root end
@@ -18196,9 +18226,13 @@ function M.worklistImportTodoRoots(state, key, sources, now, idgen, kind)
       if u then
         local nfd = u.done and true or nil
         local nlr = u.liveRun and true or nil   -- a file fact like fileDone: it follows the file
-        if it.fileDone ~= nfd or it.liveRun ~= nlr or it.fileMissing then counts.updated = counts.updated + 1 end
+        local nfw = u.wait and true or nil      -- [~]: To verify (2026-10-13), also a file fact
+        if it.fileDone ~= nfd or it.liveRun ~= nlr or it.fileWait ~= nfw or it.fileMissing then
+          counts.updated = counts.updated + 1
+        end
         it.fileDone = nfd
         it.liveRun = nlr
+        it.fileWait = nfw
         it.fileMissing = nil
         if u.audit then it.audit = u.audit end
         tag(it, u)
@@ -18224,7 +18258,7 @@ function M.worklistImportTodoRoots(state, key, sources, now, idgen, kind)
       local it = { id = tostring(idgen and idgen() or ""), text = t, done = false,
                    ts = tonumber(now) or 0, details = "", due = "", steps = {},
                    src = srcTag, srcText = t, fileDone = u.done and true or nil, audit = u.audit,
-                   liveRun = u.liveRun and true or nil }
+                   liveRun = u.liveRun and true or nil, fileWait = u.wait and true or nil }
       if srcFile then it.srcFile, it.srcName = srcFile, kind.name end
       tag(it, u)
       list[#list + 1] = it
@@ -25735,11 +25769,12 @@ M.FEATURES = {
     why = "Undo a wrong turn (with confirmation) without leaving the dashboard." },
   { key = "worklist", cat = "Control", new = true, title = "Worklist (My List)",
     what = "A personal checklist of things to hand to sessions. Imports each project's "
-        .. "TODO.md checkboxes as verify-me items and keeps them synced as automations tick them off.",
+        .. "TODO.md checkboxes and keeps them synced as automations tick them off. The To do / To verify / "
+        .. "All lanes split real work from what an automation says it finished, and Mark all marks one lane.",
     why = "Keep your own to-dos right next to the fleet that does them -- and click-verify "
         .. "what an automation claims it finished." },
   { key = "liverun", cat = "Control", new = true, title = "Needs a live run",
-    what = "A TODO.md line written `- [~] text`, or carrying `(needs live run)` / `(live check)`, is one only a live run can check. My List marks it with a ▶ live run chip, and the ▶ live run toggle beside the filter box shows only those lines, on a project tab or on MASTER. A `[~]` line is never done; a marked `[x]` keeps its ✓ auto badge.",
+    what = "A TODO.md line written `- [~] text`, or carrying `(needs live run)` / `(live check)`, is one only a live run can check. My List marks it with a ▶ live run chip, and a `[~]` line waits in the To verify lane, since the work is in and only your live run is left. A `[~]` line is never done; a marked `[x]` keeps its ✓ auto badge.",
     why = "The checks that need you to deploy and look don't hide among the ones a test already proved." },
   { key = "playbooks", cat = "Control", new = true, title = "Playbooks in My List",
     what = "📘 Add a playbook… on a project's My List tab picks any markdown checklist on this Mac. Its `- [ ]` lines import like TODO.md's, grouped under the file's name, and its ✓ auto and ▶ live run badges follow the file as it changes. Remove playbook stops the import and keeps its items to be verified.",

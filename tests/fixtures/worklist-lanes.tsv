@@ -1,0 +1,21 @@
+# worklist-lanes.tsv -- which My List lane an item is in (2026-10-13): To do, To verify, or done.
+# core.worklistLane (tests/core.test.lua) and the panel's twin wlLane (tests/worklist-lanes.test.js)
+# both answer to this one table, so the filter Adam picks and what Mark all marks can't drift apart.
+# One case per line: <lane><TAB><item as JSON>. lane: todo, verify or done.
+# To verify = an open item whose file claims it: [x] (fileDone) or [~] (fileWait, work in, live run pending).
+todo	{"text":"plain open item","done":false}
+todo	{"text":"Adam's own item, never imported","done":false,"details":"","due":""}
+verify	{"text":"the automation ticked it","done":false,"fileDone":true}
+verify	{"text":"[~] waits on a live run","done":false,"fileWait":true,"liveRun":true}
+verify	{"text":"ticked and marked (needs live run)","done":false,"fileDone":true,"liveRun":true}
+verify	{"text":"[~] in one copy, [x] in another","done":false,"fileDone":true,"fileWait":true}
+todo	{"text":"an open line with a (needs live run) marker is still work","done":false,"liveRun":true}
+todo	{"text":"a find-only audit finding","done":false,"audit":{"sev":"HIGH","id":"AUD-001"}}
+todo	{"text":"a playbook line not yet ticked","done":false,"src":"playbook"}
+verify	{"text":"a playbook line ticked in its file","done":false,"src":"playbook","fileDone":true}
+verify	{"text":"ticked, then its line went missing","done":false,"fileDone":true,"fileMissing":true}
+todo	{"text":"fileDone false is not a claim","done":false,"fileDone":false}
+todo	{"text":"a string true is not a claim","done":false,"fileDone":"true"}
+done	{"text":"Adam checked it","done":true,"doneTs":5,"fileDone":true}
+done	{"text":"a checklist run checked it","done":true,"doneBy":"run:r1"}
+done	{"text":"Adam's own item, checked","done":true}

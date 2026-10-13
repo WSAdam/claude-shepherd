@@ -3593,8 +3593,21 @@ end
 -- isn't watched yet (a new worktree) queues one import, which records its root.
 -- First call lazy-seeds the watch map with one worklist read; an un-enrolled
 -- install stays a pure pairs{} no-op forever after.
+-- FX.TODO_PARSE_REV (2026-10-13): bumped when core.parseTodoFile learns a fact the import stores on an
+-- item (rev 1: `[~]` -> fileWait, which puts the line in My List's To verify lane). Auto-sync only
+-- re-reads a file whose mtime moved, so an item imported by an older build would keep the old shape
+-- until its file next changed. Once per rev (hs.settings "ccTodoParseRev") every watched path is
+-- marked unseen, so the loop below re-imports each enrolled tab one time. The import is idempotent.
+FX.TODO_PARSE_REV = 1
 function FX.todoAutoSyncTick(list)
   if FX._todoWatch == nil then FX.todoRebuildWatch(FX.readWorklist()) end
+  if (tonumber(hs.settings.get("ccTodoParseRev")) or 0) < FX.TODO_PARSE_REV then
+    for _, paths in pairs(FX._todoWatch) do
+      for _, p in ipairs(paths) do FX._todoMtime[p] = -1 end
+    end
+    hs.settings.set("ccTodoParseRev", FX.TODO_PARSE_REV)
+    FX.log("[cc-dashboard] My List: re-reading every enrolled TODO.md once (parser rev " .. FX.TODO_PARSE_REV .. ")")
+  end
   local queued = nil
   local now = FX.now()
   local liveCwd, liveRoots = {}, {}
@@ -14875,12 +14888,20 @@ local function handleBridgeMsg(msg)
   -- is told back how many were actually marked, since the tab may have moved under it.
   -- MASTER is a rollup of every project's open work, so marking there marks each item in
   -- its own list (core.worklistMarkAllEverywhere), never a list of master's own.
+  -- 2026-10-13: payload.text names the lane the panel is showing (To do / To verify / All), and only
+  -- that lane is marked; "" (an older panel) means all. An unknown lane marks nothing.
   if a == "worklist-mark-all" then
     local scope = tostring(payload.v or "generic")
-    local st = FX.readWorklist()
-    local n = (scope == "master") and core.worklistMarkAllEverywhere(st, FX.now())
-                                  or core.worklistMarkAllDone(st, scope, FX.now())
-    if n > 0 then FX.writeWorklist(st) end
+    local lane = core.worklistLaneArg(payload.text)
+    local n = 0
+    if not lane then
+      FX.log("[cc-dashboard] worklist-mark-all: unknown lane " .. tostring(payload.text) .. " -- nothing marked")
+    else
+      local st = FX.readWorklist()
+      n = (scope == "master") and core.worklistMarkAllEverywhere(st, FX.now(), lane)
+                              or core.worklistMarkAllDone(st, scope, FX.now(), lane)
+      if n > 0 then FX.writeWorklist(st) end
+    end
     pcall(function() wv:evaluateJavaScript("window.ccWorklist(" .. hs.json.encode(FX.worklistPayload()) .. ")") end)
     pcall(function() wv:evaluateJavaScript("window.wlMarkedAll(" .. tostring(n) .. ")") end)
     return
@@ -16837,22 +16858,17 @@ local HTML = [[
               padding:2px clamp(7px,2.4cqw,12px); font-size:clamp(10px,2.9cqw,12px); cursor:pointer;
               max-width:100%; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .wl-scope.on { background:var(--accent-bg); border-color:var(--accent); color:var(--accent-text); font-weight:600; }
-  /* One filter box for whichever tab is selected (2026-09-22). It lives OUTSIDE every
-     node renderWorklist rewrites, so its value, focus and caret survive each render --
-     the input IS the query state, and the query persists across tab switches on purpose. */
+  /* The filter box (2026-09-22) lives OUTSIDE every node renderWorklist rewrites, so its value,
+     focus and caret survive each render -- the input IS the query state. Since 2026-10-13 it is
+     shown on the 🗄 Archive tab only (Adam's call): every other tab filters by lane. */
   #wl-searchrow { display:flex; align-items:center; gap:6px; margin-bottom:8px; }
   #wl-search { flex:1; min-width:0; background:var(--surface-2); color:var(--text); border:1px solid var(--border);
     border-radius:8px; padding:3px clamp(7px,2.4cqw,10px); font-size:clamp(10px,2.9cqw,12.5px); font-family:inherit; }
   #wl-search::placeholder { color:var(--muted); }
   #wl-search:focus { outline:none; border-color:var(--accent); }
   #wl-search-count { flex:0 0 auto; font-size:clamp(9px,2.6cqw,11px); color:var(--muted); white-space:nowrap; }
-  /* ▶ live run (build program unit 37): the toggle that keeps only the lines a live run has to
-     check, and the chip on each such row. Neither is a done claim. */
-  #wl-liveonly { flex:0 0 auto; background:var(--surface); color:var(--text-2); border:1px solid var(--border);
-    border-radius:14px; padding:2px clamp(7px,2.4cqw,12px); font-size:clamp(10px,2.8cqw,12px);
-    cursor:pointer; white-space:nowrap; }
-  #wl-liveonly:hover { background:var(--surface-hover); border-color:var(--accent); color:var(--accent-text); }
-  #wl-liveonly.on { background:var(--accent-bg); border-color:var(--accent); color:var(--accent-text); font-weight:600; }
+  /* ▶ live run (build program unit 37): the chip on each line only a live run can check. It is
+     not a done claim. (Its toggle went 2026-10-13: the To verify lane holds the [~] lines.) */
   .wl-live { flex:0 0 auto; font-size:clamp(9px,2.5cqw,11px); color:var(--accent-text); background:var(--surface-2);
     border:1px solid var(--border-weak); border-radius:8px; padding:0 5px; white-space:nowrap; }
   /* TODO.md import row + badges. .wl-fdone is the AUTOMATION's [x] claim from the
@@ -16863,6 +16879,14 @@ local HTML = [[
     border-radius:14px; padding:2px clamp(7px,2.4cqw,12px); font-size:clamp(10px,2.8cqw,12px);
     cursor:pointer; white-space:nowrap; }
   #wl-todobtn:hover, #wl-todoall:hover { background:var(--surface-hover); border-color:var(--accent); color:var(--accent-text); }
+  /* My List lanes (2026-10-13): To do / To verify / All, one picked, under the import row. Their own
+     class, not .wl-scope, so the delegated tab-click handler never takes a lane chip for a tab. */
+  #wl-lanerow { display:flex; flex-wrap:wrap; align-items:center; gap:4px; margin-bottom:8px; }
+  .wl-lane { background:var(--surface); color:var(--text-2); border:1px solid var(--border); border-radius:14px;
+    padding:2px clamp(7px,2.4cqw,12px); font-size:clamp(10px,2.8cqw,12px); cursor:pointer; white-space:nowrap; }
+  .wl-lane:hover { background:var(--surface-hover); border-color:var(--accent); color:var(--accent-text); }
+  .wl-lane.on { background:var(--accent-bg); border-color:var(--accent); color:var(--accent-text); font-weight:600; }
+  .wl-lane .wl-lanen { opacity:.75; }
   /* 📘 playbooks (2026-10-03): the Add button, the tab's sources as chips (each with a Remove ✕),
      and a header over each playbook's rows -- the file's name as written, so no uppercase. */
   #wl-pbadd { background:var(--surface); color:var(--text-2); border:1px solid var(--border);
@@ -18194,7 +18218,6 @@ local HTML = [[
     <div id="wl-searchrow">
       <input type="text" id="wl-search" placeholder="Filter this list…" oninput="renderWorklist()" onkeydown="wlSearchKey(event)">
       <span id="wl-search-count"></span>
-      <button id="wl-liveonly" onclick="wlLiveToggle()" style="display:none" title="Show only the lines a live run has to check: TODO.md's [~] lines and lines marked (needs live run) or (live check)">▶ live run</button>
     </div>
     <div id="wl-todorow">
       <button id="wl-todobtn" onclick="todoImportScope()" title="Import this project's TODO.md checkboxes as list items">⇪ Import TODO.md</button>
@@ -18206,6 +18229,7 @@ local HTML = [[
       <button id="wl-runcancel" class="wl-runbtn" onclick="wlRunPickCancel()" style="display:none">Cancel</button>
       <span id="wl-todoflash"></span>
     </div>
+    <div id="wl-lanerow"></div>
     <div id="wl-runbar" style="display:none"></div>
     <div id="wl-pbrow" style="display:none"></div>
     <div id="wl-addrow">
@@ -20056,28 +20080,68 @@ local HTML = [[
     }
     // ---- ▶ live run (build program unit 37, 2026-09-29) --------------------
     // A TODO line only a live run can check: `- [~]`, or a `(needs live run)` / `(live check)`
-    // marker (core.parseTodoFile sets liveRun). The toggle beside the filter box keeps only those
-    // lines on a project tab or MASTER, and carries across a tab switch like the query does. The
-    // Archive's rows carry no flag, so it never applies there. Only a real `true` counts.
-    var worklistLiveOnly = false;
+    // marker (core.parseTodoFile sets liveRun). Each such row carries a ▶ chip. Only a real `true`
+    // counts. (The toggle that kept only these lines went 2026-10-13: the [~] lines are To verify.)
     function wlIsLiveRun(it){
       return !!it && it.liveRun === true;
     }
-    function wlLiveApplies(){ return worklistLiveOnly && worklistScope !== "archive"; }
-    function wlLiveToggle(){ worklistLiveOnly = !worklistLiveOnly; renderWorklist(); }
-    // Open live-run lines on a tab (every list on MASTER): what the toggle offers.
-    function wlLiveOpenCount(scope){
-      var n = 0;
+    // ---- My List lanes: To do / To verify / All (2026-10-13) -----------------
+    // Adam's list reached 262 open items, 243 of them "✓ auto" claims waiting for his check, and the
+    // ~19 that were real work drowned. The lane row under the import row picks what a tab shows:
+    // To verify = an open item whose file claims it ([x] fileDone, or [~] fileWait), To do = every
+    // other open item, All = both. Mark all counts and marks the lane shown. wlLane is the twin of
+    // core.worklistLane: both answer to tests/fixtures/worklist-lanes.tsv. The pick is remembered
+    // (localStorage, which can be missing or throw) and carries across tabs; the Archive has no lanes.
+    // (objects, not nested arrays: two closing brackets in a row would end the Lua long string)
+    var WL_LANES = [{ id: "todo", label: "To do" }, { id: "verify", label: "To verify" }, { id: "all", label: "All" }];
+    var worklistLane = "all";
+    try {
+      var savedLane = window.localStorage && window.localStorage.getItem("cc-wlLane");
+      if(savedLane === "todo" || savedLane === "verify" || savedLane === "all") worklistLane = savedLane;
+    } catch(e) { /* no storage: the default stands */ }
+    function wlLane(it){
+      if(!it || typeof it !== "object") return "todo";
+      if(it.done) return "done";
+      if(it.fileDone === true || it.fileWait === true) return "verify";
+      return "todo";
+    }
+    function wlLaneOk(it){ return worklistLane === "all" || wlLane(it) === worklistLane; }
+    function wlLanePick(lane){
+      if(lane !== "todo" && lane !== "verify" && lane !== "all") return;
+      worklistLane = lane;
+      try { if(window.localStorage) window.localStorage.setItem("cc-wlLane", lane); } catch(e) { /* not remembered */ }
+      renderWorklist();
+    }
+    // Open items per lane on a tab (every list on MASTER): what the chips and Mark all count.
+    function wlLaneCounts(scope){
+      var n = { todo: 0, verify: 0, all: 0 };
       var count = function(list){
-        (Array.isArray(list) ? list : []).forEach(function(it){ if(it && !it.done && wlIsLiveRun(it)) n++; });
+        (Array.isArray(list) ? list : []).forEach(function(it){
+          if(!it || it.done) return;
+          n.all++;
+          if(wlLane(it) === "verify") n.verify++; else n.todo++;
+        });
       };
       if(scope === "master"){
         count(worklistData && worklistData.generic);
         ((worklistData && worklistData.projects) || []).forEach(function(p){ count(p.items); });
-      } else {
+      } else if(scope !== "archive"){
         count(wlScopeItems(scope));
       }
       return n;
+    }
+    // The chips: constant labels and numbers only, so nothing a session wrote reaches this HTML.
+    function wlRenderLanes(){
+      var row = document.getElementById("wl-lanerow"); if(!row) return;
+      if(worklistScope === "archive"){ row.style.display = "none"; row.innerHTML = ""; return; }
+      row.style.display = "";
+      var n = wlLaneCounts(worklistScope), html = "";
+      WL_LANES.forEach(function(l){
+        var id = l.id, cnt = n[id] | 0;
+        html += '<button class="wl-lane' + (worklistLane === id ? " on" : "") + '" data-lane="' + id + '"'
+          + ' onclick="wlLanePick(\'' + id + '\')">' + l.label + ' <span class="wl-lanen">' + cnt + '</span></button>';
+      });
+      row.innerHTML = html;
     }
     function wlSearchKey(e){
       if(e.key === "Escape"){
@@ -20091,7 +20155,7 @@ local HTML = [[
     function wlSearchCount(shown, total){
       var el = document.getElementById("wl-search-count"); if(!el) return;
       var box = document.getElementById("wl-search");
-      el.textContent = ((((box && box.value) || "").trim() || wlLiveApplies()) && total) ? (shown + " / " + total + " shown") : "";
+      el.textContent = ((((box && box.value) || "").trim()) && total) ? (shown + " / " + total + " shown") : "";
     }
     // Tick the item in the copy we already hold, so the list moves on the click itself
     // (2026-09-21). It used to sit there until Lua read the store, mutated it, wrote it and
@@ -20239,15 +20303,19 @@ local HTML = [[
       if(days <= 7) return "Next 7 days";
       return "Later";
     }
+    // What an empty lane says (2026-10-13): on a tab, or across every list on MASTER.
+    function wlLaneEmpty(isMaster){
+      if(worklistLane === "verify") return isMaster ? "Nothing to verify across your lists." : "Nothing to verify on this tab.";
+      if(worklistLane === "todo") return isMaster ? "Nothing left to do across your lists." : "Nothing left to do on this tab.";
+      return isMaster ? "Nothing open across your lists." : "No items — add one above.";
+    }
     function renderMaster(box){
-      var rows = wlMasterRows(), total = rows.length, toks = wlSearchToks();
-      // Filtered BEFORE the bucket-header loop below, so a header only appears where a
+      var rows = wlMasterRows();
+      // The lane filters BEFORE the bucket-header loop below, so a header only appears where a
       // row survived -- otherwise "Overdue" would sit alone over nothing.
-      rows = rows.filter(function(r){ return wlMatches(toks, r.it.text, r.it.details, r.it.due, r.label); });
-      if(wlLiveApplies()) rows = rows.filter(function(r){ return wlIsLiveRun(r.it); });
-      wlSearchCount(rows.length, total);
+      rows = rows.filter(function(r){ return wlLaneOk(r.it); });
       if(!rows.length){
-        box.innerHTML = '<div class="wl-empty">' + (total ? "Nothing matches the filter." : "Nothing open across your lists.") + '</div>';
+        box.innerHTML = '<div class="wl-empty">' + wlLaneEmpty(true) + '</div>';
         return;
       }
       var html = "", bucket = null;
@@ -20297,27 +20365,18 @@ local HTML = [[
       wlRenderRun(curProj);
       // Mark all: offered on every tab INCLUDING master, and only while there is something
       // left to mark -- a button that would do nothing shouldn't be there to be clicked.
-      // It also steps aside while the filter box is non-empty (2026-09-22): wlOpenCount
-      // counts the UNFILTERED list, so beside three visible rows the button would read
-      // "✓ Mark all 442 done" -- and do exactly that. A button that wouldn't do what the
-      // screen implies shouldn't be there either. ("Mark all N shown done" would need a
-      // new payload shape and a new core op; it's a TODO follow-up, not this.)
+      // 2026-10-13: it counts the LANE the tab shows (To do / To verify / All), and Lua marks
+      // that lane only, so the number on the button is what the click changes.
       var mb = document.getElementById("wl-markall");
       if(mb){
-        var openN = wlOpenCount(worklistScope);
-        mb.style.display = (openN && !wlSearchToks().length) ? "" : "none";
-        if(wlLiveApplies()) mb.style.display = "none";   // ...and while ▶ live run is on, for the same reason
+        var openN = wlLaneCounts(worklistScope)[worklistLane] | 0;
+        mb.style.display = (openN && worklistScope !== "archive") ? "" : "none";
         mb.textContent = "✓ Mark all " + openN + " done";
       }
-      // ▶ live run: offered where a line needs a live run, and while it's on (so it can be turned
-      // off from a tab with none); never on the Archive. The count is text, never HTML.
-      var lb = document.getElementById("wl-liveonly");
-      if(lb){
-        var liveN = wlLiveOpenCount(worklistScope);
-        lb.style.display = (worklistScope !== "archive" && (liveN || worklistLiveOnly)) ? "" : "none";
-        lb.classList.toggle("on", worklistLiveOnly);
-        lb.textContent = "▶ live run" + (liveN ? " " + liveN : "");
-      }
+      // The lane row, and the filter box -- the Archive's alone since 2026-10-13 (Adam's call).
+      wlRenderLanes();
+      var sr = document.getElementById("wl-searchrow");
+      if(sr) sr.style.display = (worklistScope === "archive") ? "" : "none";
       // The Archive is read-only too, and its rows come from their own file: ask for them
       // the first time it is opened, render what we have meanwhile (2026-09-21).
       if(worklistScope === "archive"){
@@ -20341,16 +20400,10 @@ local HTML = [[
       }
       var active = [], done = [];
       wlScopeItems(worklistScope).forEach(function(it){ (it.done ? done : active).push(it); });
-      // The filter covers ACTIVE items only. `done` is deliberately left alone: the
+      // The lane covers ACTIVE items only. `done` is deliberately left alone: the
       // drawer keeps its lazy build below, and #wl-donecount keeps reading the
-      // unfiltered done.length. A plain item carries no project label ("" below) --
-      // the tab it is on IS its project.
-      var toks = wlSearchToks(), activeTotal = active.length;
-      if(toks.length){
-        active = active.filter(function(it){ return wlMatches(toks, it.text, it.details, it.due, ""); });
-      }
-      if(wlLiveApplies()) active = active.filter(wlIsLiveRun);
-      wlSearchCount(active.length, activeTotal);
+      // unfiltered done.length.
+      active = active.filter(wlLaneOk);
       // Done is the record of what you just verified, so it reads newest-TICKED
       // first. doneTs is stamped by worklistToggle; items finished before stamps
       // existed (0) sink to the bottom, ordered by due date among themselves. A
@@ -20373,7 +20426,7 @@ local HTML = [[
       }
       document.getElementById("wl-active").innerHTML = active.length
         ? wlActiveRows(active, wlCurPlaybooks())
-        : '<div class="wl-empty">' + (activeTotal ? "Nothing matches the filter." : "No items — add one above.") + '</div>';
+        : '<div class="wl-empty">' + wlLaneEmpty(false) + '</div>';
       document.getElementById("wl-done").innerHTML = worklistDoneOpen
         ? done.map(function(it){ return wlItemRow(it, true); }).join("") : "";
       document.getElementById("wl-donecount").textContent = done.length ? "(" + done.length + ")" : "";
@@ -20460,33 +20513,21 @@ local HTML = [[
           }).join("")
         : '<div class="wl-empty">Nothing completed in the last 7 days.</div>';
     }
-    // How many items a Mark all would actually change, on the tab you're looking at.
-    // MASTER is a rollup of every project's open work, so there it counts all of them.
-    function wlOpenCount(scope){
-      var n = 0;
-      var count = function(list){
-        (Array.isArray(list) ? list : []).forEach(function(it){ if(it && !it.done) n++; });
-      };
-      if(scope === "master"){
-        count(worklistData && worklistData.generic);
-        ((worklistData && worklistData.projects) || []).forEach(function(p){ count(p.items); });
-      } else {
-        count(wlScopeItems(scope));
-      }
-      return n;
-    }
     // Ticking off a backlog one row at a time is the thing this was built to stop, but it is
     // still the only bulk action here that changes every row at once -- so it asks, with the
-    // count in the question, and on MASTER says out loud that it reaches every project.
-    // Lua does the work in one read and one write and answers with the real count.
+    // count and the lane in the question, and on MASTER says out loud that it reaches every
+    // project. Lua marks that lane only (payload text), in one read and one write, and answers
+    // with the real count. The count is wlLaneCounts' -- what the lane shows (2026-10-13).
     function worklistMarkAll(){
-      var n = wlOpenCount(worklistScope);
+      var n = wlLaneCounts(worklistScope)[worklistLane] | 0;
       if(!n) return;
+      var items = n + (worklistLane === "all" ? " open item" : " item") + (n === 1 ? "" : "s")
+        + ((worklistLane === "verify") ? " to verify" : (worklistLane === "todo") ? " to do" : "");
       var where = (worklistScope === "master")
-        ? "Mark all " + n + " open item" + (n === 1 ? "" : "s") + " done, across every project?"
-        : "Mark all " + n + " open item" + (n === 1 ? "" : "s") + " on this tab done?";
+        ? "Mark all " + items + " done, across every project?"
+        : "Mark all " + items + " on this tab done?";
       if(!confirm(where)) return;
-      send("worklist-mark-all", worklistScope);
+      send("worklist-mark-all", worklistScope, worklistLane);
     }
     window.wlMarkedAll = function(n){
       var el = document.getElementById("wl-todoflash"); if(!el) return;
