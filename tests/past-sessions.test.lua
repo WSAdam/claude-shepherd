@@ -351,9 +351,9 @@ do
   local ok, res = core.pastRestoreResult(code, out)
   check("the restore lands (" .. tostring(res) .. ")", ok == true)
   eq("...byte for byte", readAll(to), readAll(from))
-  local mtime = tonumber((sh("stat -f %m " .. q(to) .. " 2>/dev/null || stat -c %Y " .. q(to)):gsub("%s+$", "")))
+  local mtime = tonumber((sh("stat -c %Y " .. q(to) .. " 2>/dev/null || stat -f %m " .. q(to)):gsub("%s+$", "")))
   check("...with a fresh mtime, so cleanupPeriodDays doesn't take it again at once", mtime and mtime > os.time() - 600)
-  eq("...private, like Claude Code's own", (sh("stat -f %Lp " .. q(to) .. " 2>/dev/null || stat -c %a " .. q(to)):gsub("%s+$", "")), "600")
+  eq("...private, like Claude Code's own", (sh("stat -c %a " .. q(to) .. " 2>/dev/null || stat -f %Lp " .. q(to)):gsub("%s+$", "")), "600")
   check("...and no part file is left behind", sh("ls " .. q(PROJ .. "/-r-A")):gsub("%s+$", "") == SID .. ".jsonl")
   -- never over an existing transcript
   writeFile(to, user("a newer session wrote here"))

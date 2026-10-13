@@ -21,6 +21,15 @@ bsd_only="$(grep -n 'stat -f' "$ROOT"/tests/*.lua "$ROOT"/tests/*.js "$ROOT"/tes
   | awk -F: '{ line = $0; sub(/^[^:]*:[0-9]+:/, "", line); if (line !~ /^[[:space:]]*(#|--|\/\/)/) print $1 ":" $2 }' \
   | sed "s|^$ROOT/||" | tr '\n' ' ')"
 assert_eq "no test calls BSD stat -f without a GNU stat -c fallback on the same line" "" "$bsd_only"
+# 2026-10-13: tests/past-sessions.test.lua had both, BSD first (`stat -f %Lp f || stat -c %a f`), so on
+# ubuntu the GNU fallback never ran and a restored transcript's mode and mtime read as file-system
+# status (2 CI failures). The GNU one comes first on the line.
+bsd_first="$(grep -n 'stat -f' "$ROOT"/tests/*.lua "$ROOT"/tests/*.js "$ROOT"/tests/*.sh "$ROOT"/tests/support/* 2>/dev/null \
+  | grep -v '/portability\.test\.sh:' \
+  | awk -F: '{ line = $0; sub(/^[^:]*:[0-9]+:/, "", line); if (line ~ /^[[:space:]]*(#|--|\/\/)/) next;
+               f = index(line, "stat -f"); c = index(line, "stat -c"); if (c == 0 || f < c) print $1 ":" $2 }' \
+  | sed "s|^$ROOT/||" | tr '\n' ' ')"
+assert_eq "every test asks GNU stat -c before BSD stat -f" "" "$bsd_first"
 
 # ---- the shell a shipped script is run with ------------------------------------------------
 not_bash=""

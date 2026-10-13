@@ -22,13 +22,20 @@ printf '{"stopGuards":{"question":true}}' > "$ON"
 export CC_CONFIG_FILE="$ON"
 alive() { date +%s > "$CC_STATUS_DIR/.panel-alive"; }   # Shepherd's panel heartbeat, fresh
 alive
+# 2026-10-13: the guards stand down once the heartbeat is 30s old (CC_GUARD_PANEL_MAX_AGE), and this
+# file wrote it twice, so on ubuntu CI every guard after the 30th second stood down (6 failures).
+# A short window makes that show on any machine. The real panel writes its heartbeat every second, so
+# every hook call here gets a fresh one (hook), except while a test pins its own (HB_PINNED).
+export CC_GUARD_PANEL_MAX_AGE=5
+HB_PINNED=""
+hook() { [ -n "$HB_PINNED" ] || alive; bash "$CC" "$@"; }
 
 CC="$ROOT/cc-status.sh"
 CWD="/Users/x/Programming/guard-proj"
 FXT="$ROOT/tests/fixtures/transcripts"
 REASON_TEXT="[shepherd] You ended by asking Adam in prose. Ask it with the AskUserQuestion tool so it reaches his Shepherd card."
 # stdout is what Claude Code reads from the hook; stderr is our log
-evout() { printf '%s' "$2" | CLAUDE_CODE_ENTRYPOINT=claude-vscode bash "$CC" "$1" 2>/dev/null; }
+evout() { printf '%s' "$2" | CLAUDE_CODE_ENTRYPOINT=claude-vscode hook "$1" 2>/dev/null; }
 # stop_json <sid> <last_assistant_message|-> [stop_hook_active] [permission_mode] [transcript]
 # ("-" leaves last_assistant_message out, as an older Claude Code does)
 stop_json() {
@@ -137,12 +144,14 @@ got="$(evout stop "$(stop_json s7 "Want me to push?")")"
 assert_eq "...but a hold that ran out doesn't count" "block" "$(decision "$got")"
 # remote: a machine where Shepherd's panel doesn't run (an SSH-bridged host has no heartbeat), so
 # AskUserQuestion would reach no card there
+HB_PINNED=1
 rm -f "$CC_STATUS_DIR/.panel-alive"
 got="$(evout stop "$(stop_json s8 "Want me to push?")")"
 assert_eq "never where Shepherd isn't running (a remote host: no panel heartbeat)" "" "$got"
 echo $(( $(date +%s) - 300 )) > "$CC_STATUS_DIR/.panel-alive"
 got="$(evout stop "$(stop_json s9 "Want me to push?")")"
 assert_eq "...or its heartbeat is stale" "" "$got"
+HB_PINNED=""
 alive
 
 # ---- the text: last_assistant_message, else the transcript ----
@@ -187,11 +196,11 @@ assert_eq "the notes request and the question join, notes first" "ordered" "$r"
 LED="$TMP/ledger"
 printf '{"ledger":{"enabled":true},"stopGuards":{"question":true}}' > "$TMP/ledger-on.json"
 printf '%s' "$(stop_json l1 "Tests are green. Should I commit this? It stays local.")" \
-  | CC_CONFIG_FILE="$TMP/ledger-on.json" CC_LEDGER_DIR="$LED" bash "$CC" stop >/dev/null 2>&1
+  | CC_CONFIG_FILE="$TMP/ledger-on.json" CC_LEDGER_DIR="$LED" hook stop >/dev/null 2>&1
 got="$(cat "$LED"/*.jsonl 2>/dev/null | jq -r 'select(.type == "stop_guard") | "\(.key) \(.guard) \(.detail)"')"
 assert_eq "the ledger records stop_guard: key, which guard, and what it caught (the question)" "l1 question Should I commit this?" "$got"
 printf '%s' "$(stop_json l1 "Tests are green. Should I commit this? It stays local." true)" \
-  | CC_CONFIG_FILE="$TMP/ledger-on.json" CC_LEDGER_DIR="$LED" bash "$CC" stop >/dev/null 2>&1
+  | CC_CONFIG_FILE="$TMP/ledger-on.json" CC_LEDGER_DIR="$LED" hook stop >/dev/null 2>&1
 assert_eq "...one per block (a stop that isn't blocked records nothing)" "1" \
   "$(cat "$LED"/*.jsonl 2>/dev/null | jq -r 'select(.type == "stop_guard")' | jq -s length)"
 
@@ -374,7 +383,7 @@ assert_eq "...nor a folder that isn't a git checkout" "" "$got"
 LED2="$TMP/ledger2"
 printf '{"ledger":{"enabled":true},"stopGuards":{"unfinished":true}}' > "$TMP/ledger-unfinished.json"
 printf '%s' "$(ustop l2 "$WT" "$DONE_MSG")" \
-  | CC_CONFIG_FILE="$TMP/ledger-unfinished.json" CC_LEDGER_DIR="$LED2" bash "$CC" stop >/dev/null 2>&1
+  | CC_CONFIG_FILE="$TMP/ledger-unfinished.json" CC_LEDGER_DIR="$LED2" hook stop >/dev/null 2>&1
 assert_eq "the ledger records the reminder as stop_guard, guard unfinished" "l2 unfinished" \
   "$(cat "$LED2"/*.jsonl 2>/dev/null | jq -r 'select(.type == "stop_guard") | "\(.key) \(.guard)"')"
 assert_eq "...its once-marker holds the head sha" "$(git -C "$WT" rev-parse HEAD)" "$(cat "$CC_GUARD_DIR/l2.unfinished" 2>/dev/null)"
@@ -567,7 +576,7 @@ assert_eq "...and once it has spoken for this commit, the reminder comes next" "
 LED3="$TMP/ledger3"
 printf '{"ledger":{"enabled":true},"stopGuards":{"fakeDone":true}}' > "$TMP/ledger-fakedone.json"
 printf '%s' "$(ustop l3 "$W5" "$DONE_MSG")" \
-  | CC_CONFIG_FILE="$TMP/ledger-fakedone.json" CC_LEDGER_DIR="$LED3" bash "$CC" stop >/dev/null 2>&1
+  | CC_CONFIG_FILE="$TMP/ledger-fakedone.json" CC_LEDGER_DIR="$LED3" hook stop >/dev/null 2>&1
 assert_eq "the ledger records the send-back as stop_guard, guard fakeDone, with how many flags and the first" \
   "l3 fakeDone 11 red flags: new skip/only in tests/t01.test.js: it.only(\"case 01\", fn);" \
   "$(cat "$LED3"/*.jsonl 2>/dev/null | jq -r 'select(.type == "stop_guard") | "\(.key) \(.guard) \(.detail)"')"
@@ -665,7 +674,7 @@ printf '#!/bin/sh\necho "$*" >> "%s"\n' "$POP" > "$TMP/fake-open"; chmod +x "$TM
 PON="$TMP/pop-on.json"
 printf '{"stopGuards":{"question":true},"focus":{"popOnComplete":true}}' > "$PON"
 popstop() { printf '%s' "$1" | CC_CONFIG_FILE="$PON" CC_POPUP_OPEN="$TMP/fake-open" CLAUDE_CODE_ENTRYPOINT=claude-vscode \
-  CLAUDE_PROJECT_DIR="$CWD" bash "$CC" stop 2>/dev/null; }
+  CLAUDE_PROJECT_DIR="$CWD" hook stop 2>/dev/null; }
 pops() { n=0; while [ "$n" -lt 30 ] && [ "$(grep -c . "$POP")" -lt "$1" ]; do sleep 0.1; n=$((n + 1)); done; grep -c . "$POP"; }
 prompt pp1
 got="$(popstop "$(stop_json pp1 "All green. Want me to push?")")"

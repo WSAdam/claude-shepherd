@@ -307,7 +307,7 @@ check("...and says why", #alerts > 0)
 -- hard link from the kept copy would let the resumed session append straight into the copy, and the
 -- keeper's "grown" re-copy (cp -c <original> <kept>) would then copy a file onto itself. The restore
 -- clones into a part file and links THAT, so the two stay separate and the keeper stays quiet.
-local function inode(p) return (sh("stat -f %i " .. q(p) .. " 2>/dev/null || stat -c %i " .. q(p)):gsub("%s+$", "")) end
+local function inode(p) return (sh("stat -c %i " .. q(p) .. " 2>/dev/null || stat -f %i " .. q(p)):gsub("%s+$", "")) end
 local function keepTasks()
   local out = {}
   for _, t in ipairs(TASKS) do if t.bin == "/bin/sh" and t.args[6] == KEEP then out[#out + 1] = t end end
