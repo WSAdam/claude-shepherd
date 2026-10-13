@@ -1018,14 +1018,61 @@ function M.unnamedTabsVerdict(reg, selectedN, unnamedN, now)
   return true
 end
 
+-- 2026-10-13 (Adam's call, widening the 2026-09-25 rule): an unnamed session's tab can show a name
+-- nothing it recorded gives -- a session-link reopen whose transcript was gone opens a new empty chat under
+-- the old chat's title -- so the window's "Claude Code" count falls short and nothing closed. When the
+-- window's Claude tabs number exactly its live sessions with a tab (no restored old chat can be among
+-- them), every tab no named session claims belongs to an unnamed one. ok + ccN (the unclaimed "Claude
+-- Code" tabs) + others (the other unclaimed names, each on exactly one tab in the window), or false.
+-- `claims` = for each named session with no tagged tab, the names its tab could show (first = strict).
+-- `liveN` = the window's live sessions that have a tab. Pure.
+function M.unclaimedTabs(reg, selectedN, unnamedN, claims, liveN, now)
+  if type(reg) ~= "table" or type(reg.tabs) ~= "table" then return false end
+  if (tonumber(now) or 0) - (tonumber(reg.at) or 0) > M.TAB_BRIDGE_FRESH then return false end
+  if unnamedN > selectedN or selectedN < 1 then return false end
+  if #reg.tabs ~= liveN then return false end
+  local left = {}                                   -- untagged tabs, label -> how many unclaimed
+  local count = {}                                  -- every tab, label -> how many
+  for _, t in ipairs(reg.tabs) do
+    if type(t) == "table" and type(t.label) == "string" then
+      count[t.label] = (count[t.label] or 0) + 1
+      if not t.unit then left[t.label] = (left[t.label] or 0) + 1 end
+    end
+  end
+  for _, names in ipairs(claims or {}) do        -- each named session takes one tab under one of its names
+    local took = false
+    for _, n in ipairs(type(names) == "table" and names or {}) do
+      if n ~= M.EMPTY_TAB_LABEL and (left[n] or 0) > 0 then left[n] = left[n] - 1; took = true; break end
+    end
+    if not took then return false end               -- a named session's tab isn't found: can't tell
+  end
+  local ccN, others, total = left[M.EMPTY_TAB_LABEL] or 0, {}, left[M.EMPTY_TAB_LABEL] or 0
+  local keys = {}
+  for l, n in pairs(left) do
+    if l ~= M.EMPTY_TAB_LABEL and n > 0 then
+      if count[l] ~= 1 then return false end        -- never close by a name two tabs share
+      keys[#keys + 1] = l; total = total + n
+    end
+  end
+  table.sort(keys)
+  for _, l in ipairs(keys) do others[#others + 1] = l end
+  if total ~= selectedN then return false end
+  if ccN > 1 and not versionAtLeast(reg.version, "0.4.0") then return false end
+  if ccN > 20 and not versionAtLeast(reg.version, "0.6.0") then return false end
+  return true, ccN, others
+end
+
 -- Close selected: how each selected session's tab goes. `members` is every live session (so a
 -- window's unselected unnamed ones are seen too), `regs` hw -> bridge registry, `tags` key -> unit
 -- tag, `labels` key -> the tab's strict name ("" = none), `selected` key -> true (already vetted by
 -- cleanupVerdict). byTab: close by tag or name (core.tabCloseVerdict); byCount: { hw, n, keys } for
--- a window's unnamed tabs; refused: { key, why }.
-function M.cleanupPlan(members, regs, tags, labels, selected, now)
-  regs, tags, labels, selected = regs or {}, tags or {}, labels or {}, selected or {}
-  local plan = { byTab = {}, byCount = {}, refused = {} }
+-- a window's unnamed tabs; byLabel: { hw, label } for an unnamed session's tab under a name it never
+-- recorded (core.unclaimedTabs, 2026-10-13); refused: { key, why }. `names` (optional) = key -> every
+-- name a session's tab could show (core.claudeTabCandidates), so a named tab under another of its
+-- names is still claimed.
+function M.cleanupPlan(members, regs, tags, labels, selected, now, names)
+  regs, tags, labels, selected, names = regs or {}, tags or {}, labels or {}, selected or {}, names or {}
+  local plan = { byTab = {}, byCount = {}, byLabel = {}, refused = {} }
   local function hwOf(it) return tostring(it.host_window or "") end
   local function unnamed(it)
     if it.remote or (it.editor ~= "vscode" and it.editor ~= "cursor") or hwOf(it) == "" then return false end
@@ -1061,7 +1108,38 @@ function M.cleanupPlan(members, regs, tags, labels, selected, now)
     if ok then
       plan.byCount[#plan.byCount + 1] = { hw = hw, n = #keys, keys = keys }
     else
-      for _, k in ipairs(keys) do plan.refused[#plan.refused + 1] = { key = k, why = why } end
+      -- 2026-10-13: the counts may differ only because an unnamed tab shows a leftover name
+      local claims, liveN = {}, 0
+      for _, it in ipairs(members or {}) do
+        if type(it) == "table" and hwOf(it) == hw and not it.remote and not it.tabless
+           and (it.editor == "vscode" or it.editor == "cursor") then
+          liveN = liveN + 1
+          if not unnamed(it) then
+            local tagged = false
+            local tag, reg = tags[it.key], regs[hw]
+            if tag and type(reg) == "table" and type(reg.tabs) == "table" then
+              for _, t in ipairs(reg.tabs) do if type(t) == "table" and t.unit == tag then tagged = true end end
+            end
+            if not tagged then
+              local ns = {}
+              if type(labels[it.key]) == "string" and labels[it.key] ~= "" then ns[1] = labels[it.key] end
+              for _, n in ipairs(type(names[it.key]) == "table" and names[it.key] or {}) do
+                if n ~= ns[1] then ns[#ns + 1] = n end
+              end
+              claims[#claims + 1] = ns
+            end
+          end
+        end
+      end
+      local wok, ccN, others = M.unclaimedTabs(regs[hw], #keys, unnamedIn[hw] or 0, claims, liveN, now)
+      if wok then
+        -- the cards clear on the count's answer only when it closes them all; otherwise each
+        -- session's own SessionEnd clears its card
+        if ccN > 0 then plan.byCount[#plan.byCount + 1] = { hw = hw, n = ccN, keys = keys, clearCards = (#others == 0) } end
+        for _, l in ipairs(others) do plan.byLabel[#plan.byLabel + 1] = { hw = hw, label = l, keys = keys } end
+      else
+        for _, k in ipairs(keys) do plan.refused[#plan.refused + 1] = { key = k, why = why } end
+      end
     end
   end
   return plan

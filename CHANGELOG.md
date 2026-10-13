@@ -32,6 +32,13 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
 
 ## Unreleased — fixes after mining round 2
 
+- Fixed (2026-10-13): **Close selected** closed nothing when Adam picked the two never-used sessions
+  in Shepherd's own window. One of their tabs read "Report merged unit to dr…", an old chat's title
+  left by a session-link reopen, not "Claude Code", so the window's count (1) didn't match
+  Shepherd's (2). Adam's call widens the rule (`core.unclaimedTabs`): when a window's Claude tabs
+  equal its live sessions with a tab, and every unnamed session is selected, the tabs no named
+  session claims close. "Claude Code" ones close by count, any other by its own single-match name.
+
 - Fixed (2026-10-13): the 🔒 lock read "3 working" over four busy cards. A session whose turn had
   ended with background work still going (its card "Running 1 job") wasn't counted and drew no
   ring, though the cards rank it as running. `core.lockState` now counts `bg_active` as working.

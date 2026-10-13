@@ -16052,5 +16052,82 @@ do
   check("card: under an hour reads <1h  (" .. tostring(whyFresh) .. ")", type(whyFresh) == "string" and whyFresh:find("<1h", 1, true) ~= nil)
 end
 
+-- ---- Close selected: an unnamed session whose tab shows a leftover name (2026-10-13) ----
+-- 2026-10-13: Adam selected the two never-used sessions in Shepherd's own window and Close selected
+-- closed nothing: "that window shows 1 unnamed "Claude Code" tab(s) but Shepherd has 2". Cause: one
+-- session's tab read "Report merged unit to dr…" -- a session-link reopen whose transcript was gone opened a
+-- new empty chat under the old chat's title -- a name nothing the session recorded can give. Adam's call
+-- (widening the 2026-09-25 rule): when the window's Claude tabs number exactly its live sessions (so no
+-- restored old chat is among them) and every unnamed session is selected, the tabs no named session
+-- claims are theirs: "Claude Code" ones close by count, any other by its own single-match name.
+do
+  local now = 1791900000
+  local function reg(labels, ver, at)
+    local t = {}
+    for _, x in ipairs(labels) do t[#t + 1] = type(x) == "table" and x or { label = x } end
+    return { v = 1, version = ver or "0.6.0", tabs = t, at = at or now }
+  end
+  local HW = "1076"
+  local function window()
+    return {
+      { key = "01c16fae", status = "idle", editor = "vscode", host_window = HW },
+      { key = "913fcf84", status = "idle", editor = "vscode", host_window = HW },
+      { key = "8b7cdfbd", status = "working", editor = "vscode", host_window = HW },
+    }, { ["01c16fae"] = "", ["913fcf84"] = "", ["8b7cdfbd"] = "Competitive analysis and…" }
+  end
+  local TABS = { "Competitive analysis and…", "Claude Code", "Report merged unit to dr…" }
+  local members, labels = window()
+  local sel = { ["01c16fae"] = true, ["913fcf84"] = true }
+  local p = core.cleanupPlan(members, { [HW] = reg(TABS) }, {}, labels, sel, now)
+  check("leftover name: both never-used sessions close  (refused=" .. #p.refused .. " "
+        .. tostring(p.refused[1] and p.refused[1].why) .. ")", #p.refused == 0)
+  check("...the \"Claude Code\" tab by count", #p.byCount == 1 and p.byCount[1].hw == HW and p.byCount[1].n == 1)
+  check("...the leftover-named tab by its own name",
+        type(p.byLabel) == "table" and #p.byLabel == 1 and p.byLabel[1].hw == HW
+        and p.byLabel[1].label == "Report merged unit to dr…")
+  check("...and the named session's own tab is left alone",
+        #p.byTab == 0 and not (p.byLabel and p.byLabel[2]))
+
+  -- a restored old chat (a tab with no live session) breaks the equality: nothing closes
+  p = core.cleanupPlan(members, { [HW] = reg({ "Competitive analysis and…", "Claude Code",
+    "Report merged unit to dr…", "An old restored chat" }) }, {}, labels, sel, now)
+  check("leftover name: one more tab than live sessions -> nothing closes  (" .. tostring(p.refused[1] and p.refused[1].why) .. ")",
+        #p.refused == 2 and #p.byCount == 0 and #(p.byLabel or {}) == 0)
+  -- not every unnamed session selected: nothing closes
+  p = core.cleanupPlan(members, { [HW] = reg(TABS) }, {}, labels, { ["01c16fae"] = true }, now)
+  check("leftover name: one unnamed session left unselected -> nothing closes",
+        #p.refused == 1 and #p.byCount == 0 and #(p.byLabel or {}) == 0)
+  -- the leftover name isn't unique in the window: never close by a name two tabs share
+  members[#members + 1] = { key = "dup", status = "working", editor = "vscode", host_window = HW }
+  labels.dup = "Report merged unit to dr…"
+  p = core.cleanupPlan(members, { [HW] = reg({ "Competitive analysis and…", "Claude Code",
+    "Report merged unit to dr…", "Report merged unit to dr…" }) }, {}, labels, sel, now)
+  check("leftover name: a name two tabs share is never closed by",
+        #(p.byLabel or {}) == 0 and #p.refused == 2)
+  -- a named session whose tab shows another of its names: the counts no longer fit, nothing closes
+  members, labels = window()
+  p = core.cleanupPlan(members, { [HW] = reg({ "Some first prompt…", "Claude Code", "Report merged unit to dr…" }) },
+    {}, labels, sel, now)
+  check("leftover name: a named session's tab under another name -> nothing closes",
+        #p.refused == 2 and #(p.byLabel or {}) == 0)
+  -- ...unless its other names are known: they claim it, and the two unnamed tabs close
+  p = core.cleanupPlan(members, { [HW] = reg({ "Some first prompt…", "Claude Code", "Report merged unit to dr…" }) },
+    {}, labels, sel, now, { ["8b7cdfbd"] = { "Competitive analysis and…", "Some first prompt…" } })
+  check("leftover name: a named session's other known names claim its tab",
+        #p.refused == 0 and #(p.byLabel or {}) == 1 and p.byLabel[1].label == "Report merged unit to dr…")
+  -- a tab-less session has no tab: it never counts toward the window's live sessions
+  members, labels = window()
+  members[#members + 1] = { key = "gone", status = "idle", editor = "vscode", host_window = HW, tabless = true }
+  labels.gone = "Old work"
+  p = core.cleanupPlan(members, { [HW] = reg(TABS) }, {}, labels, sel, now)
+  check("leftover name: a tab-less session doesn't count as a tab's owner", #p.refused == 0 and #(p.byLabel or {}) == 1)
+  -- the old rule still decides when it can: every unnamed tab reads "Claude Code"
+  members, labels = window()
+  p = core.cleanupPlan(members, { [HW] = reg({ "Competitive analysis and…", "Claude Code", "Claude Code" }) },
+    {}, labels, sel, now)
+  check("leftover name: two \"Claude Code\" tabs still close by count, as before",
+        #p.refused == 0 and #p.byCount == 1 and p.byCount[1].n == 2 and #(p.byLabel or {}) == 0)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

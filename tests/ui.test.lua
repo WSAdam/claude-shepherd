@@ -3751,8 +3751,9 @@ do
   local body = src:match("function FX%.closeSessions%(text%)(.-)\nend\n") or ""
   check("close selected: Lua re-vets every key with core.cleanupVerdict",
         body:find("core.cleanupVerdict(byK[k], now, idle)", 1, true) ~= nil)
+  -- 2026-10-13: the call also passes each session's possible tab names (a leftover-named tab, Adam's call)
   check("close selected: ...plans the closes in core (tag, name, or a window's unnamed tabs by count)",
-        body:find("core.cleanupPlan(all, regs, tags, labels, selected, now)", 1, true) ~= nil)
+        body:find("core.cleanupPlan(all, regs, tags, labels, selected, now, names)", 1, true) ~= nil)
   check("close selected: ...and never presses a key or focuses a window",
         body ~= "" and not body:find("keyStroke", 1, true) and not body:find("dispatchSerialized", 1, true)
         and not body:find("closeWindow", 1, true))
@@ -5539,6 +5540,26 @@ do
   check("review: the 📋 button carries the badge", src:find('📋 My List<span id="mylist-badge"></span>', 1, true) ~= nil)
   check("review: a double-click asks tileReviewKey before it jumps",
         src:find("var rk = tileReviewKey(findItem(key));\n      if(rk){ wlOpenReview(rk); return; }", 1, true) ~= nil)
+end
+
+-- ---- Close selected: an unnamed session's tab under a leftover name (2026-10-13) ----
+-- core.cleanupPlan's byLabel (core.unclaimedTabs) is pinned in core.test.lua; these pin the wiring.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local body = src:match("function FX%.closeSessions%(text%)(.-)\nend\n") or ""
+  check("close selected: every session's possible tab names reach the plan",
+        body:find("names[it.key] = FX.cachedTabCandidates(it)", 1, true) ~= nil
+        and body:find("core.cleanupPlan(all, regs, tags, labels, selected, now, names)", 1, true) ~= nil)
+  check("close selected: a leftover-named tab closes by that name, through the bridge's close op",
+        body:find('core.tabBridgeCommand(c.keys[1] or "unnamed", c.label, FX.now(), "close")', 1, true) ~= nil
+        and body:find('op = "close-unclaimed"', 1, true) ~= nil)
+  check("close selected: the count close clears the cards only when it closes them all",
+        body:find("keys = (c.clearCards ~= false) and c.keys or nil", 1, true) ~= nil)
+  local poll = src:match("function FX%.tabBridgePollResults%(%)(.-)\nend\n") or ""
+  check("close selected: the bridge's answer to a leftover-named close is logged, never a card removal",
+        poll:find('p.op == "close-unclaimed" and ok', 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

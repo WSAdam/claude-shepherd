@@ -5330,6 +5330,9 @@ function FX.tabBridgePollResults()
         print("[cc-dashboard] ✅ the Shepherd tab bridge closed an empty chat (host " .. p.hw .. ")")
         -- ...but the last of a Close selected countdown means every one of them has gone (2026-09-25)
         if type(p.keys) == "table" then for _, k in ipairs(p.keys) do FX.removeStatus(k) end end
+      elseif p.op == "close-unclaimed" and ok and type(res) == "table" and res.ok == true then
+        -- 2026-10-13: an unnamed session's tab under a leftover name; its own SessionEnd clears its card
+        print("[cc-dashboard] ✅ the Shepherd tab bridge closed an unnamed session's tab \"" .. tostring(p.label) .. "\" (host " .. p.hw .. ")")
       elseif p.op == "select" then   -- bringing a tab forward: logged, never alerted
         print("[cc-dashboard] " .. ((ok and type(res) == "table" and res.ok == true) and "✅ brought forward" or "⚠️ couldn't bring forward")
           .. " '" .. p.name .. "'s tab \"" .. p.label .. "\"" .. ((ok and type(res) == "table" and res.reason) and (": " .. tostring(res.reason)) or ""))
@@ -6256,26 +6259,41 @@ function FX.closeSessions(text)
     if ok then selected[k] = true; hws[tostring(byK[k].host_window)] = true
     else refused[#refused + 1] = { key = k, why = why } end
   end
-  local regs, tags, labels = {}, {}, {}
+  local regs, tags, labels, names = {}, {}, {}, {}
   for hw in pairs(hws) do regs[hw] = FX.tabBridgeRegistry(hw) end
   for _, it in ipairs(all) do
     if hws[tostring(it.host_window or "")] then
       tags[it.key] = FX.fleetUnitTagOf(it)
       labels[it.key] = FX.sessionTabLabel(it) or ""
+      names[it.key] = FX.cachedTabCandidates(it)   -- 2026-10-13: a named tab under another of its names
     end
   end
-  local plan = core.cleanupPlan(all, regs, tags, labels, selected, now)
+  local plan = core.cleanupPlan(all, regs, tags, labels, selected, now, names)
   local sent = 0
   for _, e in ipairs(plan.byTab) do
     local ok, why = FX.closeTab(byK[e.key], { quiet = true })
     if ok then sent = sent + 1 else refused[#refused + 1] = { key = e.key, why = why } end
   end
   for _, c in ipairs(plan.byCount) do
-    if FX.sendEmptyCountdown(c.hw, c.n, c.n, { key = c.keys[1], keys = c.keys, name = c.n .. " unnamed Claude tab(s)" }) then
+    local pend = { key = c.keys[1], keys = (c.clearCards ~= false) and c.keys or nil, name = c.n .. " unnamed Claude tab(s)" }
+    if FX.sendEmptyCountdown(c.hw, c.n, c.n, pend) then
       sent = sent + c.n
       print("[cc-dashboard] 🧹 asked the Shepherd tab bridge (host " .. c.hw .. ") to close " .. c.n .. " unnamed tab(s)")
     else
       for _, k in ipairs(c.keys) do refused[#refused + 1] = { key = k, why = "couldn't reach the Shepherd tab bridge in that window" } end
+    end
+  end
+  -- 2026-10-13: an unnamed session's tab under a leftover name, closed by that (single-match) name.
+  -- Which session it was isn't known, so its own SessionEnd clears its card.
+  for _, c in ipairs(plan.byLabel or {}) do
+    local cmd = core.tabBridgeCommand(c.keys[1] or "unnamed", c.label, FX.now(), "close")
+    if FX.writeFileAtomic(FX.TAB_BRIDGE_DIR .. "/" .. c.hw .. ".in/" .. cmd.id .. ".json", core.json.encode(cmd)) then
+      FX.tabBridgeTrack(cmd.id, { op = "close-unclaimed", hw = c.hw, label = c.label,
+        name = "an unnamed session", at = FX.now() })
+      sent = sent + 1
+      print("[cc-dashboard] 🧹 asked the Shepherd tab bridge (host " .. c.hw .. ") to close the unnamed session's tab \"" .. c.label .. "\"")
+    else
+      refused[#refused + 1] = { key = c.keys[1] or "?", why = "couldn't reach the Shepherd tab bridge in that window" }
     end
   end
   for _, r in ipairs(plan.refused) do refused[#refused + 1] = r end

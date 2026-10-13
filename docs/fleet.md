@@ -167,7 +167,10 @@ those finished longer than **Settings → Tile cleanup** allows (`cleanup.idleHo
 ones to keep. **Close selected** asks first, then closes those tabs through the tab bridge.
 Shepherd re-checks every one, so a session that is working, holding a question, mid-merge or
 driving a batch is never closed. Unnamed "Claude Code" tabs (a batch unit's) look identical, so they
-close only when **every** unnamed tab in that window is selected. A card with two or more finished
+close only when **every** unnamed tab in that window is selected. An unnamed session's tab can also
+show a name it never recorded, such as an old chat's title left behind by a reopen. Those close too,
+by that name, but only when the window's Claude tabs equal its live sessions, so no restored old chat
+can be among them. A card with two or more finished
 sessions shows **🧹 N finished**, which opens Instances with them already checked. Nothing closes
 on its own.
 

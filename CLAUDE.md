@@ -70,7 +70,10 @@ and the README's "Testing & development" section.
   only while that count equals Shepherd's empty sessions there (`core.emptyChatsVerdict`) -- a
   restored old chat reads "Claude Code" too but has no session. Widened 2026-09-25 (Adam's call)
   for Instances' Close selected: unnamed sessions close by that same count only when EVERY unnamed
-  session in the window is selected (`core.unnamedTabsVerdict`, cap 99 from bridge 0.6.0). Nothing
+  session in the window is selected (`core.unnamedTabsVerdict`, cap 99 from bridge 0.6.0). Widened
+  again 2026-10-13 (Adam's call): an unnamed session's tab can show a leftover name, so when a window's
+  Claude tabs equal its live sessions with a tab (no restored old chat), the tabs no named session
+  claims close too -- "Claude Code" by count, any other by its own single-match name (`core.unclaimedTabs`). Nothing
   closes a finished session on its own: Close selected suggests, Adam confirms. Never add another op, and never use the
   Claude URI to reveal a tab (D-14). The one exception (2026-09-30) is restart in place: `?session=`
   may reopen a session that is VERIFIED DEAD, written only by `core.restartTabUri` and sent only by
