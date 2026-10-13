@@ -3309,6 +3309,21 @@ function FX.readWorklist()
   FX._wlCache = nil
   return st
 end
+-- The cached store ITSELF, read-only (2026-10-13): the My List review heads-up reads it every tick,
+-- where FX.readWorklist's deep copy would cost ~1.7ms a second on Adam's store. One stat when the
+-- file hasn't changed; a decode (through FX.readWorklist) when it has. nil with no file. NEVER hand
+-- the result to a core.worklist* function that mutates -- take FX.readWorklist() for that.
+function FX.worklistCached()
+  local WORKLIST_FILE = os.getenv("CC_WORKLIST_FILE") or (os.getenv("HOME") .. "/.claude/cc-worklist.json")
+  local a = hs.fs.attributes(WORKLIST_FILE)
+  if not (a and a.modification and a.size) then return nil end
+  local c = FX._wlCache
+  if not (c and c.path == WORKLIST_FILE and c.mtime == a.modification and c.size == a.size) then
+    FX.readWorklist()
+    c = FX._wlCache
+  end
+  return c and c.state or nil
+end
 function FX.writeWorklist(state)
   local WORKLIST_FILE = os.getenv("CC_WORKLIST_FILE") or (os.getenv("HOME") .. "/.claude/cc-worklist.json")
   -- Create the dir of the file we actually write (CC_WORKLIST_FILE may point
@@ -6031,6 +6046,89 @@ function FX.stepFleetIdle(list, cfg)
   end
   for k in pairs(FX._voiceNeeds) do if not seen[k] then FX._voiceNeeds[k] = nil end end
   if #say > 0 then FX.speak(table.concat(say, " ")) end
+end
+
+-- ---- My List review heads-up (2026-10-13) ----------------------------------------------------
+-- My List grew to 262 open items before Adam looked at it. A project tab past the review line (30
+-- items to verify, or one waiting 24h: core.worklistReviewOver) stamps it.wlReview on its local cards
+-- (core.worklistReviewTargets), which core.needsYouKind reads as a Heads-up; the 📋 My List button
+-- counts what's waiting; one banner fires per crossing (core.worklistReviewAlerts, persisted in
+-- hs.settings "ccWorklistReviewFired" so a reload doesn't fire it again). Runs every tick BEFORE
+-- FX.annotateNeedsYou, on the CACHED store: the summary is worked out again only when the cache
+-- table changes (a write, an outside edit), so a quiet tick costs one stat.
+FX._wlReview = nil   -- { src, summary, backfillSrc, fired, firedEnc, computes, badge }
+function FX.stepWorklistReview(list, cfg)
+  local R = FX._wlReview
+  if not R then
+    local saved = hs.settings.get("ccWorklistReviewFired")
+    R = { summary = {}, computes = 0, badge = "null", fired = type(saved) == "table" and saved or nil }
+    FX._wlReview = R
+  end
+  local now = FX.now()
+  local st = FX.worklistCached()
+  if FX._wlCache ~= R.src or not st then
+    R.src = FX._wlCache
+    R.summary = st and core.worklistReviewSummary(st) or {}
+    R.computes = R.computes + 1
+  end
+  -- claimed items from before the review clock existed start it now: once, on a write of their own
+  local missing = false
+  for _, e in pairs(R.summary) do if (e.missing or 0) > 0 then missing = true; break end end
+  if missing and R.backfillSrc ~= FX._wlCache then
+    R.backfillSrc = FX._wlCache
+    local s2 = FX.readWorklist()
+    local n = core.worklistBackfillClaims(s2, now)
+    if n > 0 then
+      FX.writeWorklist(s2)
+      print("[cc-dashboard] 📋 My List: started the review clock on " .. n .. " claimed item(s)")
+      R.backfillSrc, R.src = FX._wlCache, FX._wlCache
+      R.summary = core.worklistReviewSummary(FX._wlCache and FX._wlCache.state or s2)
+      R.computes = R.computes + 1
+    end
+  end
+  -- which tabs are over the line (the 24h rule moves with the clock, so every tick)
+  local overByTab, overSet = {}, {}
+  for key, e in pairs(R.summary) do
+    if core.worklistReviewOver(e, now, cfg) then overByTab[key] = e; overSet[key] = true end
+  end
+  -- the cards
+  local tabOf, labelOf = {}, {}
+  for _, it in ipairs(list or {}) do
+    it.wlReview = nil
+    if it.key and not it.remote then
+      local t = FX.worklistTabKey(it)
+      tabOf[it.key] = t
+      if t and not labelOf[t] then
+        labelOf[t] = (it.repoKey and it.stackName) or (it.label ~= "" and it.label) or it.name
+      end
+    end
+  end
+  local targets = core.worklistReviewTargets(list, tabOf, overSet, FX.seenAt())
+  for _, it in ipairs(list or {}) do
+    local t = it.key and targets[it.key]
+    local e = t and overByTab[t]
+    if e then it.wlReview = { key = t, n = e.n, oldestTs = e.oldestTs } end
+  end
+  local function label(key) return tostring(labelOf[key] or core.projectKeyLabel(key)) end
+  -- one banner per crossing
+  local alerts, fired = core.worklistReviewAlerts(overSet, R.fired, now)
+  R.fired = fired
+  local enc = core.json.encode(fired)
+  if enc ~= R.firedEnc then hs.settings.set("ccWorklistReviewFired", fired); R.firedEnc = enc end
+  for _, a in ipairs(alerts) do
+    local e = overByTab[a.key]
+    local text = core.worklistReviewWhy(e, now)
+    print("[cc-dashboard] 📋 My List review: " .. label(a.key) .. " -- " .. text)
+    FX.notify("My List: " .. label(a.key), text)
+  end
+  -- the 📋 badge: every item waiting for Adam's check, while any project is over the line
+  local total, tips = 0, {}
+  if next(overByTab) then
+    for _, e in pairs(R.summary) do total = total + (e.n or 0) end
+    for key, e in pairs(overByTab) do tips[#tips + 1] = label(key) .. " " .. e.n end
+    table.sort(tips)
+  end
+  R.badge = core.json.encode({ n = total, tip = (#tips > 0) and ("To verify: " .. table.concat(tips, " · ")) or "" })
 end
 
 -- ---- Tab-less sessions (2026-09-11) -----------------------------------------------
@@ -17617,6 +17715,10 @@ local HTML = [[
 #toolmenu .tm-ic{ font-size:14px; width:18px; text-align:center; flex:0 0 auto; }
 #notify-badge{ display:none; background:var(--danger); color:#fff; border-radius:8px; font-size:9px;
                padding:0 4px; margin-left:3px; vertical-align:top; font-variant-numeric:tabular-nums; }
+/* 2026-10-13: the 📋 My List badge -- items to verify, while a project is over the review line */
+#mylist-badge{ display:none; background:var(--danger); color:#fff; border-radius:8px; font-size:9px;
+               padding:0 4px; margin-left:4px; vertical-align:top; font-variant-numeric:tabular-nums; }
+#mylist-badge.on{ display:inline-block; }
 #tm-notify-badge{ display:none; background:var(--danger); color:#fff; border-radius:8px; font-size:9px;
                padding:0 4px; margin-left:auto; font-variant-numeric:tabular-nums; }
 #a-foot{ display:flex; gap:8px; align-items:center; padding:8px 10px; border-top:1px solid var(--border); }
@@ -18208,7 +18310,7 @@ local HTML = [[
   <div id="groupchips"></div>
   <div id="bulkbar" class="show">
     <span id="bulkbar-fleet"></span>
-    <button id="mylist-btn" onclick="toggleWorklist()">📋 My List</button>
+    <button id="mylist-btn" onclick="toggleWorklist()">📋 My List<span id="mylist-badge"></span></button>
   </div>
   <div id="grid"></div>
   <div id="hookless"></div>
@@ -20111,6 +20213,24 @@ local HTML = [[
       worklistLane = lane;
       try { if(window.localStorage) window.localStorage.setItem("cc-wlLane", lane); } catch(e) { /* not remembered */ }
       renderWorklist();
+    }
+    // The My List review heads-up's way in (2026-10-13): double-clicking a card that shows it opens My
+    // List on that project's tab with To verify picked. The fresh worklist-load renders it; a tab that
+    // no longer exists falls back to Generic there, like any stale pick.
+    function wlOpenReview(scope){
+      worklistScope = String(scope);
+      worklistLane = "verify";
+      try { if(window.localStorage) window.localStorage.setItem("cc-wlLane", "verify"); } catch(e) { /* not remembered */ }
+      if(!worklistMode) toggleWorklist(); else renderWorklist();
+    }
+    // The 📋 My List badge (2026-10-13): every item waiting for Adam's check, shown while a project is
+    // over the review line (FX.stepWorklistReview). Text and tooltip only -- never HTML.
+    function setReviewBadge(d){
+      var el = document.getElementById("mylist-badge"); if(!el) return;
+      var n = (d && +d.n) || 0;
+      el.textContent = n > 0 ? String(n) : "";
+      el.title = (n > 0 && d && d.tip) ? String(d.tip) : "";
+      el.classList.toggle("on", n > 0);
     }
     // Open items per lane on a tab (every list on MASTER): what the chips and Mark all count.
     function wlLaneCounts(scope){
@@ -27642,9 +27762,18 @@ local HTML = [[
       if(e.detail === 1 || e.detail === 0) selectTile(key);
       if(r[0]) tileActivate(key, stack);
     }
+    // 2026-10-13 (Adam's call): a card showing the My List review heads-up (core.needsYouKind's
+    // "mylist" source) opens My List on its project's tab, To verify picked, instead of jumping. The
+    // key is the card's DRAWN member, so it only does that when the card itself says so.
+    function tileReviewKey(it){
+      return (it && it.needsYou === "fyi" && it.needsYouSource === "mylist" && it.wlReview && it.wlReview.key)
+        ? String(it.wlReview.key) : null;
+    }
     // A project card jumps to the instance that most needs you, picked in Lua from fresh
     // state among the card's visible members (focus-group); a stackless tile jumps to itself.
     function tileActivate(key, stack){
+      var rk = tileReviewKey(findItem(key));
+      if(rk){ wlOpenReview(rk); return; }
       if(stack){ send("focus-group", stack, JSON.stringify(cardKeysFor(stack))); return; }
       send("focus", key);
     }
@@ -29497,6 +29626,12 @@ function FX._refreshBody()
     local okd, errd = pcall(FX.stepDecisions, list)
     if not okd then print("[cc-dashboard] ❌ decisions step failed: " .. tostring(errd)) end
   end
+  -- the My List review heads-up (2026-10-13): a project past the review line stamps it.wlReview on
+  -- its cards, before the needs-you stamp reads it; the badge and the one banner per crossing too
+  do
+    local okw, errw = pcall(FX.stepWorklistReview, list, cfg)
+    if not okw then print("[cc-dashboard] ❌ My List review step failed: " .. tostring(errw)) end
+  end
   -- 2026-09-17: LAST of the annotations -- it needs every source at once. One predicate decides
   -- whether each card really needs Adam (a live counterpart AND an affordance that changes
   -- something) or is only a heads-up; the ranking and the panel both read what it stamps.
@@ -29709,6 +29844,8 @@ function FX._refreshBody()
     pcall(function() wv:evaluateJavaScript("setHiddenCount(" .. tostring(#hiddenList) .. ")") end)
     -- 2026-10-03 (D2): the toolbar's ❄ Freeze says whether the fleet is frozen
     pcall(function() wv:evaluateJavaScript("setFreeze(" .. tostring(FX._hold.holds.fleet == true) .. ")") end)
+    -- 2026-10-13: the 📋 My List badge (items to verify, while a project is over the review line)
+    pcall(function() wv:evaluateJavaScript("setReviewBadge(" .. (FX._wlReview and FX._wlReview.badge or "null") .. ")") end)
     pcall(FX.pushInbox)   -- 2026-09-29: the Inbox's rows and ☰'s badge (open questions + held asks)
     pcall(FX.pushTickets) -- 2026-09-29: the Tickets board's rows (cross-repo tickets)
     pcall(FX.pushQueueView) -- 2026-10-03 (D4b): the Queues view's rows, only while it's open

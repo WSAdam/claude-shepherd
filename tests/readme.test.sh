@@ -144,6 +144,21 @@ for k in $(jq -r '(.stopGuards // {} | to_entries[] | select(.value == true) | "
 done
 assert_eq "the switches the defaults turn on without an \`enabled\` key are named as on (README, configuration.md)" "" "$unnamed"
 
+# 2026-10-13: the My List review heads-up is on from the code's own defaults (core.WORKLIST_REVIEW),
+# not from defaults/cc-config.json, so the loop above can't see it. While its count line is above 0
+# it is on out of the box, and both pages say so.
+rcount="$(lua - "$ROOT/cc-core.lua" 2>/dev/null <<'LUA'
+local core = dofile(arg[1])
+print(tonumber((core.WORKLIST_REVIEW or {}).count) or 0)
+LUA
+)"
+unnamed=""
+if [ "${rcount:-0}" -gt 0 ]; then
+  grep -qF '`worklist.reviewCount`' "$TMP/config.md" || unnamed="$unnamed [README:worklist.reviewCount]"
+  grep -qF '`worklist.reviewCount`' "$TMP/whatson.md" || unnamed="$unnamed [configuration.md:worklist.reviewCount]"
+fi
+assert_eq "the My List review heads-up (on from core.WORKLIST_REVIEW) is named as on (README, configuration.md)" "" "$unnamed"
+
 # ---- the reference pages against the code (2026-09-30) ----------------------------------------
 # The final docs pass of the build program found four lists the units had outgrown: the config
 # reference (no coach, decide, radar, schedLock, timeLost...), the files Shepherd keeps (a dozen

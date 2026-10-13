@@ -5503,5 +5503,43 @@ do
         (src:match("function queueViewHtml%(rows%).-\n    }\n") or ""):find("esc(l.text)", 1, true) ~= nil)
 end
 
+-- ---- My List review heads-up: the wiring (2026-10-13) ----
+-- My List grew to 262 open items before Adam looked. A project past the review line stamps its cards,
+-- badges 📋 My List and fires one banner. Behaviour: tests/worklist-review.test.lua (the step on a real
+-- dashboard) and tests/review-open.test.js (double-click, badge). These pin what those can't see.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local tick = src:match("function FX%._refreshBody%(%)(.-)\nend\n") or ""
+  local step, needs = tick:find("pcall(FX.stepWorklistReview, list, cfg)", 1, true), tick:find("FX.annotateNeedsYou(list)", 1, true)
+  check("review: the tick runs the step, isolated in a pcall", step ~= nil)
+  check("review: ...BEFORE the needs-you stamp, which reads it.wlReview", step ~= nil and needs ~= nil and step < needs)
+  local visible = tick:match("if panelVisible then(.-)\n  end\n") or ""
+  check("review: the 📋 badge is pushed only while the panel is visible",
+        visible:find('wv:evaluateJavaScript("setReviewBadge("', 1, true) ~= nil)
+  local body = src:match("function FX%.stepWorklistReview%(list, cfg%)(.-)\nend\n") or ""
+  check("review: the banner names no session to jump to (a click can't land in the wrong window)",
+        body:find('FX.notify("My List: " .. label(a.key), text)', 1, true) ~= nil and body:find("FX%.notify%([^\n]-{ *key") == nil)
+  check("review: the step reads the cached store, never a copy per tick",
+        body:find("local st = FX.worklistCached()", 1, true) ~= nil)
+  -- the cached store is the panel's own: a core.worklist* mutator on it would corrupt the cache
+  local mutators = { "worklistMarkAllDone", "worklistMarkAllEverywhere", "worklistToggle", "worklistAdd",
+                     "worklistBackfillClaims", "worklistImportTodoRoots", "worklistRemove" }
+  local leaks = {}
+  for _, m in ipairs(mutators) do
+    if body:find("core." .. m .. "(st", 1, true) then leaks[#leaks + 1] = m end
+  end
+  check("review: no mutator is ever handed the cached store  (" .. table.concat(leaks, ",") .. ")", #leaks == 0)
+  check("review: the backfill mutates a fresh copy, on a write of its own",
+        body:find("local s2 = FX.readWorklist()", 1, true) ~= nil and body:find("core.worklistBackfillClaims(s2, now)", 1, true) ~= nil)
+  check("review: the fired map persists, so a reload doesn't fire again",
+        body:find('hs.settings.set("ccWorklistReviewFired", fired)', 1, true) ~= nil
+        and body:find('hs.settings.get("ccWorklistReviewFired")', 1, true) ~= nil)
+  check("review: the 📋 button carries the badge", src:find('📋 My List<span id="mylist-badge"></span>', 1, true) ~= nil)
+  check("review: a double-click asks tileReviewKey before it jumps",
+        src:find("var rk = tileReviewKey(findItem(key));\n      if(rk){ wlOpenReview(rk); return; }", 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

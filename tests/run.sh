@@ -148,6 +148,9 @@ echo ""
 echo "== node: tile presses (behavioral, runs the shipped press logic) =="
 node "$DIR/tile-dblclick.test.js" || fail=1
 echo ""
+echo "== node: My List review -- double-clicking a review heads-up opens the project's To verify list, every other card still jumps; the 📋 badge is text only (behavioral, runs the shipped tileActivate) =="
+node "$DIR/review-open.test.js" || fail=1
+echo ""
 echo "== node: tile presses in a real browser (skips without Playwright) =="
 node "$DIR/tile-press.browser.test.js" || fail=1
 echo ""
@@ -254,6 +257,9 @@ HOME="$(mktemp -d)" lua "$DIR/smoke.test.lua" || fail=1
 echo ""
 echo "== lua: My List auto-sync keeps renamed tabs (behavioral, stubbed hs) =="
 HOME="$(mktemp -d)" lua "$DIR/worklist-autosync.test.lua" || fail=1
+echo ""
+echo "== lua: My List review heads-up -- a project past 30 items / 24h stamps its cards, badges 📋, fires one banner per crossing (not again after a reload), costs no decode per quiet tick (behavioral, stubbed hs) =="
+HOME="$(mktemp -d)" lua "$DIR/worklist-review.test.lua" || fail=1
 echo ""
 echo "== lua: My List re-reads every enrolled TODO.md once when the parser learns a fact ([~] -> fileWait), never again (behavioral, stubbed hs) =="
 HOME="$(mktemp -d)" lua "$DIR/worklist-parserev.test.lua" || fail=1

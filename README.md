@@ -259,7 +259,7 @@ any key you haven't set).
 
 **On out of the box:** auto-continue (`autoContinue`), respawn (`respawn`), resume at the limit
 reset (`resume`), auto-compact (`compact`), worktree leases (`lease`), the audit ledger (`ledger`),
-the three Stop guards (`stopGuards`) and the fleet idle alert (`alerts.idleMinutes`), plus the merge
+the three Stop guards (`stopGuards`), the fleet idle alert (`alerts.idleMinutes`) and the My List review heads-up (`worklist.reviewCount`), plus the merge
 checker, the worktree fence, held questions, Remote Control for spawned sessions, ending leftover
 processes that have no tab, the main moved notice and grant grading. Auto-feed, rules, routines,
 escalation and the coach start off. Reference: [docs/configuration.md](docs/configuration.md).

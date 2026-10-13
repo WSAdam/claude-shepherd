@@ -484,6 +484,19 @@ the FLEET row swaps the session tiles for the list (click again to go back).
   unticked lines, your own items and audit findings. **All** is both. Each chip counts its open
   items. The lane you pick stays across tab switches and panel reloads. The Done drawer is never
   filtered, and the Archive has no lanes.
+- **Review heads-up**: a project tab with **30** items to verify, or one item waiting more than
+  **24 hours**, needs your look. Each of its cards whose session is at rest shows a **Heads-up**:
+  "31 to verify in My List · oldest 26h — double-click to review". It is never red Needs you, since
+  no session is waiting on the answer. A card whose session is working, running background work or
+  driving a batch keeps its own words. **Double-clicking** a card showing it opens My List on that
+  project's tab with **To verify** picked. The **📋 My List** button shows a red count of every item to
+  verify while any project is over the line, with the projects in its tooltip. **One banner** fires
+  when a project crosses the line, and not again for that project within 6 hours. A reload never
+  fires it for a backlog that was already there. The 24 hours count from when the line was first
+  ticked (`[x]` or `[~]`) in its file; unticking an item yourself restarts it. The heads-up waits
+  while a session in that project has just finished and you haven't looked at it yet, so it can't
+  take the card's lead from it. It clears when you verify the items. `worklist.reviewCount` and
+  `worklist.reviewHours` move the lines (`0` turns that rule off).
 - **Filter**: on the **🗄 Archive** tab only, a box searches every archived row. It is
   case-insensitive and every word must match. It searches the subject, the **details**, the expected
   date (`2026-09` filters a month) and the project the row came from. The count beside it reads

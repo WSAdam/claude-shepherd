@@ -15901,5 +15901,156 @@ do
                       merge = { phase = "requested" } }), "merge")
 end
 
+-- ---- My List review heads-up (2026-10-13) ----
+-- My List grew to 262 open items before Adam looked: nothing told him the To verify pile was growing.
+-- A project with 30+ items to verify, or one waiting more than 24h, now pops a Heads-up on its card
+-- (never red: no live session receives the answer), a count on 📋 My List and one banner per crossing.
+-- The 24h clock starts when the file first claimed the line (claimTs), a file fact the import can know.
+do
+  check("core.worklistReviewSummary exists", type(core.worklistReviewSummary) == "function")
+  check("core.worklistReviewOver exists", type(core.worklistReviewOver) == "function")
+  check("core.worklistReviewAlerts exists", type(core.worklistReviewAlerts) == "function")
+  check("core.worklistReviewTargets exists", type(core.worklistReviewTargets) == "function")
+  check("core.worklistBackfillClaims exists", type(core.worklistBackfillClaims) == "function")
+  check("core.doneUnseen exists", type(core.doneUnseen) == "function")
+  eq("the review line is 30 items or 24h", (core.WORKLIST_REVIEW or {}).count, 30)
+  eq("...24 hours", (core.WORKLIST_REVIEW or {}).hours, 24)
+
+  -- claimTs: stamped when the file first claims a line ([x] or [~]), from file facts only
+  local st = { byProject = {}, todoMeta = {} }
+  local k = 0
+  local function idgen() k = k + 1; return "rv" .. k end
+  local function import(content, now)
+    return core.worklistImportTodoRoots(st, "shop", { { root = "/r", isMain = true,
+      parsed = core.parseTodoFile(content) } }, now, idgen)
+  end
+  import("- [ ] wire the badge\n", 100)
+  local item = st.byProject.shop[1]
+  eq("claim clock: an open line has none", item.claimTs, nil)
+  import("- [~] wire the badge\n", 200)
+  eq("claim clock: starts when the file claims the line ([~])", item.claimTs, 200)
+  import("- [x] wire the badge\n", 300)
+  eq("claim clock: ...and keeps running through [~] -> [x]", item.claimTs, 200)
+  import("- [x] wire the badge\n", 400)
+  eq("claim clock: a re-import changes nothing", item.claimTs, 200)
+  import("- [ ] wire the badge\n", 500)
+  eq("claim clock: unticked in the file, it stops", item.claimTs, nil)
+  import("- [x] wire the badge\n- [x] a new ticked line\n", 600)
+  eq("claim clock: restarts when the file claims it again", item.claimTs, 600)
+  eq("claim clock: a line that arrives claimed starts at once", (st.byProject.shop[2] or {}).claimTs, 600)
+  check("claim clock: HARD RULE -- done is never read or written", item.done == false and item.doneTs == nil)
+
+  -- Adam unticking a claimed item restarts its clock: he's put it back to be verified
+  local tog = { generic = {}, byProject = { p = { { id = "t1", text = "x", done = true, doneTs = 50, fileDone = true, claimTs = 10 },
+                                                  { id = "t2", text = "y", done = true, doneTs = 50 } } } }
+  core.worklistToggle(tog, "p", "t1", 900)
+  eq("untick: a claimed item's clock restarts", tog.byProject.p[1].claimTs, 900)
+  core.worklistToggle(tog, "p", "t1", 950)
+  eq("tick: checking it off leaves the clock alone", tog.byProject.p[1].claimTs, 900)
+  core.worklistToggle(tog, "p", "t2", 900)
+  eq("untick: an unclaimed item gets no clock", tog.byProject.p[2].claimTs, nil)
+
+  -- backfill: claimed items from before the clock existed start it now, once
+  local bf = { generic = {}, byProject = { p = {
+    { id = "b1", text = "old claim", done = false, fileDone = true },
+    { id = "b2", text = "old wait", done = false, fileWait = true },
+    { id = "b3", text = "has a clock", done = false, fileDone = true, claimTs = 5 },
+    { id = "b4", text = "work", done = false },
+    { id = "b5", text = "verified", done = true, fileDone = true } } } }
+  eq("backfill: stamps the two open claimed items with no clock", core.worklistBackfillClaims(bf, 700), 2)
+  check("backfill: ...with now", bf.byProject.p[1].claimTs == 700 and bf.byProject.p[2].claimTs == 700)
+  eq("backfill: ...keeps a clock that's already running", bf.byProject.p[3].claimTs, 5)
+  check("backfill: ...and leaves work and verified items alone", bf.byProject.p[4].claimTs == nil and bf.byProject.p[5].claimTs == nil)
+  eq("backfill: a second pass stamps nothing", core.worklistBackfillClaims(bf, 800), 0)
+
+  -- the summary: per project tab, open To verify items, the oldest clock, and how many have none
+  local sm = { generic = { { id = "g", text = "own", done = false, fileDone = true, claimTs = 1 } },
+               byProject = {
+                 a = { { id = "a1", text = "1", done = false, fileDone = true, claimTs = 500 },
+                       { id = "a2", text = "2", done = false, fileWait = true, claimTs = 300 },
+                       { id = "a3", text = "3", done = false, fileDone = true },
+                       { id = "a4", text = "work", done = false },
+                       { id = "a5", text = "verified", done = true, fileDone = true, claimTs = 100 } },
+                 b = { { id = "b1", text = "work only", done = false } } } }
+  local S = core.worklistReviewSummary(sm)
+  eq("summary: counts a project's open To verify items", (S.a or {}).n, 3)
+  eq("summary: ...the oldest clock among them", (S.a or {}).oldestTs, 300)
+  eq("summary: ...and how many carry none", (S.a or {}).missing, 1)
+  eq("summary: a tab with nothing to verify isn't listed", S.b, nil)
+  eq("summary: Generic never counts", S.generic, nil)
+
+  -- over the line: 30 items, or one older than 24 hours; each rule off at 0
+  local NOW = 100000
+  local O = core.worklistReviewOver
+  check("over: 30 items", O({ n = 30, oldestTs = NOW }, NOW, {}) == true)
+  check("over: 29 items, all fresh, isn't", O({ n = 29, oldestTs = NOW - 3600 }, NOW, {}) == false)
+  check("over: one item waiting 24h", O({ n = 1, oldestTs = NOW - 24 * 3600 }, NOW, {}) == true)
+  check("over: 23h59m isn't", O({ n = 1, oldestTs = NOW - 24 * 3600 + 60 }, NOW, {}) == false)
+  check("over: no clock never trips the age rule", O({ n = 1 }, NOW, {}) == false)
+  check("over: reviewCount 0 turns the count rule off",
+        O({ n = 500, oldestTs = NOW }, NOW, { worklist = { reviewCount = 0 } }) == false)
+  check("over: reviewHours 0 turns the age rule off",
+        O({ n = 1, oldestTs = NOW - 99 * 3600 }, NOW, { worklist = { reviewHours = 0 } }) == false)
+  check("over: the lines are configurable", O({ n = 5, oldestTs = NOW }, NOW, { worklist = { reviewCount = 5 } }) == true)
+  check("over: nothing to verify is never over", O(nil, NOW, {}) == false)
+
+  -- one banner per crossing: first sight is silent, re-arm below the line, 6h cooldown
+  local A = core.worklistReviewAlerts
+  local alerts, fired = A({ a = true }, nil, NOW)
+  eq("banner: first sight (a reload) is silent", #alerts, 0)
+  alerts, fired = A({ a = true }, fired, NOW + 10)
+  eq("banner: ...and stays silent while it holds", #alerts, 0)
+  alerts, fired = A({}, fired, NOW + 20)
+  alerts, fired = A({ b = true }, fired, NOW + 30)
+  eq("banner: a tab crossing the line fires once", #alerts, 1)
+  eq("banner: ...naming its tab", (alerts[1] or {}).key, "b")
+  alerts, fired = A({ b = true }, fired, NOW + 40)
+  eq("banner: ...and not again while it stays over", #alerts, 0)
+  alerts, fired = A({}, fired, NOW + 50)
+  alerts, fired = A({ b = true }, fired, NOW + 60)
+  eq("banner: back over within 6h stays quiet (no flapping at 29/30)", #alerts, 0)
+  alerts, fired = A({}, fired, NOW + 70)
+  alerts, fired = A({ b = true }, fired, NOW + 7 * 3600)
+  eq("banner: back over after 6h fires again", #alerts, 1)
+  alerts, fired = A({}, fired, NOW + 20 * 3600)
+  eq("banner: a tab under the line long enough is forgotten", fired.b, nil)
+
+  -- which cards carry it: every local card of an over project, unless one just finished
+  local du = core.doneUnseen
+  check("doneUnseen: a finished session not yet looked at", du({ key = "x", status = "done", since = 50 }, {}) == true)
+  check("doneUnseen: ...seen after it finished isn't", du({ key = "x", status = "done", since = 50 }, { x = 60 }) == false)
+  check("doneUnseen: a working session isn't", du({ key = "x", status = "working", since = 50 }, {}) == false)
+  local tiles = {
+    { key = "s1", status = "done", since = 10 }, { key = "s2", status = "idle", since = 10 },
+    { key = "r1", status = "done", since = 10, remote = true },
+    { key = "c1", status = "done", since = 10 }, { key = "c2", status = "done", since = 90 },
+    { key = "z1", status = "done", since = 10 } }
+  local tabOf = { s1 = "shop", s2 = "shop", r1 = "shop", c1 = "cart", c2 = "cart", z1 = "quiet" }
+  local T = core.worklistReviewTargets(tiles, tabOf, { shop = true, cart = true }, { s1 = 20, c1 = 20, z1 = 20 })
+  check("targets: every local card of an over project", T.s1 == "shop" and T.s2 == "shop")
+  eq("targets: ...never a remote one", T.r1, nil)
+  check("targets: a project whose session just finished (not yet seen) waits", T.c1 == nil and T.c2 == nil)
+  eq("targets: a project under the line carries nothing", T.z1, nil)
+
+  -- the card: a heads-up, never Needs you, and never over a session at work
+  local now = 200000
+  local rv = { key = "shop", n = 31, oldestTs = now - 26 * 3600 }
+  local kind, source, why = core.needsYouKind({ key = "s1", status = "done", wlReview = rv }, now)
+  eq("card: an idle card of an over project is a heads-up", kind, "fyi")
+  eq("card: ...from My List", source, "mylist")
+  check("card: ...saying how many, how old, and what to do  (" .. tostring(why) .. ")",
+        type(why) == "string" and why:find("31 to verify", 1, true) ~= nil and why:find("26h", 1, true) ~= nil
+        and why:find("double-click", 1, true) ~= nil)
+  eq("card: a working card isn't touched", (core.needsYouKind({ key = "s1", status = "working", wlReview = rv }, now)), nil)
+  eq("card: nor one running background work", (core.needsYouKind({ key = "s1", status = "done", bg_active = true, wlReview = rv }, now)), nil)
+  eq("card: nor a batch driver", (core.needsYouKind({ key = "s1", status = "done", fleet = { phase = "approved" }, wlReview = rv }, now)), nil)
+  eq("card: a real approval still wins", (core.needsYouKind({ key = "s1", status = "approval", wlReview = rv }, now)), "needs")
+  local _, src6 = core.needsYouKind({ key = "s1", status = "done", decisions = { open = 1 }, wlReview = rv }, now)
+  eq("card: an open decision's heads-up still wins", src6, "decide")
+  eq("card: a working session still outranks it", core.instanceTier({ key = "s1", status = "working", wlReview = rv }, {}, now), core.TIER_RUNNING)
+  local _, _, whyFresh = core.needsYouKind({ key = "s1", status = "done", wlReview = { key = "shop", n = 30, oldestTs = now - 60 } }, now)
+  check("card: under an hour reads <1h  (" .. tostring(whyFresh) .. ")", type(whyFresh) == "string" and whyFresh:find("<1h", 1, true) ~= nil)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

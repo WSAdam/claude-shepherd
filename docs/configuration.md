@@ -10,6 +10,7 @@ live in Hammerspoon's settings; launch at login is Hammerspoon's own login item.
 conveniences: held questions, resume at a usage limit's reset, worktree leases, Remote Control for
 spawned sessions, ending tab-less leftovers, plan-limit alerts, the
 [fleet idle alert](automation.md#fleet-idle-alert) (`alerts.idleMinutes`, 15 minutes), the
+[My List review heads-up](fleet.md#my-list) (`worklist.reviewCount` 30 items, `worklist.reviewHours` 24 hours), the
 [main moved notice](merging-and-batches.md#main-moved-sibling-worktrees-hear-about-a-merge)
 (`merge.mainMovedNotice`) and closing a merged unit's tab. [Grant grading](merging-and-batches.md#grant-grading-a-risky-merge-waits-for-your-click)
 holds back merges on a batch grant from the start (`merge.grantWaitsFor` unset means every
@@ -116,6 +117,8 @@ install's [defaults](../defaults/cc-config.json) differ.
 | `verify.onMerge` | `false` (🔎 Verify works either way) | `true` | [The checker](merging-and-batches.md#the-checker-a-read-only-review-of-every-merge-request) |
 | `verify.maxBudgetUsd` / `timeoutSeconds` | `1` / `600` | | [The checker](merging-and-batches.md#the-checker-a-read-only-review-of-every-merge-request) |
 | `alerts.idleMinutes` | `15` (`0` turns it off) | `15` | [Fleet idle alert](automation.md#fleet-idle-alert) |
+| `worklist.reviewCount` | `30` (`0` turns the count rule off) | | [My List review heads-up](fleet.md#my-list) |
+| `worklist.reviewHours` | `24` (`0` turns the age rule off) | | [My List review heads-up](fleet.md#my-list) |
 | `alerts.voice` / `voiceEvents` | `false` / `[]` (voice speaks the fleet idle alert; listing `"needsYou"` also speaks a card that starts needing you) | | [Fleet idle alert](automation.md#fleet-idle-alert) |
 | `seance.maxBudgetUsd` / `timeoutSeconds` | `20` (the cap; each run's budget is sized from its context, at most `50`) / `300` | | [Ask a session](controls.md#ask-a-session-seance) |
 | `merge.repoGate` | `false` | | [A repo can declare its own gate](merging-and-batches.md#a-repo-can-declare-its-own-gate) |

@@ -1647,6 +1647,12 @@ function M.needsYouKind(it, now)
   if dc and (tonumber(dc.open) or 0) > 0 and it.status ~= "working" and not it.bg_active and not M.isDriving(it) then
     return "fyi", "decide", "it went ahead with the default -- answer in ☰ → Inbox if you'd choose otherwise"
   end
+  -- 7. (2026-10-13) the project's My List has work waiting for Adam's check past the review line
+  -- (it.wlReview, stamped by FX.stepWorklistReview): a heads-up -- no session receives the answer --
+  -- and only on a card at rest, so a session at work, its background work or a driver keep their word.
+  if type(it.wlReview) == "table" and it.status ~= "working" and not it.bg_active and not M.isDriving(it) then
+    return "fyi", "mylist", M.worklistReviewWhy(it.wlReview, now)
+  end
   return nil
 end
 
@@ -1783,10 +1789,7 @@ function M.instanceTier(it, seenAt, now)
   -- 2026-09-18: except a tab-less leftover gone quiet at "working" (M.tablessStalled) -- it led
   -- Voice-Agent's card at "2h Working" over the session Adam was using.
   if (st == "working" and not M.tablessStalled(it)) or (it and it.bg_active) then return M.TIER_RUNNING end
-  if st == "done" then
-    local seen = type(seenAt) == "table" and tonumber(seenAt[it.key]) or nil
-    if not seen or seen < (tonumber(it.since) or 0) then return 4 end
-  end
+  if M.doneUnseen(it, seenAt) then return 4 end
   return 5
 end
 
@@ -17722,6 +17725,9 @@ function M.worklistToggle(state, scope, id, now)
       it.done = not it.done
       if it.done then it.doneTs = tonumber(now) or 0 else it.doneTs = nil end
       it.doneBy = nil
+      -- 2026-10-13: unticking an item the file claims puts it back to be verified, so its review
+      -- clock (claimTs) starts over rather than tripping the 24h heads-up at once
+      if not it.done and M.worklistLane(it) == "verify" then it.claimTs = tonumber(now) or 0 end
       break
     end
   end
@@ -17820,6 +17826,137 @@ function M.worklistLaneArg(v)
   if v == nil or v == "" then return "all" end
   if v == "todo" or v == "verify" or v == "all" then return v end
   return nil
+end
+
+-- ---- My List review heads-up (2026-10-13) ----------------------------------------------------
+-- My List grew to 262 open items before Adam looked: nothing said the To verify pile was growing.
+-- A project tab with `count` items to verify, or one waiting `hours`, pops a Heads-up on its card,
+-- a count on 📋 My List and one banner per crossing (no sooner than rebannerAfter after the last).
+-- worklist.reviewCount / worklist.reviewHours override; 0 turns that rule off.
+M.WORKLIST_REVIEW = { count = 30, hours = 24, rebannerAfter = 6 * 3600 }
+
+-- Claimed items from before the review clock existed start it now, so an upgrade can't trip the 24h
+-- rule at once. Open To verify items with no claimTs only; returns how many were stamped. Pure.
+function M.worklistBackfillClaims(state, now)
+  if type(state) ~= "table" then return 0 end
+  local n = 0
+  local function walk(list)
+    for _, it in ipairs(type(list) == "table" and list or {}) do
+      if M.worklistLane(it) == "verify" and it.claimTs == nil then it.claimTs = tonumber(now) or 0; n = n + 1 end
+    end
+  end
+  walk(state.generic)
+  for _, list in pairs(type(state.byProject) == "table" and state.byProject or {}) do walk(list) end
+  return n
+end
+
+-- Per project tab: { n = open To verify items, oldestTs = the oldest claimTs, missing = how many
+-- carry none }. Tabs with nothing to verify are left out; Generic never counts (no project, no card).
+-- Read-only: safe on the panel's cached store. Pure.
+function M.worklistReviewSummary(state)
+  local out = {}
+  for key, list in pairs(type(state) == "table" and type(state.byProject) == "table" and state.byProject or {}) do
+    local e = nil
+    for _, it in ipairs(type(list) == "table" and list or {}) do
+      if M.worklistLane(it) == "verify" then
+        e = e or { n = 0, missing = 0 }
+        e.n = e.n + 1
+        local ts = tonumber(it.claimTs)
+        if ts then
+          if not e.oldestTs or ts < e.oldestTs then e.oldestTs = ts end
+        else
+          e.missing = e.missing + 1
+        end
+      end
+    end
+    if e then out[key] = e end
+  end
+  return out
+end
+
+-- Is one tab's summary over the review line? Returns over, why ("count" | "age"). Pure.
+function M.worklistReviewOver(e, now, cfg)
+  if type(e) ~= "table" or (tonumber(e.n) or 0) <= 0 then return false end
+  local count = tonumber(M.config(cfg, "worklist.reviewCount", M.WORKLIST_REVIEW.count)) or 0
+  local hours = tonumber(M.config(cfg, "worklist.reviewHours", M.WORKLIST_REVIEW.hours)) or 0
+  if count > 0 and e.n >= count then return true, "count" end
+  local oldest = tonumber(e.oldestTs)
+  if hours > 0 and oldest and (tonumber(now) or 0) - oldest >= hours * 3600 then return true, "age" end
+  return false
+end
+
+-- One banner per crossing. overSet = { [tabKey] = true } this tick; fired = what the last tick
+-- returned (persisted across reloads), or nil the first time ever -- which seeds silently, so a
+-- reload (or the upgrade) never fires for a backlog that was already there. A tab fires when it
+-- goes over, unless its last banner was less than rebannerAfter ago (a count hovering at 29/30
+-- doesn't flap); under the line it re-arms, and is forgotten once that cooldown has passed.
+-- Returns alerts = { { key }, ... } (sorted) and the new fired map. Pure.
+function M.worklistReviewAlerts(overSet, fired, now)
+  now = tonumber(now) or 0
+  overSet = type(overSet) == "table" and overSet or {}
+  local cool = M.WORKLIST_REVIEW.rebannerAfter
+  local out, alerts, keys = {}, {}, {}
+  if type(fired) ~= "table" then
+    for k in pairs(overSet) do out[k] = { over = true, at = now } end
+    return alerts, out
+  end
+  for k, v in pairs(fired) do
+    if type(v) == "table" and (overSet[k] or now - (tonumber(v.at) or 0) < cool) then
+      out[k] = { over = false, at = tonumber(v.at) or 0 }
+    end
+  end
+  for k in pairs(overSet) do keys[#keys + 1] = k end
+  table.sort(keys)
+  for _, k in ipairs(keys) do
+    local prev = out[k]
+    if prev and fired[k] and fired[k].over then
+      prev.over = true                                     -- still over: already announced
+    elseif prev and now - prev.at < cool then
+      prev.over = true                                     -- back over inside the cooldown: quiet
+    else
+      out[k] = { over = true, at = now }
+      alerts[#alerts + 1] = { key = k }
+    end
+  end
+  return alerts, out
+end
+
+-- A finished session Adam hasn't looked at since it finished ("Ready for you"). Pure.
+function M.doneUnseen(it, seenAt)
+  if type(it) ~= "table" or it.status ~= "done" then return false end
+  local seen = type(seenAt) == "table" and tonumber(seenAt[it.key]) or nil
+  return not seen or seen < (tonumber(it.since) or 0)
+end
+
+-- Which cards carry the heads-up: every local card whose My List tab (tabOf[card key]) is over the
+-- line -- unless that tab has a local session that just finished and hasn't been looked at, so the
+-- heads-up (TIER_FYI) can't take the card's lead from it; it shows once he has. Returns
+-- { [card key] = tab key }. Pure.
+function M.worklistReviewTargets(tiles, tabOf, overByTab, seenAt)
+  local out, waits = {}, {}
+  tabOf = type(tabOf) == "table" and tabOf or {}
+  overByTab = type(overByTab) == "table" and overByTab or {}
+  for _, it in ipairs(type(tiles) == "table" and tiles or {}) do
+    local t = type(it) == "table" and not it.remote and it.key and tabOf[it.key] or nil
+    if t and overByTab[t] and M.doneUnseen(it, seenAt) then waits[t] = true end
+  end
+  for _, it in ipairs(type(tiles) == "table" and tiles or {}) do
+    local t = type(it) == "table" and not it.remote and it.key and tabOf[it.key] or nil
+    if t and overByTab[t] and not waits[t] then out[it.key] = t end
+  end
+  return out
+end
+
+-- The heads-up's words: how many, how old (whole hours, so the card re-renders at most hourly).
+function M.worklistReviewWhy(rv, now)
+  local n = tonumber(rv and rv.n) or 0
+  local s = n .. " to verify in My List"
+  local oldest = tonumber(rv and rv.oldestTs)
+  if oldest and tonumber(now) then
+    local h = math.floor((tonumber(now) - oldest) / 3600)
+    s = s .. " · oldest " .. (h < 1 and "<1h" or (h .. "h"))
+  end
+  return s .. " — double-click to review"
 end
 
 -- Move done work older than `days` out of the live store and into `archive`, keeping its
@@ -18236,6 +18373,8 @@ function M.worklistImportTodoRoots(state, key, sources, now, idgen, kind)
         it.fileDone = nfd
         it.liveRun = nlr
         it.fileWait = nfw
+        -- the review clock (2026-10-13): when the file first claimed the line, kept while it does
+        if nfd or nfw then it.claimTs = it.claimTs or (tonumber(now) or 0) else it.claimTs = nil end
         it.fileMissing = nil
         if u.audit then it.audit = u.audit end
         tag(it, u)
@@ -18261,7 +18400,8 @@ function M.worklistImportTodoRoots(state, key, sources, now, idgen, kind)
       local it = { id = tostring(idgen and idgen() or ""), text = t, done = false,
                    ts = tonumber(now) or 0, details = "", due = "", steps = {},
                    src = srcTag, srcText = t, fileDone = u.done and true or nil, audit = u.audit,
-                   liveRun = u.liveRun and true or nil, fileWait = u.wait and true or nil }
+                   liveRun = u.liveRun and true or nil, fileWait = u.wait and true or nil,
+                   claimTs = (u.done or u.wait) and (tonumber(now) or 0) or nil }
       if srcFile then it.srcFile, it.srcName = srcFile, kind.name end
       tag(it, u)
       list[#list + 1] = it

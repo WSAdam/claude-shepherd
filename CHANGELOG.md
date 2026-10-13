@@ -6,6 +6,16 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
 
 ## Unreleased — My List lanes (2026-10-13)
 
+- Added: the **My List review heads-up**. A project whose My List has 30 items to verify, or one
+  waiting more than 24 hours, shows a Heads-up on its cards at rest ("31 to verify in My List ·
+  oldest 26h — double-click to review"). Double-clicking such a card opens My List on that project's
+  To verify lane. The 📋 My List button shows a red count while any project is over the line, and one
+  banner fires per crossing (no repeat within 6h, none on a reload). The clock is `claimTs`: when the
+  file first ticked the line, stamped by the import; items claimed before the upgrade start it once.
+  `worklist.reviewCount` / `worklist.reviewHours` move the lines, and 0 turns a rule off. It is a
+  heads-up, never Needs you (no session receives the answer). It waits while a project's session has
+  just finished unseen, and the per-tick check reads the cached store (one stat on a quiet tick).
+
 - Changed: My List splits open items into **To do · To verify · All**, a row of chips under
   **⇪ All projects** / **✓ Mark all N done**. To verify is every open item whose file claims it: a
   ticked line (**✓ auto**) or a `[~]` line, whose work is in and only the live run is left. To do is
