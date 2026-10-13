@@ -2803,6 +2803,51 @@ cc_fence_merge_ok() {
     "$f" 2>/dev/null)" = yes ]
 }
 
+# ---- An approved merge runs in auto mode (2026-10-13) ---------------------------------------
+# cc-merge.sh records Adam's Merge click as phase "approved" on the session's request and tells the
+# session to fast-forward main. In auto mode Claude Code's classifier refused that merge ("Merge
+# Without Review"): the only sign of approval it could see was a script's own output, and the fence
+# never vouches -- it only steps aside. cc-approve.sh now answers allow for exactly this command (a
+# hook's allow skips the classifier), checked here against the request on disk. Like the fence, a
+# guard against accidents, not a sandbox (D-4). KEEP IN SYNC with docs/merging-and-batches.md.
+#
+# Is command $1, run in cwd $2 by session $3, this session's approved merge? 0 + CC_AM_BRANCH and
+# CC_AM_BASE when it is. Three forms, with nothing else in the command: `git merge --ff-only <branch>`,
+# `git -C <dir> merge --ff-only <branch>` and `cd <dir> && git merge --ff-only <branch>`. The folder
+# must be its repo's MAIN checkout, and the request (CC_MERGE_DIR/<key>.json) approved for <branch>
+# in that repo. A folder with quotes, a variable, a ~ or a glob can't be judged and isn't allowed.
+cc_approved_merge() {
+  local cmd="$1" cwd="$2" f dir="" br="" out common top
+  local re_br='[A-Za-z0-9._][A-Za-z0-9._/-]*' re_mg='git[[:space:]]+merge[[:space:]]+--ff-only[[:space:]]+'
+  CC_AM_BRANCH=""; CC_AM_BASE=""
+  f="$CC_MERGE_DIR/$3.json"
+  { [ -n "$3" ] && [ -f "$f" ]; } || return 1                     # no request: nothing to check
+  cmd="${cmd#"${cmd%%[![:space:]]*}"}"; cmd="${cmd%"${cmd##*[![:space:]]}"}"
+  if [[ $cmd =~ ^${re_mg}(${re_br})$ ]]; then
+    br="${BASH_REMATCH[1]}"; dir="$cwd"
+  elif [[ $cmd =~ ^git[[:space:]]+-C[[:space:]]+([^[:space:]]+)[[:space:]]+merge[[:space:]]+--ff-only[[:space:]]+(${re_br})$ ]]; then
+    dir="${BASH_REMATCH[1]}"; br="${BASH_REMATCH[2]}"
+  elif [[ $cmd =~ ^cd[[:space:]]+([^[:space:]]+)[[:space:]]*\&\&[[:space:]]*${re_mg}(${re_br})$ ]]; then
+    dir="${BASH_REMATCH[1]}"; br="${BASH_REMATCH[2]}"
+  else
+    return 1
+  fi
+  case "$dir" in
+    ''|*[\;\&\|\<\>\`\$\(\)\"\'\*\?\[\]\{\}\\~]*) return 1 ;;
+    /*) ;;
+    *) [ -n "$cwd" ] || return 1; dir="$cwd/$dir" ;;
+  esac
+  [ -d "$dir" ] || return 1
+  out="$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir --show-toplevel 2>/dev/null)" || return 1
+  common="${out%%$'\n'*}"; top="${out#*$'\n'}"
+  [ "$common" = "$top/.git" ] || return 1                          # the main checkout, not a linked worktree
+  CC_AM_BASE="$(jq -r --arg b "$br" --arg c "$common" \
+    'if .phase == "approved" and .branch == $b and .commonDir == $c then (.base // "main") else empty end' \
+    "$f" 2>/dev/null)"
+  [ -n "$CC_AM_BASE" ] || return 1
+  CC_AM_BRANCH="$br"
+}
+
 # What a Bash command changes, and where. $1 = the command, $2 = the cwd. Fills CC_FENCE_T with
 # kind US path US branch: kind tree is a folder a mutating git runs in (-C, cd) or its
 # --work-tree, or a redirection's file; kind gitdir is a mutating git's --git-dir / GIT_DIR.

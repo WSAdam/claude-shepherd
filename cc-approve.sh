@@ -224,6 +224,29 @@ if cc_fence_candidate "$INPUT" && cc_have_jq && [ "$(cc_config '.gate.fence' 'fa
   fi
 fi
 
+# ---- An approved merge runs in auto mode (2026-10-13) ---------------------------------------
+# After Adam clicks Merge, the session fast-forwards main with `git merge --ff-only <its branch>`.
+# Auto mode's classifier refused that as "Merge Without Review", since nothing vouched for it, so
+# this hook answers allow for exactly the session's own approved merge (cc_approved_merge reads the
+# request on disk). After talk mode and the fence, which may deny it; before the gate, so an armed
+# gate doesn't ask Adam a second time. The first look is pure bash: no "merge --ff-only", no jq.
+case "$INPUT" in
+  *'merge --ff-only'*)
+    if cc_have_jq; then
+      [ -n "$KEY" ] || load_identity
+      if [ "$TOOL" = "Bash" ]; then
+        [ -n "$SIG" ] || load_summary
+        if cc_approved_merge "$SUMMARY" "$CWD" "$KEY"; then
+          echo "[cc-approve] ⇡ the approved merge of $CC_AM_BRANCH into $CC_AM_BASE: allowed ($KEY)" >&2
+          ledger_decision allow merge
+          jq -nc --arg r "Shepherd: Adam approved merging $CC_AM_BRANCH into $CC_AM_BASE (Ready to merge)" \
+            '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"allow",permissionDecisionReason:$r}}'
+          exit 0
+        fi
+      fi
+    fi ;;
+esac
+
 # ---- Always ask (build program unit 5, 2026-09-28) ------------------------
 # Before the gate-flag exit: an always-ask command is held whether or not the gate is armed.
 # This hook runs for every tool call, so cc_always_ask_candidate looks first in pure bash:

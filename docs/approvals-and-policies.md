@@ -33,6 +33,10 @@ How a session's requests reach you, what can answer them without you, and what n
   settings already allow, there may be no prompt at all and the tool runs. The gate never approves
   on a timeout. An always-ask command doesn't step aside like that: it answers **ask**, so Claude
   Code's own prompt shows whatever its mode.
+- **Your Merge click approves the merge itself.** Once you press **Merge** (or a batch grant merges
+  on your behalf), the hook answers **allow** for that unit's own `git merge --ff-only <its branch>`
+  into main, gate armed or not, so Claude Code's auto mode doesn't refuse it. It allows nothing else
+  ([details](merging-and-batches.md#your-merge-click-carries-the-merge)).
 - **Talk mode only ever refuses.** A session you put in [talk mode](#talk-mode) has its edits and
   its commands that change things denied, gate armed or not, and nothing automatic can approve them.
 - **A session stays in its own worktree.** With the [worktree fence](#worktree-fence) on, a session
@@ -216,7 +220,8 @@ While it is on, whether or not the gate is armed:
 - **The one exception** is the session's own merge after you approve it: `git -C <main> merge
   --ff-only <its branch>` (or `cd <main> && git merge --ff-only <its branch>`) goes on while its
   [merge request](merging-and-batches.md#ready-to-merge) is approved, for that branch only and with
-  nothing else in the command.
+  nothing else in the command. Shepherd answers **allow** for it, fence on or off; see
+  [your Merge click carries the merge](merging-and-batches.md#your-merge-click-carries-the-merge).
 - The denial reads **"Worktree fence: `<path>` belongs to another worktree of this repo"**, and the
   audit ledger records it as `outcome: "deny"`, `by: "fence"`.
 

@@ -394,6 +394,20 @@ Merges in one repo run **one at a time, in the order you clicked**. The rest sho
 *queued (next in line)* and start on their own. **Not yet** sends your note back, and the unit
 stays in its worktree.
 
+### Your Merge click carries the merge
+
+In auto mode, Claude Code's classifier refuses a fast-forward of main ("Merge Without Review")
+unless something it trusts vouches for it. Your click alone doesn't reach it as approval, since
+`cc-merge.sh`'s "MERGE APPROVED" is just a script's output. So after your click, Shepherd's
+approval hook answers **allow** for exactly the unit's own merge in step 3. It allows
+`git merge --ff-only <its branch>` in the repo's main checkout, or the
+`git -C <main> merge --ff-only <its branch>` and `cd <main> && git merge --ff-only <its branch>`
+forms, with nothing else in the command. Its merge request has to be approved for that branch in
+that repo, and the allow ends when the request is marked merged or blocked. It doesn't depend on
+the fence or the gate (an armed gate doesn't ask you a second time), and the audit ledger records
+it as `outcome: "allow"`, `by: "merge"`. A folder written with a variable, `~` or quotes can't be
+checked and is left to Claude Code. Talk mode still denies the merge.
+
 ### A unit's own tab closes itself
 
 Once `done` reports the merge, Shepherd checks with its own git that the merged commit is in main

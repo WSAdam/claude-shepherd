@@ -22,6 +22,14 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
 
 ## Unreleased — fixes after mining round 2
 
+- Fixed (2026-10-13): after Adam clicked **Merge**, the unit's `git merge --ff-only <branch>` in
+  main was refused by Claude Code's auto-mode classifier ("Merge Without Review"). Nothing Shepherd
+  answered vouched for it: the fence only steps aside, and only from inside the worktree. The
+  approval hook now answers **allow** for exactly the session's own approved merge: its branch, into
+  its repo's main checkout, with nothing else in the command (`cc_approved_merge`, ledger
+  `by: "merge"`). A hook's allow skips the classifier, and an armed gate no longer asks a second
+  time (`tests/gate.test.sh`, "an approved merge runs in auto mode").
+
 - Fixed: the stub check (the fake-completion Stop guard and the merge checker's red flags) took a
   path or route for a TODO comment, because a "/" counted as a comment opener: the checklist
   runner's `root .. "/TODO.md"` was sent back as a stub. A comment opener now has to start the

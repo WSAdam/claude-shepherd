@@ -1465,8 +1465,13 @@ fmreq() { # $1 session, $2 phase, $3 branch
 }
 FFM="$(cmd_in "git -C $MAIN merge --ff-only wa")"
 fmreq f9 approved wa
-assert_eq "fence: the approved merge git -C <main> merge --ff-only <own branch> goes on" "" "$(fence f9 "$WA" Bash "$FFM")"
-assert_eq "fence: ...and its cd <main> && form" "" "$(fence f9 "$WA" Bash "$(cmd_in "cd $MAIN && git merge --ff-only wa")")"
+# REQUIREMENT CHANGE 2026-10-13: the fence let these through with no answer ("") and left the decision
+# to Claude Code, whose auto-mode classifier then refused them; the hook now answers allow (the
+# "approved merge runs in auto mode" section below).
+assert_eq "fence: the approved merge git -C <main> merge --ff-only <own branch> goes on (allowed)" "allow" \
+  "$(decision "$(fence f9 "$WA" Bash "$FFM")")"
+assert_eq "fence: ...and its cd <main> && form" "allow" \
+  "$(decision "$(fence f9 "$WA" Bash "$(cmd_in "cd $MAIN && git merge --ff-only wa")")")"
 assert_eq "fence: ...but no other branch" "deny" "$(decision "$(fence f9 "$WA" Bash "$(cmd_in "git -C $MAIN merge --ff-only wb")")")"
 assert_eq "fence: ...and no merge that isn't --ff-only" "deny" "$(decision "$(fence f9 "$WA" Bash "$(cmd_in "git -C $MAIN merge wa")")")"
 assert_eq "fence: ...and nothing chained after it" "deny" \
@@ -1476,6 +1481,47 @@ fmreq f9 requested wa
 assert_eq "fence: a merge request not yet approved doesn't count" "deny" "$(decision "$(fence f9 "$WA" Bash "$FFM")")"
 fmreq f9 approved wb
 assert_eq "fence: an approval for another branch doesn't count" "deny" "$(decision "$(fence f9 "$WA" Bash "$FFM")")"
+
+# ---- an approved merge runs in auto mode (2026-10-13) ----
+# 2026-10-13: Adam clicked Merge for ui/mylist-lanes; the session's `git merge --ff-only ui/mylist-lanes`
+# in the main checkout was refused by Claude Code's auto-mode classifier ("Merge Without Review").
+# Cause: nothing Shepherd answered vouched for it -- the fence only steps aside, and only from inside the
+# worktree -- so the classifier judged a merge whose one sign of approval was a script's own output.
+# Now cc-approve.sh answers allow itself (a hook's allow skips the classifier) for exactly this
+# session's approved merge: its branch, into its repo's main checkout, with nothing else in the command.
+fmreq f9 approved wa
+out="$(fence f9 "$MAIN" Bash "$(cmd_in "git merge --ff-only wa")")"
+assert_eq "approved merge: git merge --ff-only <own branch> run in the main checkout is allowed" "allow" "$(decision "$out")"
+assert_eq "approved merge: ...saying why" "yes" \
+  "$(reason "$out" | grep -q "Adam approved merging wa" && echo yes || echo no)"
+assert_eq "approved merge: a relative git -C .. from the worktree's own folder is allowed too" "allow" \
+  "$(decision "$(fence f9 "$WA" Bash "$(cmd_in "git -C ../../.. merge --ff-only wa")")")"
+assert_eq "approved merge: a folder with a variable in it can't be judged, so it isn't allowed" "" \
+  "$(fence f9 "$MAIN" Bash "$(cmd_in "git -C \$HOME merge --ff-only wa")" CC_CONFIG_FILE="$FOFF")"
+assert_eq "approved merge: allowed with the fence off too (the approval is the merge request's, not the fence's)" "allow" \
+  "$(decision "$(fence f9 "$MAIN" Bash "$(cmd_in "git merge --ff-only wa")" CC_CONFIG_FILE="$FOFF")")"
+date +%s > "$HB"
+assert_eq "approved merge: an armed gate doesn't hold it for a second approval" "allow" \
+  "$(decision "$(fence f9 "$MAIN" Bash "$(cmd_in "git merge --ff-only wa")" CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=1)")"
+rm -f "$HB"
+assert_eq "approved merge: another branch isn't allowed" "" "$(fence f9 "$MAIN" Bash "$(cmd_in "git merge --ff-only wb")")"
+assert_eq "approved merge: a merge that isn't --ff-only isn't allowed" "" "$(fence f9 "$MAIN" Bash "$(cmd_in "git merge wa")")"
+assert_eq "approved merge: nothing chained after it is allowed" "" \
+  "$(fence f9 "$MAIN" Bash "$(cmd_in "git merge --ff-only wa && echo merged")")"
+assert_eq "approved merge: ...nor before it" "" "$(fence f9 "$MAIN" Bash "$(cmd_in "echo hi; git merge --ff-only wa")")"
+assert_eq "approved merge: a merge into a linked worktree isn't allowed" "" "$(fence f9 "$WB" Bash "$(cmd_in "git merge --ff-only wa")")"
+assert_eq "approved merge: another repo's checkout isn't allowed" "" "$(fence f9 "$FR/other" Bash "$(cmd_in "git merge --ff-only wa")")"
+assert_eq "approved merge: another session's approval doesn't count" "" "$(fence f8 "$MAIN" Bash "$(cmd_in "git merge --ff-only wa")")"
+fmreq f9 requested wa
+assert_eq "approved merge: a request not yet approved isn't allowed" "" "$(fence f9 "$MAIN" Bash "$(cmd_in "git merge --ff-only wa")")"
+fmreq f9 merged wa
+assert_eq "approved merge: ...nor one already merged" "" "$(fence f9 "$MAIN" Bash "$(cmd_in "git merge --ff-only wa")")"
+fmreq f9 approved wa
+echo '{ "ledger": { "enabled": true } }' > "$TMP/merge-ledger.json"
+fence f9 "$MAIN" Bash "$(cmd_in "git merge --ff-only wa")" CC_CONFIG_FILE="$TMP/merge-ledger.json" CC_LEDGER_DIR="$TMP/mergeledger" >/dev/null
+assert_eq "approved merge: the ledger records the allow, by merge" "allow|merge|git merge --ff-only wa" \
+  "$(cat "$TMP"/mergeledger/*.jsonl 2>/dev/null | jq -r 'select(.type=="decision" and .session_id=="f9") | "\(.outcome)|\(.by)|\(.summary)"')"
+# (the cheap path -- a command without "merge --ff-only" in it spawns no git -- is the gitspy block below)
 
 # the ledger: by fence
 echo '{ "gate": { "fence": true }, "ledger": { "enabled": true } }' > "$TMP/fence-ledger.json"
