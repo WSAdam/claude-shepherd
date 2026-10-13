@@ -10519,9 +10519,11 @@ do
             pending = { tool = "Bash" } }), "fyi")
   -- the gate timed out (cc-approve.sh dropped gate/gate_nonce and fell back to the native
   -- prompt): Approve/Deny become keystrokes -- which a shared window refuses outright.
-  eq("a timed-out gate in a shared window can't be answered from here, so it's a heads-up",
+  -- REQUIREMENT CHANGE 2026-10-13 (Adam: "again, heads-up should have been a needs you here"): the
+  -- native prompt still waits on him, so it needs him -- answered in its own tab.
+  eq("a timed-out gate in a shared window still blocks the session, so it needs Adam",
      kind({ key = "a", status = "approval", sharedWindow = 3, editor = "vscode",
-            pending = { tool = "Bash" } }), "fyi")
+            pending = { tool = "Bash" } }), "needs")
   eq("...but in its own window the keystroke still works, so it needs Adam",
      kind({ key = "a", status = "approval", sharedWindow = 1, editor = "vscode",
             pending = { tool = "Bash" } }), "needs")
@@ -11179,10 +11181,11 @@ do
   eq("a question whose hold lapsed still needs Adam, shared window or not", kind, "needs")
   eq("...and says it is a question", source, "ask")
   check("...and points him at the tab", type(why) == "string" and why:find("tab", 1, true) ~= nil)
-  -- No vacuous pass: a real PERMISSION prompt in a shared window is still a heads-up, because
-  -- Approve/Deny there are keystrokes the window refuses -- nothing to press from here.
-  eq("a permission prompt in a shared window is still only a heads-up",
-     (core.needsYouKind(askPending({ pending = { summary = "Bash: rm -rf" } }), os.time())), "fyi")
+  -- REQUIREMENT CHANGE 2026-10-13 (Adam: "again, heads-up should have been a needs you here"): a
+  -- PERMISSION prompt in a shared window was a heads-up here (nothing to press from the panel). Its
+  -- native prompt waits on him just like the question does, so it needs him too.
+  eq("a permission prompt in a shared window needs Adam too",
+     (core.needsYouKind(askPending({ pending = { summary = "Bash: rm -rf" } }), os.time())), "needs")
   eq("...and an armed gate is answerable, so it needs him",
      (core.needsYouKind(askPending({ gate = "waiting", pending = { summary = "Bash: ls" } }), os.time())), "needs")
   eq("a question whose session has gone is history",
@@ -16170,6 +16173,34 @@ do
   -- a held question or an approval still outranks it
   eq("checking: a real approval on the same card still needs Adam",
      (core.needsYouKind({ key = "a", status = "approval", merge = card.merge }, NOW)), "needs")
+end
+
+-- ---- A permission prompt in a shared window needs Adam (2026-10-13) ----
+-- 2026-10-13, Adam: "again, heads-up should have been a needs you here". `git push` (always-ask) came
+-- 14s after a `make deploy` reload, so the panel heartbeat was stale and cc-approve.sh handed it to
+-- Claude Code's own prompt. That prompt never lapses: the session waits until Adam answers it in its
+-- tab. needsYouKind made it a heads-up because the window hosts other sessions, so Shepherd can't
+-- press Approve -- but the affordance is the stalled tab, as for a lapsed question or a blocked merge.
+do
+  local NOW = 1791915026
+  -- the Shepherd card in the screenshot: three sessions in Adam's one VS Code window, no gate armed
+  local push = { key = "8b7cdfbd-6893-482f-98be-85589624c8ca", status = "approval", editor = "vscode",
+                 sharedWindow = 3, procAlive = true,
+                 pending = { tool = "Bash", summary = "git push origin main 2>&1 | tail -5" } }
+  local kind, source, why = core.needsYouKind(push, NOW)
+  eq("shared prompt: Claude Code's own prompt in a shared window needs Adam", kind, "needs")
+  eq("shared prompt: ...from the approval", source, "approval")
+  check("shared prompt: ...and points him at the tab", type(why) == "string" and why:find("tab", 1, true) ~= nil)
+  eq("shared prompt: ...ranked with the approvals, above the working sessions", core.instanceTier(push, {}, NOW), 1)
+  -- what this must not disturb
+  local gone = {}
+  for k, v in pairs(push) do gone[k] = v end
+  gone.procAlive = false
+  eq("shared prompt: a prompt whose session has gone is still only a heads-up", (core.needsYouKind(gone, NOW)), "fyi")
+  local armed = {}
+  for k, v in pairs(push) do armed[k] = v end
+  armed.gate = "waiting"
+  eq("shared prompt: an armed gate in a shared window still needs Adam", (core.needsYouKind(armed, NOW)), "needs")
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

@@ -49,6 +49,12 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
 
 ### Fleet
 
+- Fixed: a permission prompt waiting in a VS Code window shared with other sessions read
+  **Heads-up**, not **Needs you**. An always-ask `git push`, sent 14s after a `make deploy` reload,
+  found the panel's heartbeat stale, so the gate handed it to Claude Code's own prompt. Shepherd
+  can't press that from the card, but the session waits on Adam until he answers in its tab, the
+  same as a question whose hold lapsed. Adam: "again, heads-up should have been a needs you here"
+  (`core.needsYouKind`).
 - Fixed: the 🔒 lock read "3 working" over four busy cards. A session whose turn had ended with
   background work still going (its card "Running 1 job") wasn't counted and drew no ring, though
   the cards rank it as running. `core.lockState` now counts `bg_active` as working.

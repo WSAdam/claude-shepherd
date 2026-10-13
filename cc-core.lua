@@ -1679,12 +1679,14 @@ function M.needsYouKind(it, now)
 
   -- 4. a permission prompt. An armed gate takes a decision file; anything else (a gate that
   -- timed out into the native prompt) is Approve/Deny as KEYSTROKES, which a window shared by
-  -- several sessions refuses outright -- so from here there is nothing to press.
+  -- several sessions refuses outright -- so from here there is nothing to press, but the session
+  -- is still blocked on him (below).
   if it.status == "approval" then
     if not alive then return "fyi", "approval", "the session has gone" end
     -- 2026-09-18: a QUESTION is not a permission prompt, and the difference decides this.
     -- A prompt lapses on its own -- the session falls back to its native picker and carries
-    -- on -- so when Shepherd cannot press anything there really is nothing here. A question
+    -- on -- so when Shepherd cannot press anything there really is nothing here. (2026-10-13:
+    -- wrong -- that native picker waits on him too; see the prompt verdict below.) A question
     -- (cc-ask's hold lapsed back to the tab's picker, but pending.ask is still set) leaves the
     -- unit BLOCKED until Adam answers it, and the affordance is the stalled tab, not a button
     -- in this panel. That is the same reasoning that keeps a blocked merge red. It went quiet
@@ -1698,8 +1700,11 @@ function M.needsYouKind(it, now)
       end
       return "needs", "ask"
     end
+    -- 2026-10-13 REQUIREMENT CHANGE (Adam: "again, heads-up should have been a needs you here"):
+    -- Claude Code's own prompt never lapses either -- an always-ask `git push` handed to it sat
+    -- waiting on him as a heads-up. Like a question, it needs him; the affordance is the tab.
     if it.gate ~= "waiting" and M.keystrokeBlocked(it) then
-      return "fyi", "approval", "answer it in its own tab -- its window hosts other sessions"
+      return "needs", "approval", "answer it in its own tab -- its window hosts other sessions"
     end
     return "needs", "approval"
   end
