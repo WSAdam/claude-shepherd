@@ -1,0 +1,23 @@
+# bulk-shared-window.tsv -- which sessions a fleet bulk action (Approve all, Stop all, Nudge all) counts
+# and acts on (2026-10-13). core.selectActionable (tests/core.test.lua) and the panel's twin
+# actionableKeys (tests/bulk-actionable.test.js) both answer to this one table, so the number on the
+# button is what the click does. A session whose VS Code window hosts others takes no keystrokes
+# (core.handleAction refuses them), so only its headless actions count: an armed gate's decision file.
+# One case per line: <action><TAB><in|out><TAB><item as JSON>.
+approve	out	{"key":"8b7cdfbd","status":"approval","editor":"vscode","sharedWindow":3,"pending":{"tool":"Bash","summary":"git push origin main 2>&1 | tail -5"}}
+approve	in	{"key":"armed","status":"approval","editor":"vscode","sharedWindow":3,"gate":"waiting"}
+approve	in	{"key":"lone","status":"approval","editor":"vscode","sharedWindow":1}
+approve	in	{"key":"nowin","status":"approval"}
+approve	in	{"key":"kit","status":"approval","editor":"kitty","sharedWindow":3}
+approve	in	{"key":"w1","status":"approval","gate":"waiting"}
+approve	out	{"key":"st","status":"approval","stale":true}
+approve	out	{"key":"held","status":"approval","askHeld":true}
+approve	out	{"key":"r1","status":"approval","remote":{"host":"h"}}
+approve	in	{"key":"r2","status":"approval","remote":{"host":"h"},"gate":"waiting"}
+stop	out	{"key":"wsh","status":"working","editor":"vscode","sharedWindow":2}
+stop	in	{"key":"wk","status":"working","editor":"vscode"}
+stop	in	{"key":"wkk","status":"working","editor":"kitty","sharedWindow":2}
+stop	out	{"key":"wid","status":"idle"}
+nudge	out	{"key":"ish","status":"idle","editor":"vscode","sharedWindow":2}
+nudge	in	{"key":"id","status":"idle"}
+nudge	out	{"key":"ap","status":"approval"}

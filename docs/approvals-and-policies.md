@@ -519,7 +519,8 @@ start. Questions and answers over a week old are dropped, and `uninstall.sh --pu
 - **⌘⌥A** approves the front-most waiting approval, hands-free through the gate when it's waiting.
   Nothing is bound to Deny; use the panel.
 - **Approve all** in the Fleet bar approves every waiting session currently visible (after search
-  and group filters), with no confirm.
+  and group filters), with no confirm. A session in a VS Code window shared with other sessions
+  counts only while its gate is waiting: Claude Code's own prompt there is answered in the tab.
 - A Stream Deck key approves a gate-waiting session on a short press and denies it on a long press
   ([Controls → Stream Deck](controls.md#stream-deck)).
 - On an approval, the tile shows the **exact command** being requested (for example

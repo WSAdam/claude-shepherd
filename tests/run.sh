@@ -178,6 +178,9 @@ echo ""
 echo "== node: My List lanes -- To do / To verify / All under the import row, Mark all marks the lane, MASTER, Archive, remembered across a reload (real browser) =="
 node "$DIR/worklist-lanes.browser.test.js" || fail=1
 echo ""
+echo "== node: fleet bulk bar -- the panel's actionableKeys twin answers to tests/fixtures/bulk-shared-window.tsv like core.selectActionable (behavioral, runs the shipped actionableKeys) =="
+node "$DIR/bulk-actionable.test.js" || fail=1
+echo ""
 echo "== node: project-card layout geometry in a real browser (skips without Playwright) =="
 node "$DIR/card-layout.browser.test.js" || fail=1
 echo ""

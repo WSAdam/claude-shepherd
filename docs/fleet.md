@@ -418,7 +418,9 @@ All derived locally from the transcript Shepherd already reads, with no extra ho
   a chip row scopes the grid to one group (it composes with the filter).
 - **Bulk actions**: the **Fleet** bar acts on whatever is visible after filtering: **Approve all**
   waiting sessions (shown from one), or **Stop all** working ones (shown from two, after a
-  confirm). The buttons show live counts. There is no bulk nudge.
+  confirm). The buttons show live counts, and count only what the click can do: a session in a
+  window shared with other sessions takes no keystrokes, so it counts only for an Approve its armed
+  gate answers. There is no bulk nudge.
 - **Hide tile**: right-click → **Hide tile** takes a session off the grid without touching it; it
   keeps running and Shepherd keeps managing it. Restore it from **☰ → 🙈 Hidden sessions**.
 - **Timeline**: the detail panel's **📜 Timeline** button opens the audit ledger scoped to that one

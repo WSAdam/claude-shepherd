@@ -6725,6 +6725,9 @@ function M.selectActionable(list, action, opts)
   for _, it in ipairs(list or {}) do
     if it.key and not it.stale
        and not ((action == "approve" or action == "deny") and it.askHeld)   -- answered with its own buttons
+       -- 2026-10-13: a window that hosts other sessions takes headless actions only (handleAction
+       -- refuses the rest), so "Approve all (1)" no longer counts a prompt it can't press
+       and not (M.keystrokeBlocked(it) and not M.actionIsHeadless(it, action))
        and M.remoteActionAllowed(it, action, opts) then  -- remote tiles: headless approve/deny only
       local ok
       if rule.match ~= nil then ok = (it.status == rule.match)

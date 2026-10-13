@@ -55,6 +55,11 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
   can't press that from the card, but the session waits on Adam until he answers in its tab, the
   same as a question whose hold lapsed. Adam: "again, heads-up should have been a needs you here"
   (`core.needsYouKind`).
+- Fixed: the Fleet bar read **✅ Approve all (1)** for that same prompt, though a click could only
+  toast a refusal: Shepherd won't type into a window that hosts other sessions. Approve all, Stop all
+  and the bulk nudge now count only what they can do there, an armed gate's Approve
+  (`core.selectActionable` and its panel twin `actionableKeys`, both read
+  `tests/fixtures/bulk-shared-window.tsv`).
 - Fixed: the 🔒 lock read "3 working" over four busy cards. A session whose turn had ended with
   background work still going (its card "Running 1 job") wasn't counted and drew no ring, though
   the cards rank it as running. `core.lockState` now counts `bg_active` as working.

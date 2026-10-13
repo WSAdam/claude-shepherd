@@ -16203,5 +16203,26 @@ do
   eq("shared prompt: an armed gate in a shared window still needs Adam", (core.needsYouKind(armed, NOW)), "needs")
 end
 
+-- ---- Bulk actions count only what they can do in a shared window (2026-10-13) ----
+-- 2026-10-13: the fleet bar read "✅ Approve all (1)" for the Shepherd card's `git push`, Claude Code's
+-- own prompt in a VS Code window shared by three sessions. core.handleAction refuses a keystroke
+-- there, so the click only toasted a refusal: selectActionable counted the session anyway. The panel's
+-- twin actionableKeys answers to the same table (tests/bulk-actionable.test.js).
+do
+  local n = 0
+  local fh = io.open(HERE .. "fixtures/bulk-shared-window.tsv", "r")
+  check("bulk: tests/fixtures/bulk-shared-window.tsv is there", fh ~= nil)
+  for line in (fh and fh:read("*a") or ""):gmatch("[^\n]+") do
+    local action, want, js = line:match("^(%a+)\t(%a+)\t(.*)$")
+    if action and line:sub(1, 1) ~= "#" then
+      n = n + 1
+      local got = #core.selectActionable({ core.json.decode(js) }, action) == 1 and "in" or "out"
+      eq("bulk-shared-window.tsv: " .. action .. " " .. want .. "  " .. js, got, want)
+    end
+  end
+  if fh then fh:close() end
+  check("bulk: ...the table was read (15+ cases)", n >= 15)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

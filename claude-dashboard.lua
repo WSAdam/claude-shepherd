@@ -20127,6 +20127,10 @@ local HTML = [[
           if(action === "approve" || action === "deny") return it.gate === "waiting";
           return false;
         }
+        // 2026-10-13: mirror core.handleAction's shared-window refusal -- a window that hosts other
+        // sessions takes headless actions only (an armed gate's approve/deny), so the count is the click
+        if(it.editor !== "kitty" && (it.sharedWindow|0) > 1
+           && !((action === "approve" || action === "deny") && it.gate === "waiting")) return false;
         return (rule.match !== undefined) ? (it.status === rule.match) : (it.status !== rule.exclude);
       }).map(function(it){ return it.key; });
     }
