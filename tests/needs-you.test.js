@@ -196,5 +196,21 @@ check("the review leads with the gate's failing lines, not the trailing tail",
 check("...and names the full log so Adam can open it", rm.indexOf("gt.log") >= 0);
 check("...through textContent, never innerHTML", rm.indexOf("gEl.innerHTML") < 0);
 
+// ---- 2026-10-13: a merge Shepherd is still checking reads Working, not Heads-up ----
+// Adam: "if something is still working i expect it to say working not heads-up". The Shepherd card read
+// "Heads-up" while its merge request sat in Shepherd's own checks. Lua stamps it.mergeChecking
+// (core.mergeChecking) and gives no needs-you verdict; the card says Working with the working dot.
+const checkingCard = { key: "8b7cdfbd", status: "done", bg_active: true, bg_jobs: 1, needsYou: "no", mergeChecking: true,
+                       merge: { phase: "requested", needsYou: true, checking: true, line: "⇡ merge request: checking fix/x" } };
+eq("a merge in Shepherd's checks says Working", api.statusWords(checkingCard), "Working");
+eq("...with the working dot", api.effStatus(checkingCard), "working");
+const checkingNoJob = { key: "q", status: "done", needsYou: "no", mergeChecking: true,
+                        merge: { phase: "requested", needsYou: true, checking: true } };
+eq("...also without a background job (never 'Ready for you')", api.statusWords(checkingNoJob), "Working");
+eq("...and its dot", api.effStatus(checkingNoJob), "working");
+const checkedReady = { key: "r", status: "done", needsYou: "needs", needsYouSource: "merge",
+                       merge: { phase: "requested", needsYou: true, checking: false } };
+check("once the checks are done it needs Adam again", api.effStatus(checkedReady) === "approval");
+
 console.log("-- needs-you.test.js: " + run + " run, " + failed + " failed --");
 process.exit(failed === 0 ? 0 : 1);

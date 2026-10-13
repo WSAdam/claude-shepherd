@@ -6010,6 +6010,8 @@ function FX.annotateNeedsYou(list)
     it.errorEpisode = ep
     local kind, source, why, retrying = core.needsYouKind(it, now)
     it.needsYou, it.needsYouSource, it.needsYouWhy = kind or "no", source, why
+    -- 2026-10-13: a merge Shepherd is still checking reads Working on the card (core.mergeChecking)
+    it.mergeChecking = core.mergeChecking(it) or nil
     -- 2026-09-30: which error heads-up the session itself is retrying -- the only one whose card
     -- may say "Retrying" (it said so for an error Adam had stopped, and one on an exited session)
     it.retrying = retrying or nil
@@ -19525,7 +19527,8 @@ local HTML = [[
     function effStatus(it){
       if(needsYouNow(it)) return "approval";
       if(headsUp(it)) return "idle";
-      return (bgRunning(it) || isDriving(it)) ? "working" : ((it && it.status) || "idle");
+      // 2026-10-13: a merge Shepherd is still checking (it.mergeChecking) is Shepherd working
+      return (bgRunning(it) || isDriving(it) || !!(it && it.mergeChecking)) ? "working" : ((it && it.status) || "idle");
     }
     // 2026-09-17: every card whose status file was older than 90s faded to .45, so a quiet
     // "Ready for you" -- and a card waiting on Adam -- read as dead. Only a genuinely IDLE
@@ -19589,6 +19592,9 @@ local HTML = [[
       // (it.retrying, core.needsYouKind's fourth value) and this reads it.
       if(headsUp(it)) return it.retrying ? LABELS.retrying : LABELS.fyi;
       if(isDriving(it)){ var nu = (it.fleet.units || []).length; return "Driving " + nu + " unit" + (nu === 1 ? "" : "s"); }
+      // 2026-10-13 (Adam: "if something is still working i expect it to say working not heads-up"): a
+      // merge Shepherd is still checking -- the card's merge line says which check
+      if(it && it.mergeChecking) return LABELS.working;
       if(bgRunning(it)){
         // 2026-09-28: background shell jobs are named alongside agents (a job alone used to read
         // "Running 0 agents" -- before that, "Ready for you")

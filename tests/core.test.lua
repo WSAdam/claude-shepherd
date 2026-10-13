@@ -6289,9 +6289,11 @@ do
   eq("lock: an unstamped merge request falls back to needsYouKind",
      one({ projectKey = "p", name = "p", status = "done", merge = { phase = "requested", needsYou = true } }), "merge")
   -- a stamped verdict ALWAYS wins -- the card and the lock never disagree
-  eq("lock: a merge whose test gate is still running draws nothing",
-     one({ projectKey = "p", name = "p", status = "done", needsYou = "fyi", needsYouSource = "merge",
-           merge = { phase = "requested", needsYou = true, checking = true } }), nil)
+  -- REQUIREMENT CHANGE 2026-10-13 (Adam: "say working not heads-up"): a merge in Shepherd's checks
+  -- drew nothing; it is Shepherd working, so it draws a working ring (core.mergeChecking)
+  eq("lock: a merge whose test gate is still running draws a working ring",
+     one({ projectKey = "p", name = "p", status = "done", needsYou = "no",
+           merge = { phase = "requested", needsYou = true, checking = true } }), "working")
   eq("lock: a merge nobody waits on any more draws nothing",
      one({ projectKey = "p", name = "p", status = "done",
            merge = { phase = "requested", needsYou = true, waiterAlive = false } }), nil)
@@ -10652,10 +10654,12 @@ do
     return { key = "m", status = "done", merge = m }
   end
 
-  eq("a merge request still in its test gate is a heads-up, not a red Needs you",
-     kind(requested({ checking = true })), "fyi")
-  eq("...and says why there is nothing to press",
-     why(requested({ checking = true })), "the test gate is still running -- nothing to press yet")
+  -- REQUIREMENT CHANGE 2026-10-13 (Adam: "if something is still working i expect it to say working
+  -- not heads-up"): a request still in its gate was a heads-up; it is Shepherd working now -- never a
+  -- red Needs you either way. The card's merge line says which check (core.mergeView).
+  eq("a merge request still in its test gate is not a red Needs you (Shepherd is working on it)",
+     kind(requested({ checking = true })), nil)
+  check("...it is core.mergeChecking", core.mergeChecking(requested({ checking = true })) == true)
   eq("...once the gate has finished, the same request needs Adam",
      kind(requested({ checking = false })), "needs")
   eq("...and a request that never carried a gate state at all still needs Adam",
@@ -10676,10 +10680,11 @@ do
   check("a sent request still doesn't",
         core.mergeNeedsYou({ phase = "requested", sent = true }) == false)
 
-  -- the tier: a checking request sits with the other heads-ups, below anything running
+  -- the tier: a checking request ranks with the working sessions (REQUIREMENT CHANGE 2026-10-13:
+  -- it sat with the heads-ups), never above one, and still below the driver of its own batch
   local checkingTier = core.instanceTier(requested({ checking = true }), {}, NOW)
-  eq("a checking merge request gets the heads-up tier", checkingTier, core.TIER_FYI)
-  check("...which ranks BELOW a working session", checkingTier > core.TIER_RUNNING)
+  eq("a checking merge request gets the running tier", checkingTier, core.TIER_RUNNING)
+  check("...which never ranks ABOVE a working session", checkingTier >= core.TIER_RUNNING)
   check("...and below the driver of its own batch", checkingTier > core.TIER_DRIVING)
   check("...while a finished gate outranks a working session again",
         core.instanceTier(requested({ checking = false }), {}, NOW) < core.TIER_RUNNING)
@@ -10691,11 +10696,11 @@ do
   local stillChecking = { key = "u2", status = "done",
                           merge = { phase = "requested", checking = true,
                                     needsYou = core.mergeNeedsYou({ phase = "requested", checking = true }) } }
-  eq("a merge still in its gate never outranks the merge you just approved",
-     kind(stillChecking), "fyi")
+  eq("a merge still in its gate never outranks the merge you just approved (it asks nothing)",
+     kind(stillChecking), nil)
   eq("...and the one he already approved asks nothing at all", kind(approved), nil)
   check("...so neither card ranks above a session that is working",
-        core.instanceTier(stillChecking, {}, NOW) > core.TIER_RUNNING
+        core.instanceTier(stillChecking, {}, NOW) >= core.TIER_RUNNING
         and (core.needsYouKind(approved, NOW) == nil))
 end
 
@@ -10781,13 +10786,14 @@ do
   local function why(m) local _, _, w = core.needsYouKind(tile(m), NOW); return w end
   local waitM = { phase = "requested", needsYou = true, checking = true, gateQueued = true, gateLane = 2 }
   local runM  = { phase = "requested", needsYou = true, checking = true }
-  eq("a merge whose gate is queued is a heads-up", kind(waitM), "fyi")
-  check("...and its reason says it is waiting, never that it is running",
-        why(waitM):find("queued", 1, true) ~= nil and why(waitM):find("still running", 1, true) == nil)
-  -- the states this rule must NOT disturb (d9dd37a's fixture, re-pinned so the two can't drift)
-  eq("a RUNNING gate keeps d9dd37a's reason, word for word", why(runM),
-     "the test gate is still running -- nothing to press yet")
-  eq("...and its tier", kind(runM), "fyi")
+  -- REQUIREMENT CHANGE 2026-10-13 (Adam: "say working not heads-up"): both checking states are
+  -- Shepherd working now, so needsYouKind gives no verdict and no reason; which state it is lives on
+  -- in the card's merge line (section 3 above), so the running/queued stories still can't merge.
+  eq("a merge whose gate is queued is Shepherd working, not a heads-up", kind(waitM), nil)
+  check("...core.mergeChecking", core.mergeChecking(tile(waitM)) == true)
+  eq("a RUNNING gate is Shepherd working too", kind(runM), nil)
+  check("...core.mergeChecking", core.mergeChecking(tile(runM)) == true)
+  check("...and neither gives a reason any more", why(waitM) == nil and why(runM) == nil)
   eq("a request whose gate has finished still needs Adam",
      kind({ phase = "requested", needsYou = true, checking = false }), "needs")
   eq("a request that never carried a gate state still needs Adam",
@@ -10816,11 +10822,12 @@ do
         uWait.merge.line:find("queued behind another run in this repo", 1, true) ~= nil)
   check("...and neither is ready: a gate that never ran proves nothing",
         uRun.merge.ready == false and uWait.merge.ready == false)
-  eq("...both are heads-ups", kind(uRun.merge), "fyi")
-  eq("...both of them", kind(uWait.merge), "fyi")
+  -- REQUIREMENT CHANGE 2026-10-13: both read Working (Shepherd checking), no longer heads-ups
+  eq("...both are Shepherd working", kind(uRun.merge), nil)
+  eq("...both of them", kind(uWait.merge), nil)
   check("...so neither outranks a session that is working",
-        core.instanceTier(uRun, {}, NOW) > core.TIER_RUNNING
-        and core.instanceTier(uWait, {}, NOW) > core.TIER_RUNNING)
+        core.instanceTier(uRun, {}, NOW) >= core.TIER_RUNNING
+        and core.instanceTier(uWait, {}, NOW) >= core.TIER_RUNNING)
 end
 
 -- ---- the liveness probe behind the needs-you rule (2026-09-17) --------------
@@ -16127,6 +16134,42 @@ do
     {}, labels, sel, now)
   check("leftover name: two \"Claude Code\" tabs still close by count, as before",
         #p.refused == 0 and #p.byCount == 1 and p.byCount[1].n == 2 and #(p.byLabel or {}) == 0)
+end
+
+-- ---- A merge Shepherd is still checking reads Working, not Heads-up (2026-10-13) ----
+-- 2026-10-13, Adam: "if something is still working i expect it to say working not heads-up". The
+-- Shepherd card read "Heads-up" while its merge request sat in Shepherd's own checks (test gate and
+-- checker running): needsYouKind made a checking (or gate-queued) request a heads-up (2026-09-22, so
+-- it stopped reading red while Merge was greyed out). But nothing on the card is Adam's yet -- it is
+-- Shepherd working. Now core.mergeChecking says so: no heads-up, the running tier, "working" on the lock.
+do
+  local NOW = 1791910000
+  check("core.mergeChecking exists", type(core.mergeChecking) == "function")
+  -- the card in the screenshot: its turn ended, cc-merge.sh request waiting in the background
+  local card = { key = "8b7cdfbd", status = "done", bg_active = true, bg_jobs = 1,
+                 merge = { phase = "requested", needsYou = true, checking = true, branch = "fix/close-unclaimed-tabs" } }
+  eq("checking: a merge in Shepherd's checks is no heads-up", (core.needsYouKind(card, NOW)), nil)
+  check("checking: ...it is Shepherd working", core.mergeChecking and core.mergeChecking(card) == true)
+  eq("checking: ...ranked with the working sessions", core.instanceTier(card, {}, NOW), core.TIER_RUNNING)
+  eq("checking: ...and the lock counts it as working", core.lockState(card), "working")
+  -- with no background job (the waiter ran some other way) it is still working, not "Ready for you"
+  local quiet = { key = "q", status = "done", merge = { phase = "requested", needsYou = true, checking = true } }
+  eq("checking: without a background job it still ranks with the working sessions", core.instanceTier(quiet, {}, NOW), core.TIER_RUNNING)
+  eq("checking: ...and the lock still counts it", core.lockState(quiet), "working")
+  local queued = { key = "g", status = "done", merge = { phase = "requested", needsYou = true, checking = true, gateQueued = true } }
+  eq("checking: a gate queued behind another run is Shepherd working too", (core.needsYouKind(queued, NOW)), nil)
+  check("checking: ...", core.mergeChecking and core.mergeChecking(queued) == true)
+  -- what this must not disturb
+  local ready = { key = "r", status = "done", merge = { phase = "requested", needsYou = true, checking = false } }
+  eq("checking: once the checks are done it needs Adam (Merge is pressable)", (core.needsYouKind(ready, NOW)), "needs")
+  check("checking: ...and is no longer 'checking'", core.mergeChecking and core.mergeChecking(ready) == false)
+  local gone = { key = "x", status = "done", merge = { phase = "requested", needsYou = true, checking = true, waiterAlive = false } }
+  eq("checking: a request nobody waits on any more stays a heads-up", (core.needsYouKind(gone, NOW)), "fyi")
+  check("checking: ...and isn't Shepherd working", core.mergeChecking and core.mergeChecking(gone) == false)
+  check("checking: no merge at all isn't checking", core.mergeChecking and core.mergeChecking({ status = "done" }) == false)
+  -- a held question or an approval still outranks it
+  eq("checking: a real approval on the same card still needs Adam",
+     (core.needsYouKind({ key = "a", status = "approval", merge = card.merge }, NOW)), "needs")
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

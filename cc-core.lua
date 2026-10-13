@@ -1553,6 +1553,16 @@ function M.isDriving(it)
     and (it.status == "done" or it.status == "idle") or false
 end
 
+-- A merge request Shepherd is still checking (2026-10-13): its test gate running or queued, its
+-- requester still waiting. Merge isn't pressable yet, so it is Shepherd working, not Adam's turn --
+-- the card reads Working and ranks with the working sessions (core.needsYouKind, core.instanceTier,
+-- core.lockState). Pure.
+function M.mergeChecking(it)
+  local m = type(it) == "table" and type(it.merge) == "table" and it.merge or nil
+  if not (m and m.needsYou and m.phase == "requested") or m.waiterAlive == false then return false end
+  return (m.checking or m.gateQueued) and true or false
+end
+
 -- ---- "Needs you" only when Adam can actually do something (2026-09-17) -----------------
 -- Live: he configured merge.gates, and TWO units that had merged hours earlier each got a
 -- post-merge test gate started retroactively the moment the config appeared. Both ran
@@ -1648,16 +1658,16 @@ function M.needsYouKind(it, now)
       -- there is nothing on the card to press. Two of these at once read as Shepherd re-asking
       -- the merge Adam had JUST approved, in red, above every working session. It re-ranks
       -- itself the moment the gate finishes; mergeNeedsYou stays true so the review still renders.
-      -- 2026-09-22: ...and a gate that hasn't STARTED says so. Saying "still running" about a
-      -- gate queued behind another run in the repo was the card's third contradicting story.
-      if m.gateQueued then
-        return "fyi", "merge", "its test gate is queued behind another run in this repo -- it hasn't started yet"
-      end
-      if m.checking then return "fyi", "merge", "the test gate is still running -- nothing to press yet" end
+      -- 2026-10-13 REQUIREMENT CHANGE (Adam: "if something is still working i expect it to say
+      -- working not heads-up"): that state was a heads-up; it is Shepherd working (core.mergeChecking),
+      -- so this arm gives no verdict and the card reads Working, ranked with the working sessions.
+      -- The card's merge line still says which check: running, or queued behind another run.
+      if not M.mergeChecking(it) then return "needs", "merge" end
+    elseif m.phase == "blocked" then
       return "needs", "merge"
+    else
+      return "fyi", "merge", "nothing here changes it -- Dismiss once you've read it"
     end
-    if m.phase == "blocked" then return "needs", "merge" end
-    return "fyi", "merge", "nothing here changes it -- Dismiss once you've read it"
   end
 
   -- 3. a batch proposal: the grant is delivered to the proposing session.
@@ -1866,7 +1876,9 @@ function M.instanceTier(it, seenAt, now)
   -- one: Chargeback Sentinel's card read "Ready for you" while its driver was still working.
   -- 2026-09-18: except a tab-less leftover gone quiet at "working" (M.tablessStalled) -- it led
   -- Voice-Agent's card at "2h Working" over the session Adam was using.
-  if (st == "working" and not M.tablessStalled(it)) or (it and it.bg_active) then return M.TIER_RUNNING end
+  if (st == "working" and not M.tablessStalled(it)) or (it and it.bg_active) or M.mergeChecking(it) then
+    return M.TIER_RUNNING      -- 2026-10-13: ...and a merge Shepherd is still checking
+  end
   if M.doneUnseen(it, seenAt) then return 4 end
   return 5
 end
@@ -6415,7 +6427,7 @@ function M.lockState(it)
     if source == "error" then return "error" end
     return "approval"
   end
-  if it.status == "working" or it.bg_active then return "working" end
+  if it.status == "working" or it.bg_active or M.mergeChecking(it) then return "working" end
   return nil
 end
 

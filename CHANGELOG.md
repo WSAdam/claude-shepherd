@@ -38,6 +38,11 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
   Shepherd's (2). Adam's call widens the rule (`core.unclaimedTabs`): when a window's Claude tabs
   equal its live sessions with a tab, and every unnamed session is selected, the tabs no named
   session claims close. "Claude Code" ones close by count, any other by its own single-match name.
+- Changed (2026-10-13): a card whose merge request Shepherd is still checking (its test gate
+  running or queued) reads **Working**, with the working dot, ranks with the working sessions, and
+  draws a working ring on the lock. It used to read **Heads-up**. Adam: "if something is still
+  working i expect it to say working not heads-up". Nothing on it is his to press until the checks
+  finish, and then it turns red as before (`core.mergeChecking`).
 
 - Fixed (2026-10-13): the 🔒 lock read "3 working" over four busy cards. A session whose turn had
   ended with background work still going (its card "Running 1 job") wasn't counted and drew no

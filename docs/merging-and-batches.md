@@ -62,8 +62,6 @@ session that is working. Heads-ups include:
 
 - a merge request whose `cc-merge.sh` has gone,
 - a question whose session exited,
-- a merge request whose test gate is still running (nothing to press yet; it turns red on its own
-  the moment the gate finishes),
 - a batch unit's merge while [the checker](#the-checker-a-read-only-review-of-every-merge-request)
   reviews it (on a pass it merges on your grant unless [grant grading](#grant-grading-a-risky-merge-waits-for-your-click)
   holds it, and it turns red on a fail),
@@ -72,6 +70,10 @@ session that is working. Heads-ups include:
 - an error you stopped yourself, or one on a session that has exited,
 - a session stopped by a usage limit while its
   [resume at the reset](automation.md#resume-at-the-limit-reset) is scheduled.
+
+A merge request Shepherd is still checking (its test gate running or queued) is neither: the card
+reads **Working**, with the working dot, and ranks with the working sessions. Nothing on it is
+yours to press yet; it turns red on its own the moment the checks finish.
 
 A unit that came back **blocked** stays Needs you. The affordance isn't the Dismiss button, it's
 the stalled tab and the branch, and a blocked unit going quiet is how parallel work gets silently
@@ -107,8 +109,9 @@ through your login shell, once per request per commit (a new commit in the workt
 ```
 
 - While it runs, the card says *checking* and **Merge** is refused. A gate still waiting for its
-  repo's lane says it is *queued behind another run in this repo* instead. The card, its reason
-  and the review all name which of the two it is, and a queued gate holds the merge just the same.
+  repo's lane says it is *queued behind another run in this repo* instead. The card's merge line
+  and the review both name which of the two it is, and a queued gate holds the merge just the same.
+  Either way the card's status reads **Working**.
 - A red or timed-out run blocks the merge: your button **and** a batch unit's merge on your grant.
   The review leads with the **failing lines** of the suite's own output (`FAIL`, `not ok`, an
   `N run, M failed` summary), names the full log's path, and keeps the last lines underneath as

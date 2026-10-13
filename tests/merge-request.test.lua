@@ -582,11 +582,13 @@ do
   check("...a queued GATE is never read as a place in the APPROVAL queue", sWait.merge.queued == nil)
   check("...neither is ready: a gate that never ran proves nothing",
         sRun.merge.ready == false and sWait.merge.ready == false)
-  check("...and the waiting card's reason says it is waiting, not that it is running  ("
-        .. tostring(sWait.needsYouWhy) .. ")",
-        sRun.needsYou == "fyi" and sWait.needsYou == "fyi"
-        and (sWait.needsYouWhy or ""):find("queued behind another run", 1, true) ~= nil
-        and (sWait.needsYouWhy or ""):find("still running", 1, true) == nil)
+  -- REQUIREMENT CHANGE 2026-10-13 (Adam: "if something is still working i expect it to say working
+  -- not heads-up"): both cards were heads-ups with a reason; they are Shepherd working now, stamped
+  -- it.mergeChecking with no needs-you verdict. Which check it is lives on in the merge line above.
+  check("...and both cards read as Shepherd working, not heads-ups  ("
+        .. tostring(sRun.needsYou) .. "/" .. tostring(sWait.needsYou) .. ")",
+        sRun.needsYou == "no" and sWait.needsYou == "no"
+        and sRun.mergeChecking == true and sWait.mergeChecking == true)
 end
 tick(); tick()
 check("...and it stays one gate however many ticks pass", #gateTasks("GATE-S") == 1)
