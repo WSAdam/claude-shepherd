@@ -627,6 +627,8 @@ cc_cross_prune() {
 $files
 EOF
   find "$CC_CROSS_DIR" -maxdepth 1 -type f -name '*.notice' -mtime +30 -exec rm -f {} + 2>/dev/null
+  # Shepherd's answers to a waiting cc-send (2026-10-14, unit 2) nobody took in an hour
+  find "$CC_CROSS_DIR" -maxdepth 1 -type f -name '*.answer' -mmin +60 -exec rm -f {} + 2>/dev/null
   cc_have_jq || return 0
   files="$(find "$CC_CROSS_DIR" -maxdepth 1 -type f -name '*.json' ! -name '*.req.json' -mtime +7 2>/dev/null)"
   while IFS= read -r f; do

@@ -23,6 +23,16 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
   (`cc_session_project`). A ticket whose close note waits for Adam isn't offered or taken again.
 - Changed: a card red only for its own crossing can still be offered tickets and cc-send prompts, and
   its generic Approve/Deny are locked: the crossing has its own.
+- Added: **cc-send crossings**. A `cc-send.sh` from a Claude session to a session of another project
+  is held on the sender's card like a ticket (`FX.sendHold`), and nothing is delivered until Adam
+  approves it, edited if he likes. With `--wait`, Shepherd follows the reply itself
+  (`core.sendFollowStep`, the Lua twin of cc-send.sh's jq reducer, run against it on every
+  fixture) and holds it on the replying session's card. The CLI prints only the reply Adam passes
+  on, and never learns where the other session's transcript is. Who sent a request is read from the
+  CLI's process ancestry (`core.ancestorSession`), so unsetting or borrowing a session id doesn't
+  make it local. A send held for a project with no live session reads as a heads-up, and Approve
+  waits for one. A Deny exits the waiting CLI with 7. Same-project sends and Adam's own terminal are
+  unchanged.
 
 ## 2026-10-13 — My List lanes and review, merges in auto mode
 

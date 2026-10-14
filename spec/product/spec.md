@@ -531,8 +531,13 @@ ticket carries no text and stays immediate, but only a session it was offered to
 crossings shipped (2026-10-15) went through as they were. Limit: every session runs as the same Unix
 user, so one that writes another project's files directly (`cc-inbox`, a ticket file, a transcript)
 isn't stopped; every channel Shepherd provides is, and sessions are told not to route around a
-hold. cc-send between projects is the second unit of this decision; fleet batches from another
-repo's folder, cc-lesson and Claude Code's own SendMessage were left as they are. **[DECISION D-27]**
+hold. cc-send between projects gets the same approval: a send from a Claude session to a session of
+another project waits on the sender's card, and with `--wait` its reply waits on the replying
+session's card before the sender sees it. Shepherd follows the reply itself, so the sender is never
+told where the other side's transcript is, and who sent a request is read from the CLI's process
+ancestry, never its environment. Same-project sends and Adam's own shell stay instant. Fleet batches
+from another repo's folder, cc-lesson and Claude Code's own SendMessage were left as they are.
+**[DECISION D-27]**
 
 **Audit:** an append-only JSONL **ledger** (`~/.claude/cc-ledger/`; off in code, on in a fresh
 install's defaults) is the data source for **Fleet insights**, **notification history**, the

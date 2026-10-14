@@ -479,6 +479,12 @@ echo ""
 echo "== bash: cc-send.sh -- arguments, Shepherd's answer, --wait following literal transcripts to the turn's end, the reply alone on stdout =="
 bash "$DIR/send.test.sh" || fail=1
 echo ""
+echo "== lua: cc-send crossings -- a send to another project held on the sender's card (who sent it read from the CLI's ancestry), Adam's text delivered, the reply followed by Shepherd and held on its writer's card; sendFollowStep vs cc-send.sh's jq (stubbed hs) =="
+HOME="$(mktemp -d)" lua "$DIR/send-cross.test.lua" || fail=1
+echo ""
+echo "== bash: cc-send.sh crossings -- held: exit 0, or --wait for Adam's decision and the reply he passes on (exit 7 on a Deny), answers bound to the nonce =="
+bash "$DIR/send-cross.test.sh" || fail=1
+echo ""
 echo "== lua: requirement ids and the merge receipt -- REQ-NNN per repo, never reused, a racing writer never loses an id (temp + mv), the add guard, the receipt on literal request/facts fixtures, display only =="
 lua "$DIR/reqs.test.lua" || fail=1
 echo ""

@@ -4164,6 +4164,29 @@ do
   check("crossings: cc-ticket.sh never writes a ticket file itself (Shepherd publishes)",
         not ts:find('> "$CC_TICKETS_DIR', 1, true) and not ts:find('mv "$TMP" "$CC_TICKETS_DIR', 1, true))
   check("crossings: ...it leaves requests for Adam (cc_cross_request)", ts:find("cc_cross_request", 1, true) ~= nil)
+  -- unit 2 (cc-send): a send is held BEFORE anything is delivered, its answer names no path of the other
+  -- side, and only Adam's approval (FX.crossPublishSend) delivers it -- to the project he approved
+  local sh = src:match("function FX%.sendHandle%(owner, id, raw, views, reg, now%)(.-)\nend\n") or ""
+  local holdAt, deliverAt = sh:find("core.sendCrosses(", 1, true), sh:find("FX.deliverTo(it, core.sendText(", 1, true)
+  check("crossings: cc-send holds a send to another project before anything is delivered",
+        holdAt ~= nil and deliverAt ~= nil and holdAt < deliverAt)
+  check("crossings: ...the sender is the CLI's ancestry, picked before the target",
+        sh:find("local sender = FX.sendSender(req, views, reg)", 1, true) ~= nil
+        and sh:find("local sender = FX.sendSender(req, views, reg)", 1, true) < (sh:find("core.sendTarget(", 1, true) or 0))
+  local heldAnswer = sh:match("held = true, cid = rec%.cid(.-)%)") or "?"
+  check("crossings: ...and the held answer names no transcript, offset or mailbox",
+        sh:find("held = true, cid = rec.cid", 1, true) ~= nil and not heldAnswer:find("transcript", 1, true)
+        and not heldAnswer:find("offset", 1, true) and not heldAnswer:find("mailbox", 1, true))
+  local pub =src:match("function FX%.crossPublishSend%(rec, now%)(.-)\nend\n") or ""
+  check("crossings: an approved send goes only to a session of the project Adam approved",
+        pub:find("core.crossSendRetarget(", 1, true) ~= nil and pub:find("core.crossSendRetarget(", 1, true) < (pub:find("FX.deliverTo(", 1, true) or 0))
+  check("crossings: ...and its answer to the waiting CLI names no transcript path either",
+        not ((pub:match('FX%.crossAnswer%(rec%.cid, "answer",(.-)%)') or ""):find("transcript", 1, true)))
+  check("crossings: who sent it is read with one ps of every process", src:find('hs.execute("ps -A -o pid=,ppid=,comm= 2>/dev/null")', 1, true) ~= nil)
+  check("crossings: the reply is followed by Shepherd, walking lines with find (never a *-pattern over a torn read)",
+        (src:match("function FX%.crossFollow%(rec, now, tileOf%)(.-)\nend\n") or ""):find('chunk:find("\\n", pos, true)', 1, true) ~= nil)
+  check("crossings: the tick follows the replies and marks a send nobody can take",
+        step2:find("FX.crossFollow", 1, true) ~= nil and step2:find("rec._deliverable, rec._why = false", 1, true) ~= nil)
   check("crossings: the generic Approve/Deny lock on a card red only for its crossing",
         src:find('var crossOnly = !remote && it.needsYouSource === "cross"', 1, true) ~= nil
         and src:find("lockCtl(bap, crossOnly ? CROSS_LOCK_T", 1, true) ~= nil

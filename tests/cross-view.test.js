@@ -89,6 +89,15 @@ eq("Deny sends only Adam's note", JSON.stringify(ui.crossPayload("ticket", "deny
 eq("the big box holds a filing's body, capped at 2500", JSON.stringify(ui.crossBox({ kind: "ticket", body: "b", caps: { body: 2500 } })),
    JSON.stringify({ text: "b", max: 2500 }));
 eq("...a reply's text, capped at 2000", ui.crossBox({ kind: "ticket-reply", text: "r", caps: { text: 2000 } }).max, 2000);
+// 2026-10-14 (unit 2): a cc-send prompt and the reply coming back are edited as text, never as a "note"
+eq("Approve on a cc-send prompt sends its text", JSON.stringify(ui.crossPayload("send", "approve", "", "P2", "")),
+   JSON.stringify({ verdict: "approve", text: "P2" }));
+eq("...on a reply coming back, its text", JSON.stringify(ui.crossPayload("send-reply", "approve", "", "R3", "")),
+   JSON.stringify({ verdict: "approve", text: "R3" }));
+eq("the big box holds a prompt, capped at 3500", JSON.stringify(ui.crossBox({ kind: "send", text: "p", caps: { text: 3500 } })),
+   JSON.stringify({ text: "p", max: 3500 }));
+eq("...a reply coming back, capped at 8000", JSON.stringify(ui.crossBox({ kind: "send-reply", text: "r", caps: { text: 8000 } })),
+   JSON.stringify({ text: "r", max: 8000 }));
 
 // ---- the card's review: filled once, edits kept, refilled for a new crossing ----
 const view = { kind: "ticket", title: "Bump the parser", body: "alpha needs 2.x.", sub: "Nothing reaches beta until you approve it.",

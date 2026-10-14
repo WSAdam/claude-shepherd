@@ -99,6 +99,9 @@ delegation, idle/auto-spawn routing targets) are intentionally omitted until the
 - As a **fleet operator**, I want Deny to keep a crossing back and tell its session my note, at once if it's live or at its next start, so that the session knows why and doesn't try another way round.
 - As a **fleet operator**, I want a crossing to wait for me however long it takes, through its session's /clear and end, and to show on the 🎫 board when its session has no card, so that nothing is lost or decided by a timeout.
 - As a **developer**, I want only a ticket's filer, its holder and its target repo's sessions to take or read it -- a session's repo being where it launched, not where it cd'd -- so that a third project can't reach a ticket by its id.
+- As a **fleet operator**, I want a cc-send from one project's session to another project's session held on the sender's card like a ticket, and its --wait reply held on the replying session's card, so that cc-send isn't a way around crossings.
+- As a **fleet operator**, I want who sent a cc-send read from its process, not its environment, so that unsetting or borrowing a session id never makes a cross-project send look local.
+- As a **developer**, I want sends within one project, and from my own terminal, to go at once as before, so that crossings only slow down what actually crosses.
 
 ## Session observability
 

@@ -428,11 +428,22 @@ reply="$(~/.claude/cc-send.sh ~/Programming/wgsUltra "Summarise what you changed
   that takes it ends, then prints that turn's last assistant text on stdout. Progress and errors go
   to stderr, so `$(…)` captures just the reply. `--timeout <seconds>` (default 1800) bounds the
   wait. A prompt handed over at a session's start is answered in that session's next turn.
-- **Exit codes.** 0 sent (with `--wait`: answered) · 2 refused (the arguments, an empty prompt, a
-  slash command, too long, no such folder) · 3 no session to send it to (none, ambiguous, waiting
-  on you, ended, or yourself) · 4 `--wait` ran out · 5 no reply to print (the turn was interrupted
-  or died on an API error, or there is no transcript to follow) · 6 Shepherd isn't running, or
-  didn't take the request within 30 seconds (it is then withdrawn, so it can't arrive later).
+- **Between projects, you approve it.** A send from a Claude session to a session of **another**
+  project is a [crossing](#crossings): it waits on the sending session's card until you approve it
+  (edited if you like), and nothing reaches the other session before you do. Without `--wait`
+  cc-send says it's held and exits 0. With `--wait` it waits for your decision, then for the reply
+  -- Shepherd follows the other session's transcript itself and holds the reply on *that* session's
+  card for you too -- and prints only the reply you passed on. If its wait runs out, the reply
+  reaches the sender's mailbox once you pass it. Who sent it is read from cc-send's own process
+  ancestry, not its environment, so unsetting or borrowing a session id doesn't make it local. A
+  send held for a project with no live session reads as a heads-up on the card, and Approve waits
+  until one is there. Sends within one project, and from your own terminal, go at once as above.
+- **Exit codes.** 0 sent, or held for your approval (with `--wait`: answered) · 2 refused (the
+  arguments, an empty prompt, a slash command, too long, no such folder) · 3 no session to send it
+  to (none, ambiguous, waiting on you, ended, or yourself) · 4 `--wait` ran out · 5 no reply to
+  print (the turn was interrupted or died on an API error, or there is no transcript to follow) ·
+  6 Shepherd isn't running, or didn't take the request within 30 seconds (it is then withdrawn, so
+  it can't arrive later) · 7 you kept it, or its reply, back (your note on stderr).
 - **Under the hood.** cc-send leaves a request in `~/.claude/cc-send/`; each tick Shepherd claims
   it, picks the session (`core.sendTarget`), hands it the prompt (`FX.deliverTo`) and answers with
   where it went and where to read the reply. A request goes with the session that made it, and

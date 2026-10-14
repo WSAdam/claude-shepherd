@@ -21,11 +21,19 @@
 # takes it ends, then prints the assistant's final text on stdout. Everything else -- progress and
 # errors -- goes to stderr, so reply="$(cc-send.sh my-repo "..." --wait)" holds just the reply.
 #
-# Exit codes: 0 sent (with --wait: answered); 2 refused (the arguments, an empty prompt, a slash
-# command, over 3500 bytes, no such folder); 3 no session to send it to (none, ambiguous, waiting on
-# you, ended, or yourself); 4 --wait ran out (--timeout, default 1800s); 5 no reply to print (the
-# turn was interrupted or died on an API error, or its transcript can't be followed); 6 Shepherd
-# isn't running or didn't take the request.
+# 2026-10-14 (crossings, D-27): a send from a Claude session to a session of ANOTHER project waits for
+# Adam -- held on the sending session's card, where he may edit it, then approves or denies it. Who
+# sent it is read from this process's ancestry, not its environment. Without --wait it exits 0 once
+# held; with --wait it waits for his decision, then for the reply he passes on (that waits for him
+# too) -- Shepherd follows the other session's transcript itself. Same-project sends, and sends from
+# Adam's own shell, are delivered at once as above.
+#
+# Exit codes: 0 sent, or held for Adam (with --wait: answered); 2 refused (the arguments, an empty
+# prompt, a slash command, over 3500 bytes, no such folder); 3 no session to send it to (none,
+# ambiguous, waiting on you, ended, or yourself); 4 --wait ran out (--timeout, default 1800s); 5 no
+# reply to print (the turn was interrupted or died on an API error, or its transcript can't be
+# followed); 6 Shepherd isn't running or didn't take the request; 7 Adam kept it -- or the reply --
+# back (his note on stderr).
 set -u
 
 # shellcheck source=cc-lib.sh
@@ -61,7 +69,9 @@ while [ $# -gt 0 ]; do
       printf '%s\n' "$USAGE"
       printf '%s\n' "  Hands a live session (a key or name) or a project's best live session (a repo root or name) the" \
         "  prompt through Shepherd's session mailbox. --wait prints its reply on stdout; progress goes to stderr." \
-        "  Exit: 0 sent, 2 refused, 3 no session to send to, 4 --wait ran out, 5 no reply, 6 Shepherd isn't running."
+        "  A send to ANOTHER project's session waits for Adam's approval (and so does its reply); don't route around it." \
+        "  Exit: 0 sent (or held for Adam), 2 refused, 3 no session to send to, 4 --wait ran out, 5 no reply," \
+        "  6 Shepherd isn't running, 7 Adam kept it (or the reply) back."
       exit 0 ;;
     --) shift; while [ $# -gt 0 ]; do positional "$1"; shift; done ;;
     -?*) usage_error "unknown option: $1" ;;
@@ -117,10 +127,12 @@ ANS="$CC_SEND_DIR/$OWNER.$ID.answer"
 CHUNK=""
 trap 'rm -f "$REQ" "$REQ.tmp.$$" "$ANS" "$ANS.claim.$$" ${CHUNK:+"$CHUNK"}' EXIT
 trap 'exit 130' INT TERM
+# cli_pid (2026-10-14): this process -- Shepherd reads who really sent it from its ancestry, never from
+# the session id in the environment (a send to ANOTHER project's session waits for Adam: D-27)
 jq -n --arg id "$ID" --arg nonce "$NONCE" --arg target "$TARGET" --arg path "$PATH_ARG" --arg text "$TEXT" \
    --argjson wait "$([ "$WAIT" = 1 ] && echo true || echo false)" --arg key "${SID:+$OWNER}" --arg pid "$CPID" \
-   --arg cwd "$PWD" --argjson at "$NOW" '
-  { v: 1, id: $id, nonce: $nonce, target: $target, text: $text, wait: $wait, at: $at,
+   --arg cwd "$PWD" --argjson at "$NOW" --arg cli "$$" '
+  { v: 1, id: $id, nonce: $nonce, target: $target, text: $text, wait: $wait, at: $at, cli_pid: $cli,
     from: ({ cwd: $cwd } + (if $key != "" then { key: $key } else {} end) + (if $pid != "" then { pid: $pid } else {} end)) }
   + (if $path != "" then { path: $path } else {} end)' > "$REQ.tmp.$$" && mv "$REQ.tmp.$$" "$REQ" \
   || refuse "couldn't write the request in $CC_SEND_DIR"
@@ -166,6 +178,53 @@ if [ "$(field '.ok')" != "true" ]; then
     expired) exit 6 ;;
     *) exit 3 ;;
   esac
+fi
+# ---- held: the target is in ANOTHER project, so Adam approves it first (2026-10-14, D-27) ----
+# Shepherd held it on this session's card instead of delivering it. Without --wait that is all: it goes
+# out once he approves it. With --wait: his decision (<cid>.answer), then the reply he passes on
+# (<cid>.reply.answer), each bound to this request's nonce. Shepherd follows the other side's
+# transcript itself -- this CLI is never told where it is.
+if [ "$(field '.held')" = "true" ]; then
+  CID="$(field '.cid')"
+  case "$CID" in ''|*/*|.*) say "❌ cc-send: Shepherd held it but gave no crossing id"; exit 6 ;; esac
+  say "⏸ Held for Adam: '$TARGET' is in another project$( [ -n "$(field '.project')" ] && printf ' (%s)' "$(field '.project')"), so nothing reaches it until he approves it on this session's card in Shepherd -- he may edit it first."
+  say "   Don't resend it or route around Shepherd. If he denies it, his note reaches you through your mailbox."
+  [ "$WAIT" = 1 ] || exit 0
+  # cross_answer <suffix>: Shepherd's answer for this crossing, if it's there and this request's
+  cross_answer() {
+    local f="$CC_CROSS_DIR/$CID.$1" claim
+    [ -f "$f" ] || return 1
+    claim="$f.claim.$$"
+    mv "$f" "$claim" 2>/dev/null || return 1
+    if [ "$(jq -r '.nonce // empty' "$claim" 2>/dev/null)" = "$NONCE" ]; then cat "$claim"; rm -f "$claim"; return 0; fi
+    mv "$claim" "$f" 2>/dev/null   # not this request's: leave it where it was
+    return 1
+  }
+  say "⏳ Waiting for Adam, then for the reply he passes on (up to ${TIMEOUT}s)..."
+  START="$(date +%s)" PHASE=decision
+  while :; do
+    if [ "$PHASE" = decision ] && A="$(cross_answer answer)"; then
+      if [ "$(printf '%s' "$A" | jq -r '.ok')" != true ]; then
+        say "❌ cc-send: $(printf '%s' "$A" | jq -r '.reason // "Adam didn'"'"'t pass it on"')"
+        [ "$(printf '%s' "$A" | jq -r '.code // empty')" = denied ] && exit 7
+        exit 3
+      fi
+      say "📬 Adam passed it on: sent to $(printf '%s' "$A" | jq -r '.name // "the session"'). Waiting for its reply -- Adam approves that too."
+      PHASE=reply
+    elif [ "$PHASE" = reply ] && A="$(cross_answer reply.answer)"; then
+      case "$(printf '%s' "$A" | jq -r '.verdict // empty')" in
+        approved) say "✅ Adam passed the reply on."; printf '%s\n' "$(printf '%s' "$A" | jq -r '.text // ""')"; exit 0 ;;
+        denied) say "❌ cc-send: Adam kept the reply back$(w="$(printf '%s' "$A" | jq -r '.why // empty')"; [ -n "$w" ] && printf ': %s' "$w")"; exit 7 ;;
+        *) say "❌ cc-send: no reply: $(printf '%s' "$A" | jq -r '.why // "none came"')"; exit 5 ;;
+      esac
+    fi
+    if [ $(( $(date +%s) - START )) -ge "$TIMEOUT" ]; then
+      if [ "$PHASE" = decision ]; then say "⏳ cc-send: Adam hasn't decided within ${TIMEOUT}s -- it still waits on this session's card; the reply reaches you through your mailbox once he passes it."
+      else say "⏳ cc-send: no reply passed on within ${TIMEOUT}s -- it reaches you through your mailbox once Adam passes it."; fi
+      exit 4
+    fi
+    sleep "$POLL"
+  done
 fi
 NAME="$(field '.name')"; KEY="$(field '.key')"; PROJECT="$(field '.project')"; ROUTE="$(field '.route')"
 TRANSCRIPT="$(field '.transcript')"; OFFSET="$(field '.offset')"; MARKER="$(field '.marker')"; MAILBOX="$(field '.mailbox')"

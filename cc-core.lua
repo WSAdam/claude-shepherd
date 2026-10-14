@@ -1681,7 +1681,12 @@ function M.needsYouKind(it, now)
   -- close note -- held until Adam approves it (core.crossTiles, stamped by FX.stepCrossings). Nothing
   -- reaches the other side without his click, and the record outlives the session, so it always counts.
   local cx = type(it.crossing) == "table" and it.crossing or nil
-  if cx and (tonumber(cx.n) or 0) > 0 then return "needs", "cross" end
+  if cx and (tonumber(cx.n) or 0) > 0 then
+    -- 2026-10-14 (unit 2): a cc-send whose project has no live session to take it can't be passed on
+    -- yet -- a heads-up that says so, red again the moment one appears
+    if cx.deliverable == false then return "fyi", "cross", tostring(cx.why or "nobody there can take it now") end
+    return "needs", "cross"
+  end
 
   -- 4. a permission prompt. An armed gate takes a decision file; anything else (a gate that
   -- timed out into the native prompt) is Approve/Deny as KEYSTROKES, which a window shared by
@@ -14616,9 +14621,11 @@ function M.parseSendRequest(raw, id, now)
   end
   local from = type(t.from) == "table" and t.from or {}
   local path = type(t.path) == "string" and not t.path:find("%c") and normPath(t.path) or nil
+  -- cliPid (2026-10-14): the CLI's own pid -- who really sent it is its ancestry (core.ancestorSession)
   return { id = id, nonce = nonce, target = target, path = path, text = text, wait = t.wait == true, at = at,
            from = { key = M.mailboxKeyOk(from.key) and from.key or nil,
-                    pid = tostring(from.pid or ""):match("^%d+$") } }
+                    pid = tostring(from.pid or ""):match("^%d+$") },
+           cliPid = tostring(t.cli_pid or ""):match("^%d+$") }
 end
 -- What a delivered prompt carries so --wait can find it in the transcript: "cc-send #<id>".
 function M.sendMarker(id) return "cc-send #" .. tostring(id) end
@@ -15082,9 +15089,13 @@ M.CROSS = {
   partSeconds = 60,         -- a claim or temp this old is a dead writer's
   keepSeconds = 7 * 86400,  -- a decided record stays this long
   retrySeconds = 60,        -- a publish that met a busy ticket is tried again after this
+  -- cc-send (unit 2): a reply that comes back over a crossing, the longest Shepherd follows a reply
+  -- for, and how long an answer can sit unclaimed before the sender's mailbox gets it instead
+  sendReplyMax = 8000, followMaxAge = 2 * 3600, answerUnclaimed = 60,
 }
 M.CROSS_EDITED = "(edited by Adam)"
-local KINDS = { ticket = true, ["ticket-reply"] = true, ["ticket-close"] = true, withdraw = true }
+local KINDS = { ticket = true, ["ticket-reply"] = true, ["ticket-close"] = true, withdraw = true,
+                send = true, ["send-reply"] = true }
 local STATES = { pending = true, approved = true, denied = true, void = true, withdrawn = true }
 local function trim(s) return (tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", "")) end
 local function oneLine(s) return trim(tostring(s or ""):gsub("%c+", " ")) end
@@ -15116,7 +15127,11 @@ function M.crossFileOf(name)
     cid = base:match("^(.+%.%d+%-%d+)%.json$")
     if cid then kind = "record" else
       cid = base:match("^(.+%.%d+%-%d+)%.notice$")
-      kind = cid and "notice" or nil
+      if cid then kind = "notice" else
+        -- 2026-10-14 (unit 2): Shepherd's answers to a waiting cc-send (<cid>.answer, <cid>.reply.answer)
+        cid = base:match("^(.+%.%d+%-%d+)%.reply%.answer$") or base:match("^(.+%.%d+%-%d+)%.answer$")
+        kind = cid and "answer" or nil
+      end
     end
   end
   if not cid or not M.crossIdOk(cid) then return nil end
@@ -15149,9 +15164,21 @@ local function texts(kind, f)
     return { note = note }
   elseif kind == "withdraw" then
     return {}
+  elseif kind == "send" then   -- a prompt: what cc-send itself takes (core.SEND), never a slash command
+    local text = trim(f.text)
+    if text == "" then return nil, "the prompt is empty" end
+    if M.mailboxSlash(text) then return nil, "a slash command never crosses" end
+    if #text > M.SEND.textMax then return nil, "the prompt is " .. #text .. " bytes; at most " .. M.SEND.textMax end
+    return { text = text }
+  elseif kind == "send-reply" then
+    local text = trim(f.text)
+    if text == "" then return nil, "the reply is empty" end
+    if #text > M.CROSS.sendReplyMax then return nil, "the reply is " .. #text .. " bytes; at most " .. M.CROSS.sendReplyMax end
+    return { text = text }
   end
   return nil, "unknown kind"
 end
+local function isTicketKind(kind) return type(kind) == "string" and kind:sub(1, 6) == "ticket" or kind == "withdraw" end
 
 -- A request read back, or nil + why. The CLI wrote it, so every field is checked again: its body
 -- names its own file, its author is the cid's, and its text fits the caps.
@@ -15199,7 +15226,9 @@ function M.parseCrossRecord(raw, cid)
   if not M.crossIdOk(cid) or type(raw) ~= "string" then return nil end
   local ok, r = pcall(M.json.decode, raw)
   if not ok or type(r) ~= "table" or r.cid ~= cid or not KINDS[r.kind] or not STATES[r.state] then return nil end
-  if type(r.from) ~= "table" or not M.mailboxKeyOk(r.from.key) or not M.ticketIdOk(r.ticket) then return nil end
+  if type(r.from) ~= "table" or not M.mailboxKeyOk(r.from.key) then return nil end
+  if isTicketKind(r.kind) and not M.ticketIdOk(r.ticket) then return nil end
+  if not isTicketKind(r.kind) and type(r.send) ~= "table" then return nil end
   if type(r.original) ~= "table" then r.original = {} end
   return r
 end
@@ -15300,7 +15329,12 @@ local function what(rec)
   if rec.kind == "ticket" then
     return 'your ticket "' .. M.capChars(oneLine((rec.final or rec.original or {}).title), 120) .. '" for ' .. to
   elseif rec.kind == "ticket-reply" then return "your reply on ticket " .. tostring(rec.ticket) .. " to " .. to
-  elseif rec.kind == "ticket-close" then return "your close note on ticket " .. tostring(rec.ticket) .. " to " .. to end
+  elseif rec.kind == "ticket-close" then return "your close note on ticket " .. tostring(rec.ticket) .. " to " .. to
+  elseif rec.kind == "send" then
+    return "your cc-send prompt (" .. M.sendMarker(type(rec.send) == "table" and rec.send.id or "?") .. ") to " .. to
+  elseif rec.kind == "send-reply" then
+    return "your reply to " .. to .. "'s cc-send (" .. M.sendMarker(type(rec.send) == "table" and rec.send.id or "?") .. ")"
+  end
   return "your message to " .. to
 end
 local function finalText(rec)
@@ -15316,7 +15350,8 @@ function M.crossNoticeText(rec)
   if rec.state == "denied" then
     local note = type(rec.decided) == "table" and trim(rec.decided.note) or ""
     return M.SHEPHERD_TAG .. " Adam didn't pass on " .. what(rec) .. (note ~= "" and (": " .. note) or " (he left no note).")
-      .. "\nNothing reached " .. to .. (rec.kind == "ticket" and "; the ticket was not filed." or ".")
+      .. "\nNothing reached " .. to .. ((rec.kind == "ticket" and "; the ticket was not filed.")
+                                        or (rec.kind == "send" and "; the prompt was not delivered.") or ".")
       .. " Don't resend it or route around Shepherd -- if it still matters, ask Adam."
   elseif rec.state == "approved" and type(rec.decided) == "table" and rec.decided.edited then
     return M.SHEPHERD_TAG .. " Adam passed on " .. what(rec) .. ", edited. What went out:\n\n" .. finalText(rec)
@@ -15334,17 +15369,20 @@ function M.crossLine(rec)
   if rec.kind == "ticket" then return "↔ wants to file a ticket for " .. to .. ": " .. M.capChars(oneLine(o.title), P) end
   if rec.kind == "ticket-reply" then return "↔ wants to send " .. to .. " a reply: " .. M.capChars(oneLine(o.text), P) end
   if rec.kind == "ticket-close" then return "↔ wants to send " .. to .. " its close note: " .. M.capChars(oneLine(o.note), P) end
+  if rec.kind == "send" then return "↔ wants to send " .. to .. " a prompt: " .. M.capChars(oneLine(o.text), P) end
+  if rec.kind == "send-reply" then return "↔ wants to send its reply back to " .. to .. ": " .. M.capChars(oneLine(o.text), P) end
   return "↔ wants to send " .. to .. " something"
 end
 function M.crossView(rec)
   local o, T = rec.original or {}, M.TICKET
   local to = M.capChars(repoName(rec.to), 80)
+  local textCap = (rec.kind == "send" and M.SEND.textMax) or (rec.kind == "send-reply" and M.CROSS.sendReplyMax) or T.replyMax
   return {
     cid = rec.cid, kind = rec.kind, ticket = rec.ticket, to = to, head = M.crossLine(rec),
     sub = "Nothing reaches " .. to .. " until you approve it. Edit it first if you like -- "
       .. to .. " sees " .. M.CROSS_EDITED .. " on what you changed.",
     title = o.title, body = o.body, text = o.text, note = o.note,
-    caps = { title = T.titleMax, body = T.bodyMax, text = T.replyMax, note = T.noteMax, deny = M.CROSS.noteMax },
+    caps = { title = T.titleMax, body = T.bodyMax, text = textCap, note = T.noteMax, deny = M.CROSS.noteMax },
   }
 end
 local function oldestFirst(list)
@@ -15364,7 +15402,12 @@ function M.crossTiles(records, tileKeyOf)
     local k = type(tileKeyOf) == "function" and tileKeyOf(r.from.key, r.from.pid) or nil
     if k then
       local c = out[k]
-      if not c then c = { n = 0, cid = r.cid, line = M.crossLine(r), view = M.crossView(r) }; out[k] = c end
+      if not c then
+        c = { n = 0, cid = r.cid, line = M.crossLine(r), view = M.crossView(r) }
+        -- a send whose project has no live session to take it now (r._deliverable, from FX)
+        if r._deliverable == false then c.deliverable, c.why = false, r._why end
+        out[k] = c
+      end
       c.n = c.n + 1
     end
   end
@@ -15385,6 +15428,139 @@ function M.crossRows(records, onCard, nameOf)
                         fromRepo = M.capChars(repoName({ root = r.from.root }), 80), view = M.crossView(r) }
   end
   return rows
+end
+
+-- ---- cc-send over a crossing (2026-10-14, unit 2) ----
+-- Does a send from project `from` to project `to` cross? Unless Shepherd knows both, and they are one
+-- (a repo's git common dir, or the folder off git): a project it can't place counts as another.
+function M.sendCrosses(from, to)
+  return not (type(from) == "string" and from ~= "" and from == to)
+end
+-- `ps -A -o pid=,ppid=,comm=` -> { [pid] = { ppid, comm } } (pids as strings).
+function M.parsePsTree(out)
+  local tree = {}
+  for line in (tostring(out or "") .. "\n"):gmatch("([^\n]*)\n") do
+    local pid, ppid, comm = line:match("^%s*(%d+)%s+(%d+)%s+(.-)%s*$")
+    if pid then tree[pid] = { ppid = ppid, comm = comm } end
+  end
+  return tree
+end
+-- Who ran the CLI with pid `cliPid`: the first ancestor that is a Claude session Shepherd knows
+-- (isSession(pid)) -> pid, "session"; else the first claude process -> pid, "claude" (a session it
+-- can't place); else nil (Adam's own shell). The environment's session id is never asked: a CLI run
+-- with it unset, or set to another session's, is still its parent's. At most 32 steps, never past 1.
+function M.ancestorSession(cliPid, tree, isSession)
+  tree = type(tree) == "table" and tree or {}
+  local node = tree[tostring(cliPid or "")]
+  local p, hops = node and node.ppid or nil, 0
+  while p and p ~= "0" and p ~= "1" and hops < 32 do
+    if type(isSession) == "function" and isSession(p) then return p, "session" end
+    local n = tree[p]
+    if not n then return nil end
+    local base = tostring(n.comm or ""):match("([^/]+)$") or ""
+    if base == "claude" then return p, "claude" end
+    p, hops = n.ppid, hops + 1
+  end
+  return nil
+end
+-- The record of a send held for Adam. author/target = { key, pid, name, project (an id), projectName }.
+function M.crossSendRecord(req, owner, author, target, now, seq)
+  if type(req) ~= "table" or type(author) ~= "table" or type(target) ~= "table" then return nil end
+  now = tonumber(now) or os.time()
+  local key = M.mailboxKeyOk(author.key) and author.key or "unknown"
+  return {
+    v = 1, cid = key .. "." .. now .. "-" .. tostring(seq or 1), kind = "send", state = "pending", nonce = req.nonce,
+    at = tonumber(req.at) or now, heldAt = now,
+    from = { key = key, pid = author.pid, name = author.name, root = author.project, project = author.projectName },
+    to = { root = target.project, name = target.projectName, key = target.key, session = target.name },
+    send = { id = req.id, owner = owner, target = req.target, path = req.path, wait = req.wait == true, cliPid = req.cliPid },
+    original = { text = req.text },
+  }
+end
+-- The reply a send's target wrote, held for Adam on THAT session's card on its way back.
+function M.crossSendReplyRecord(parent, text, author, now, seq)
+  if type(parent) ~= "table" or type(author) ~= "table" then return nil end
+  now = tonumber(now) or os.time()
+  local key = M.mailboxKeyOk(author.key) and author.key or "unknown"
+  return {
+    v = 1, cid = key .. "." .. now .. "-" .. tostring(seq or 1), kind = "send-reply", state = "pending",
+    nonce = parent.nonce, at = now, heldAt = now, parent = parent.cid,
+    from = { key = key, pid = author.pid, name = author.name, root = parent.to and parent.to.root,
+             project = parent.to and parent.to.name },
+    to = { root = parent.from.root, name = parent.from.project or parent.from.name, key = parent.from.key,
+           pid = parent.from.pid, session = parent.from.name },
+    send = parent.send, original = { text = trim(text) },
+  }
+end
+-- What the sender's mailbox gets when a reply (or its fate) can't go to a waiting cc-send: [shepherd]-marked.
+function M.crossReplyText(rec, body)
+  local who = M.capChars(oneLine(type(rec.from) == "table" and (rec.from.name or rec.from.key) or "the other session"), 80)
+  local id = type(rec.send) == "table" and rec.send.id or "?"
+  return M.SHEPHERD_TAG .. " " .. who .. " in " .. M.capChars(repoName({ root = rec.from.root, name = rec.from.project }), 80)
+    .. " replied to your " .. M.sendMarker(id) .. ", and Adam passed it on:\n\n" .. M.capChars(trim(body), M.SEND.textMax)
+end
+-- The session a held send goes to once Adam approves it: core.sendTarget again, refused if it
+-- would land outside the project he approved (projectOf(tile) -> an id). -> tile, or nil + why.
+function M.crossSendRetarget(views, rec, now, projectOf)
+  local s = type(rec) == "table" and rec.send or nil
+  if type(s) ~= "table" then return nil, "not a send" end
+  local it, why = M.sendTarget(views, s.target, { callerKey = rec.from.key, callerPid = rec.from.pid, path = s.path }, now)
+  if not it then return nil, why end
+  if type(projectOf) == "function" and projectOf(it) ~= rec.to.root then
+    return nil, "its session is in another project now"
+  end
+  return it
+end
+-- One pass over new transcript records (decoded tables, oldest first) after a send, carrying `state`
+-- across passes. THE LUA TWIN OF cc-send.sh's STEP reducer -- KEEP IN SYNC (tests/send-cross.test.lua
+-- runs both on tests/fixtures/send/). The prompt arrives as the record carrying `marker`: a prompt, a
+-- Stop that handed it over (its stop_hook_summary's hookErrors), or a SessionStart that showed it;
+-- the turn then ends at the next stop_hook_summary, or with no reply on an interrupt or an API error.
+-- The reply is the last assistant message with text (its text blocks joined).
+local function textOf(c)
+  if type(c) == "string" then return c end
+  if type(c) ~= "table" then return "" end
+  local parts = {}
+  for _, b in ipairs(c) do
+    if type(b) == "table" and b.type == "text" and type(b.text) == "string" then parts[#parts + 1] = b.text end
+  end
+  return table.concat(parts, "\n")
+end
+local function bodyOf(r) return textOf(type(r.message) == "table" and r.message.content or "") end
+local function isSummary(r) return r.type == "system" and r.subtype == "stop_hook_summary" end
+local function handsOver(r, m)
+  if not isSummary(r) or type(r.hookErrors) ~= "table" then return false end
+  for _, e in ipairs(r.hookErrors) do
+    local s = type(e) == "string" and e or M.json.encode(e)
+    if tostring(s):find(m, 1, true) then return true end
+  end
+  return false
+end
+function M.sendFollowStep(state, records, marker)
+  local s = type(state) == "table" and state or { delivered = false }
+  local m = tostring(marker or "")
+  for _, r in ipairs(records or {}) do
+    if type(r) ~= "table" or s.done ~= nil or r.isSidechain == true then -- nothing
+    elseif not s.delivered then
+      if r.type == "user" and bodyOf(r):find(m, 1, true) then s.delivered = true
+      elseif handsOver(r, m) then s.delivered = true
+      elseif r.type == "attachment" and type(r.attachment) == "table" and r.attachment.hookEvent == "SessionStart"
+             and M.json.encode(r.attachment):find(m, 1, true) then s.delivered = true end
+    elseif handsOver(r, m) then s.reply, s.replyId = nil, nil
+    elseif r.type == "assistant" then
+      if r.isApiErrorMessage == true then s.done, s.error = "error", bodyOf(r)
+      else
+        local t = bodyOf(r)
+        if t:find("%S") then
+          local mid = type(r.message) == "table" and r.message.id or nil
+          if s.replyId ~= nil and s.replyId == mid then s.reply = s.reply .. "\n\n" .. t
+          else s.reply, s.replyId = t, mid end
+        end
+      end
+    elseif r.type == "user" and bodyOf(r):sub(1, 28) == "[Request interrupted by user" then s.done = "interrupted"
+    elseif isSummary(r) then s.done = "ended" end
+  end
+  return s
 end
 end
 
@@ -26280,7 +26456,7 @@ M.FEATURES = {
     what = "A session pins up to 8 links -- a preview URL, a PR, a file in its worktree -- with ~/.claude/cc-pin.sh add <link> [--label L], and they show as chips on its card and in the detail panel; a click opens one. Pins belong to the worktree, so they survive /clear, and go when its merge is verified. Only http(s) links and files under the session's git root are taken, never one holding a shell metacharacter, and each is checked again before it opens.",
     why = "The page to look at, the PR to review or the report to read is one click from the card, not somewhere in the transcript." },
   { key = "send", cat = "Control", new = true, title = "cc-send",
-    what = "~/.claude/cc-send.sh <session|project> \"prompt\" [--wait] hands a live session a prompt from any shell. A session is named by its key or name; a project by its repo root or name, and gets its best live session -- an idle one before a busy one, never one waiting on you, never the caller. It goes through the session mailbox, marked [shepherd] and ledgered: a busy session gets it at its turn end, an idle one typed where typing is safe, else it waits. --wait prints the reply on stdout and everything else on stderr; slash commands are refused.",
+    what = "~/.claude/cc-send.sh <session|project> \"prompt\" [--wait] hands a live session a prompt from any shell. A session is named by its key or name; a project by its repo root or name, and gets its best live session -- an idle one before a busy one, never one waiting on you, never the caller. It goes through the session mailbox, marked [shepherd] and ledgered: a busy session gets it at its turn end, an idle one typed where typing is safe, else it waits. --wait prints the reply on stdout and everything else on stderr; slash commands are refused. A send from a session to ANOTHER project's session is a crossing: it waits on the sender's card for your approval, and so does its reply.",
     why = "A script, a cron job or another session can hand work to a live session and use its answer, without anyone switching tabs." },
   { key = "tickets", cat = "Control", new = true, title = "Cross-repo tickets",
     what = "A session files work for another repo's sessions with ~/.claude/cc-ticket.sh file --repo <root|name> --title T --body B. Once you approve it (see Crossings), Shepherd offers it to that repo's least-busy live session (never one waiting on you) through its mailbox; the session takes it within 45 minutes or it goes to another, and a ticket whose session ends goes back too. Replies and the closing note -- closing always needs one, and you approve each -- come back to the filer the same way, at its next start, or from cc-ticket.sh wait in the background. A ticket no session can take waits on that repo's card and on ☰ → Tickets, with Open a tab for it. Only the filer, the holder and the target repo's sessions can take or read a ticket.",

@@ -10133,9 +10133,25 @@ function FX.sendHandle(owner, id, raw, views, reg, now)
     end
   end
   if not req then return refuse((why == "expired") and "expired" or "refused", why) end
+  -- 2026-10-14 (crossings, unit 2): who really sent it is its CLI's ancestry, and the target is
+  -- picked as that session (never itself)
+  local sender = FX.sendSender(req, views, reg)
   local it, why2, code, choices = core.sendTarget(views, req.target,
-    { callerKey = req.from.key, callerPid = req.from.pid, path = req.path }, now)
+    { callerKey = sender and sender.key or req.from.key, callerPid = sender and sender.pid or req.from.pid, path = req.path }, now)
   if not it then return refuse(code or "none", why2, { choices = choices }) end
+  -- ...and a send to ANOTHER project's session waits for Adam: held on the sender's card, nothing
+  -- delivered, and the CLI told so -- with no transcript, offset or mailbox path of the other side
+  if sender then
+    local fromProj = sender.tile and FX.crossProjectOf(sender.tile) or nil
+    local toProj = FX.crossProjectOf(it)
+    if core.sendCrosses(fromProj, toProj) then
+      local rec, whyh = FX.sendHold(owner, req, sender, it, fromProj, toProj, now)
+      if not rec then return refuse("refused", whyh) end
+      FX.sendAnswer(owner, id, { nonce = nonce, ok = true, held = true, cid = rec.cid, project = rec.to.name,
+                                 name = rec.to.session })
+      return
+    end
+  end
   local from = FX.sendCallerName(req, views, reg)
   local d, why3 = FX.deliverTo(it, core.sendText(req, from), { kind = "send", from = "cc-send" })
   if not d then
@@ -10705,6 +10721,8 @@ end
 -- already was), false when a busy ticket holds it back (retried) or it went void (the author is told).
 function FX.crossPublish(rec, now)
   if rec.state ~= "approved" or rec.published then return rec.published ~= nil end
+  if rec.kind == "send" then return FX.crossPublishSend(rec, now) end           -- unit 2: cc-send
+  if rec.kind == "send-reply" then return FX.crossPublishReply(rec, now) end
   local path = FX.TICKETS_DIR .. "/" .. rec.ticket .. ".json"
   local voidWhy
   if rec.kind == "ticket" then
@@ -10806,6 +10824,245 @@ function FX.crossTileOf(list)
     return (key and byKeyC[key]) or (pid and pid ~= "" and byPidC[tostring(pid)]) or nil
   end
 end
+-- ---- cc-send over a crossing (2026-10-14, unit 2) ----
+-- A cc-send from one project's session to ANOTHER project's is held like a ticket: FX.sendHandle holds
+-- it (FX.sendHold) instead of delivering it, and answers the CLI with no transcript, offset or mailbox
+-- path. Adam's Approve delivers his text (FX.crossPublishSend); then Shepherd -- never the sender --
+-- follows the target's transcript for the reply (FX.crossFollow, core.sendFollowStep) and holds THAT
+-- on the replying session's card. Its Approve hands it to the waiting cc-send.sh (<cid>.reply.answer),
+-- else the sender's mailbox. Who sent a request is its CLI's ancestry, never its environment.
+function FX.psTree()
+  local out = ""
+  pcall(function() out = hs.execute("ps -A -o pid=,ppid=,comm= 2>/dev/null") or "" end)
+  return out
+end
+-- A session's project: its LAUNCH folder's git common dir (one repo, whatever worktree or subfolder),
+-- else the folder off git; nil when Shepherd can't place it (core.sendCrosses then counts it as another).
+function FX.crossProjectOf(it)
+  if type(it) ~= "table" or it.remote then return nil end
+  local launch = FX.launchDirOf(it)
+  if not launch then return nil end
+  local ident = FX.repoIdentity(launch)
+  return (ident and ident.commonDir) or core.normDir(launch)
+end
+function FX.crossProjectName(it, proj)
+  if type(it) == "table" and type(it.stackName) == "string" and it.stackName ~= "" then return it.stackName end
+  if type(proj) ~= "string" then return nil end
+  return (core.repoMainRoot(proj) or proj):match("([^/]+)/*$")
+end
+-- Who sent request `req`: the Claude session above its CLI (core.ancestorSession, one ps) -- never the
+-- session id in its environment, which a CLI can unset or borrow. -> { tile?, key, pid }, or nil for
+-- Adam's own shell. With no ancestry to read (an older CLI, a broken tree) its environment decides.
+function FX.sendSender(req, views, reg)
+  reg = type(reg) == "table" and reg or {}
+  local byPid, byKey = {}, {}
+  for _, v in ipairs(views or {}) do
+    if not v.remote then
+      local p = tostring(v.session_pid or ""):match("^%d+$")
+      if p then byPid[p] = v end
+      if v.key then byKey[v.key] = v end
+    end
+  end
+  if req.cliPid then
+    local pid, how = core.ancestorSession(req.cliPid, core.parsePsTree(FX.psTree()),
+      function(p) return byPid[p] ~= nil or reg[p] ~= nil end)
+    if pid then
+      local t, e = byPid[pid], reg[pid]
+      if not t and type(e) == "table" and type(e.sessionId) == "string" then t = byKey[e.sessionId] end
+      if t then return { tile = t, key = t.key, pid = pid } end
+      local k = (type(e) == "table" and core.mailboxKeyOk(e.sessionId)) and e.sessionId or ("claude-" .. pid)
+      return { key = k, pid = pid, unplaced = how }
+    end
+  end
+  if req.from.key then return { tile = byKey[req.from.key], key = req.from.key, pid = req.from.pid } end
+  return nil
+end
+-- Hold request `req` (from `sender`, for session `it`) for Adam. -> the record, or nil + why.
+function FX.sendHold(owner, req, sender, it, fromProj, toProj, now)
+  local st = sender.tile
+  local seq, rec = (FX._cross.seq or 0), nil
+  repeat
+    seq = seq + 1
+    rec = core.crossSendRecord(req, owner,
+      { key = sender.key, pid = sender.pid, name = st and FX.ticketSessionName(st) or sender.key,
+        project = fromProj, projectName = st and FX.crossProjectName(st, fromProj) or nil },
+      { key = it.key, name = it.peerName or it.label or it.name or it.key, project = toProj,
+        projectName = FX.crossProjectName(it, toProj) }, now, seq)
+  until not rec or not FX.crossLoad(rec.cid)
+  FX._cross.seq = seq
+  if not (rec and FX.crossSave(rec)) then return nil, "couldn't hold it for Adam" end
+  print("[cc-dashboard] ⏸ crossings: holding cc-send " .. req.id .. " (" .. rec.cid .. ") for Adam")
+  FX.appendLedger({ type = "crossing_held", cid = rec.cid, kind = "send", key = rec.from.key, send = req.id,
+                    to = rec.to.root })
+  pcall(function()
+    FX.alert("↔ " .. tostring(rec.from.name or rec.from.key) .. " wants to send " .. tostring(rec.to.name or "another project")
+             .. " a prompt -- it waits for you on its card")
+  end)
+  return rec
+end
+function FX.crossAnswer(cid, suffix, body)
+  return FX.writeFileAtomic(FX.CROSS_DIR .. "/" .. cid .. "." .. suffix, core.json.encode(body))
+end
+-- Is a cc-send --wait still waiting on this crossing (its CLI's process alive)?
+function FX.crossWaiter(rec)
+  local s = type(rec.send) == "table" and rec.send or {}
+  local p = tostring(s.cliPid or ""):match("^%d+$")
+  return s.wait == true and p ~= nil and FX.probeAlive({ [p] = true })[p] ~= false
+end
+-- Tell the session a reply goes back to (rec.to: the original sender) `text`: its live card's mailbox,
+-- else a note for its next start. -> how, or nil.
+function FX.crossTellSender(rec, text, now)
+  local to = type(rec.to) == "table" and rec.to or {}
+  local it = FX.crossTileOf(FX.allItems())(to.key, to.pid)
+  local d = (it and it.procAlive ~= false and not it.tabless) and FX.deliverTo(it, text, { kind = "cross", from = "shepherd" }) or nil
+  if d then return d.route end
+  if not core.mailboxKeyOk(to.key) then return nil end
+  FX._cross.seq = (FX._cross.seq or 0) + 1
+  local cid = to.key .. "." .. now .. "-" .. FX._cross.seq
+  if FX.writeFileAtomic(FX.CROSS_DIR .. "/" .. cid .. ".notice", core.json.encode({ cid = cid, key = to.key, text = text, at = now })) then
+    return "notice"
+  end
+  return nil
+end
+-- A send that will get no reply (an interrupt, an API error, a turn with no text, nothing to follow):
+-- the waiting CLI is told, else the sender's mailbox.
+function FX.crossNoReply(rec, why, now)
+  if FX.crossWaiter(rec) then
+    FX.crossAnswer(rec.cid, "reply.answer", { nonce = rec.nonce, verdict = "none", why = why })
+  else
+    FX.crossTellSender({ to = { key = rec.from.key, pid = rec.from.pid } },
+      core.SHEPHERD_TAG .. " Your " .. core.sendMarker(rec.send.id) .. " to " .. tostring(rec.to.name or "the other project")
+        .. " got no reply: " .. why .. ".", now)
+  end
+end
+-- Adam approved a held send: deliver his text to a live session of the project he approved, answer the
+-- waiting CLI (no paths), and start following the reply. -> true, or false (retried: nobody there now).
+function FX.crossPublishSend(rec, now)
+  local it, why = core.crossSendRetarget(FX.sendViews(FX.allItems()), rec, now, FX.crossProjectOf)
+  if not it then
+    FX._cross.retry[rec.cid] = now + core.CROSS.retrySeconds
+    print("[cc-dashboard] ⚠️ crossings: cc-send " .. rec.cid .. " waits -- " .. tostring(why))
+    return false
+  end
+  local f = rec.final or {}
+  local text = tostring(f.text or "") .. ((rec.decided and rec.decided.edited) and ("\n\n" .. core.CROSS_EDITED) or "")
+  local d, why2 = FX.deliverTo(it, core.sendText({ id = rec.send.id, wait = rec.send.wait, text = text }, rec.from.name),
+                               { kind = "send", from = "cc-send" })
+  if not d then
+    FX._cross.retry[rec.cid] = now + core.CROSS.retrySeconds
+    print("[cc-dashboard] ⚠️ crossings: cc-send " .. rec.cid .. " not delivered: " .. tostring(why2))
+    return false
+  end
+  local name = it.peerName or it.label or it.name or it.key
+  rec.published = { at = now, key = it.key, route = d.route }
+  if rec.send.wait then
+    rec.follow = { key = it.key, pid = tostring(it.session_pid or ""), name = name, transcript = d.transcript,
+                   offset = tonumber(d.offset) or 0, marker = core.sendMarker(rec.send.id) }
+  end
+  FX.crossSave(rec)
+  print("[cc-dashboard] ✅ crossings: cc-send " .. rec.cid .. " -> '" .. tostring(name) .. "' (" .. d.route .. ")")
+  ledgerFor(it, { type = "send_delivered", id = rec.send.id, by = rec.from.name or rec.from.key, route = d.route,
+                  target = rec.send.target, wait = rec.send.wait or nil, cid = rec.cid })
+  FX.appendLedger({ type = "crossing_published", cid = rec.cid, kind = rec.kind, key = rec.from.key, send = rec.send.id })
+  if rec.send.wait then
+    FX.crossAnswer(rec.cid, "answer", { nonce = rec.nonce, ok = true, phase = "delivered", key = it.key, name = name,
+                                        project = rec.to.name, route = d.route })
+    if not d.transcript then rec.follow.done = "no transcript"; FX.crossSave(rec); FX.crossNoReply(rec, "Shepherd can't follow its transcript", now) end
+  end
+  return true
+end
+-- Adam approved a reply on its way back: the waiting CLI gets it, else the sender's mailbox.
+function FX.crossPublishReply(rec, now)
+  local f = rec.final or {}
+  local text = tostring(f.text or "") .. ((rec.decided and rec.decided.edited) and ("\n\n" .. core.CROSS_EDITED) or "")
+  local via
+  if rec.parent and FX.crossWaiter(rec)
+     and FX.crossAnswer(rec.parent, "reply.answer", { nonce = rec.nonce, verdict = "approved", text = text }) then
+    via = "waiter"
+  end
+  via = via or FX.crossTellSender(rec, core.crossReplyText(rec, text), now)
+  if not via then FX._cross.retry[rec.cid] = now + core.CROSS.retrySeconds; return false end
+  rec.published = { at = now, via = via }
+  FX.crossSave(rec)
+  print("[cc-dashboard] ✅ crossings: the reply " .. rec.cid .. " went back (" .. via .. ")")
+  FX.appendLedger({ type = "crossing_published", cid = rec.cid, kind = rec.kind, key = rec.from.key, via = via })
+  return true
+end
+-- Follow an approved send's target for its reply: the transcript's new whole lines since the last
+-- look (walked with find, never a *-pattern over a read that can end mid-line), through
+-- core.sendFollowStep. At the turn's end the reply is held for Adam on the replying session's card.
+function FX.crossFollow(rec, now, tileOf)
+  local f = rec.follow
+  if type(f) ~= "table" or f.done then return end
+  if now - (tonumber(rec.published and rec.published.at) or now) > core.CROSS.followMaxAge then
+    f.done = "timeout"; FX.crossSave(rec)
+    return FX.crossNoReply(rec, "no reply within " .. math.floor(core.CROSS.followMaxAge / 3600) .. "h", now)
+  end
+  local size = FX.fileSize(f.transcript)
+  local off = tonumber(f.offset) or 0
+  if not size or size == off then return end
+  if size < off then
+    f.done = "lost"; FX.crossSave(rec)
+    return FX.crossNoReply(rec, "its transcript was replaced", now)
+  end
+  local chunk
+  pcall(function()
+    local fh = io.open(f.transcript, "rb")
+    if fh then fh:seek("set", off); chunk = fh:read(math.min(size - off, 4 * 1024 * 1024)); fh:close() end
+  end)
+  if not chunk then return end
+  local recs, pos, used = {}, 1, 0
+  while true do
+    local nl = chunk:find("\n", pos, true)
+    if not nl then break end
+    local okd, r = pcall(core.json.decode, chunk:sub(pos, nl - 1))
+    if okd and type(r) == "table" then recs[#recs + 1] = r end
+    used, pos = nl, nl + 1
+  end
+  if used == 0 then return end
+  f.state = core.sendFollowStep(f.state, recs, f.marker)
+  f.offset = off + used
+  local s = f.state
+  if s.done == "ended" then
+    f.done = "ended"
+    if type(s.reply) == "string" and s.reply:find("%S") then
+      local who = tileOf(f.key, f.pid)
+      FX._cross.seq = (FX._cross.seq or 0) + 1
+      local r = core.crossSendReplyRecord(rec, s.reply,
+        { key = (who and who.key) or f.key, pid = f.pid, name = (who and FX.ticketSessionName(who)) or f.name }, now, FX._cross.seq)
+      if r and FX.crossSave(r) then
+        print("[cc-dashboard] ⏸ crossings: holding " .. tostring(f.name) .. "'s reply (" .. r.cid .. ") for Adam")
+        FX.appendLedger({ type = "crossing_held", cid = r.cid, kind = r.kind, key = r.from.key, send = rec.send.id, to = r.to.root })
+        pcall(function() FX.alert("↔ " .. tostring(f.name) .. " wants to send its reply back to " .. tostring(r.to.name or "the sender")
+                                  .. " -- it waits for you on its card") end)
+        FX.crossSave(rec)
+        return r
+      end
+    else
+      FX.crossNoReply(rec, "its turn ended without a text reply", now)
+    end
+  elseif s.done == "interrupted" or s.done == "error" then
+    f.done = s.done
+    FX.crossNoReply(rec, s.done == "error" and ("its turn ended on an API error: " .. tostring(s.error or "")) or "its turn was interrupted", now)
+  end
+  FX.crossSave(rec)
+end
+-- A reply handed to a waiting cc-send that nobody took within CROSS.answerUnclaimed (the CLI gave up
+-- in between): the sender's mailbox gets it instead.
+function FX.crossReplyUnclaimed(rec, now)
+  local p = rec.published
+  if rec.kind ~= "send-reply" or type(p) ~= "table" or p.via ~= "waiter" or not rec.parent then return end
+  if now - (tonumber(p.at) or now) <= core.CROSS.answerUnclaimed then return end
+  local ap = FX.CROSS_DIR .. "/" .. rec.parent .. ".reply.answer"
+  if FX.readFile(ap) and os.remove(ap) then
+    local f = rec.final or {}
+    local text = tostring(f.text or "") .. ((rec.decided and rec.decided.edited) and ("\n\n" .. core.CROSS_EDITED) or "")
+    p.via = "mailbox, unclaimed: " .. tostring(FX.crossTellSender(rec, core.crossReplyText(rec, text), now))
+  else
+    p.via = "waiter, taken"
+  end
+  FX.crossSave(rec)
+end
 function FX.stepCrossings(list)
   local now = FX.now()
   local names = FX.readDir(FX.CROSS_DIR)
@@ -10822,7 +11079,7 @@ function FX.stepCrossings(list)
     end
   end
   local tileOf = FX.crossTileOf(list)
-  local records, closing = {}, {}
+  local records, closing, views = {}, {}, nil
   for _, fn in ipairs(FX.readDir(FX.CROSS_DIR)) do
     local f = core.crossFileOf(fn)
     if f and f.kind == "record" then
@@ -10831,8 +11088,22 @@ function FX.stepCrossings(list)
         if rec.state == "approved" and not rec.published and (FX._cross.retry[rec.cid] or 0) <= now then
           FX.crossPublish(rec, now)
         end
+        -- unit 2: an approved send's reply, followed; a reply nobody took, to the mailbox
+        if rec.kind == "send" and rec.published and type(rec.follow) == "table" and not rec.follow.done then
+          local okf, reply = pcall(FX.crossFollow, rec, now, tileOf)
+          if not okf then print("[cc-dashboard] ❌ crossings: following " .. rec.cid .. " failed: " .. tostring(reply))
+          elseif type(reply) == "table" then records[#records + 1] = reply end
+        end
+        if rec.kind == "send-reply" then pcall(FX.crossReplyUnclaimed, rec, now) end
         if rec.state ~= "pending" and not rec.told then FX.crossTell(rec, tileOf, now) end
         if rec.state == "pending" and rec.kind == "ticket-close" then closing[rec.ticket] = true end
+        -- a held send whose project has nobody to take it now is a heads-up, not red (core.needsYouKind)
+        if rec.state == "pending" and rec.kind == "send" then
+          views = views or FX.sendViews(list)
+          if not core.crossSendRetarget(views, rec, now, FX.crossProjectOf) then
+            rec._deliverable, rec._why = false, "no live session in " .. tostring(rec.to.name or "that project") .. " can take it now"
+          end
+        end
         records[#records + 1] = rec
       end
     end
@@ -10865,6 +11136,12 @@ function FX.crossDecide(cid, payloadJson)
   if not verdict then return false end
   local final = {}
   for _, k in ipairs({ "title", "body", "text", "note" }) do if type(p[k]) == "string" then final[k] = p[k] end end
+  -- unit 2: a held send can be approved only while a session of the project he approved can take it
+  if verdict == "approve" and rec.kind == "send"
+     and not core.crossSendRetarget(FX.sendViews(FX.allItems()), rec, now, FX.crossProjectOf) then
+    FX.alert("⚠️ No live session in " .. tostring(rec.to.name or "that project") .. " can take it now -- it waits; approve it once one is there")
+    return false
+  end
   local decided, why = core.crossDecide(rec, verdict, final, type(p.why) == "string" and p.why or "", now)
   if not decided then
     FX.alert("⚠️ Not sent: " .. tostring(why))
@@ -10881,6 +11158,22 @@ function FX.crossDecide(cid, payloadJson)
   else
     FX.appendLedger({ type = "crossing_denied", cid = cid, kind = decided.kind, key = decided.from.key,
                       ticket = decided.ticket, noted = (decided.decided.note or "") ~= "" or nil })
+    -- unit 2: a cc-send waiting on this crossing hears it (exit 7), and the other side's sender too
+    local note = tostring(decided.decided.note or "")
+    if decided.kind == "send" then
+      local waiting = FX.crossWaiter(decided)
+      FX.crossAnswer(cid, "answer", { nonce = decided.nonce, ok = false, code = "denied",
+                                      reason = "Adam didn't pass it on" .. (note ~= "" and (": " .. note) or "") })
+      if waiting then decided.told = { at = now, via = "waiter" }; FX.crossSave(decided) end
+    elseif decided.kind == "send-reply" then
+      if decided.parent and FX.crossWaiter(decided) then
+        FX.crossAnswer(decided.parent, "reply.answer", { nonce = decided.nonce, verdict = "denied", why = note })
+      else
+        FX.crossTellSender(decided, core.SHEPHERD_TAG .. " Adam kept " .. tostring(decided.from.name or "the other session")
+          .. "'s reply to your " .. core.sendMarker(decided.send and decided.send.id or "?") .. " back"
+          .. (note ~= "" and (": " .. note) or "."), now)
+      end
+    end
   end
   local items = FX.allItems()
   FX.crossTell(decided, FX.crossTileOf(items), now)
@@ -10911,10 +11204,11 @@ function FX.crossPrune()
       local rec = FX.crossLoad(f.cid)
       local at = rec and rec.told and tonumber(rec.told.at)
       if rec and rec.state ~= "pending" and at and now - at > core.CROSS.keepSeconds then os.remove(path) end
-    elseif f and (f.kind == "claim" or f.kind == "tmp" or f.kind == "notice") then
+    elseif f and (f.kind == "claim" or f.kind == "tmp" or f.kind == "notice" or f.kind == "answer") then
       local mt
       pcall(function() mt = tonumber((hs.fs.attributes(path, "modification"))) end)
-      local limit = (f.kind == "notice") and core.TICKET.maxAge or core.CROSS.partSeconds
+      -- an answer nobody took in an hour is a cc-send that gave up (its reply went to the mailbox)
+      local limit = (f.kind == "notice") and core.TICKET.maxAge or ((f.kind == "answer") and 3600 or core.CROSS.partSeconds)
       if mt and now - mt > limit then
         if f.kind == "claim" and f.of == "req" and not names[f.cid .. ".json"] then
           os.rename(path, FX.CROSS_DIR .. "/" .. f.cid .. ".req.json")
@@ -23778,8 +24072,8 @@ local HTML = [[
       if(verdict === "deny") return { verdict: "deny", why: String(why || "") };
       var p = { verdict: "approve" };
       if(kind === "ticket"){ p.title = String(title || ""); p.body = String(text || ""); }
-      else if(kind === "ticket-reply") p.text = String(text || "");
-      else p.note = String(text || "");
+      else if(kind === "ticket-close") p.note = String(text || "");
+      else p.text = String(text || "");   // a ticket reply, a cc-send prompt, the reply coming back
       return p;
     }
     // Which of the view's texts goes in the big box, and its cap.
@@ -23787,8 +24081,8 @@ local HTML = [[
       var caps = (v && v.caps) || {};
       if(!v) return { text: "", max: 2000 };
       if(v.kind === "ticket") return { text: v.body || "", max: caps.body || 2500 };
-      if(v.kind === "ticket-reply") return { text: v.text || "", max: caps.text || 2000 };
-      return { text: v.note || "", max: caps.note || 1000 };
+      if(v.kind === "ticket-close") return { text: v.note || "", max: caps.note || 1000 };
+      return { text: v.text || "", max: caps.text || 2000 };
     }
     function renderCrossing(it){
       var box = document.getElementById("d-cross");

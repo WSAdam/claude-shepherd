@@ -304,7 +304,12 @@ git history of `todos.md` and `docs/feature-mining/*`.
   Only the filer, the holder and the ticket's repo can take or show a ticket. Code:
   `core.cross*` (the Crossings block after the tickets block), `FX.stepCrossings` / `FX.crossDecide`
   in the dashboard, `cc_cross_*` and `cc_session_project` in cc-lib.sh. cc-send between projects is
-  the next unit; fleet, cc-lesson and Claude Code's SendMessage were left as they are.
+  held the same way (`FX.sendHold`): the sender is the CLI's process ancestry (`FX.sendSender`,
+  `core.ancestorSession`), Adam's Approve delivers (`FX.crossPublishSend`), Shepherd follows the
+  reply (`FX.crossFollow`, `core.sendFollowStep` -- the Lua twin of cc-send.sh's jq reducer) and
+  holds it on the replier's card, and the waiting CLI reads `cc-cross/<cid>.answer` /
+  `.reply.answer` (exit 7 on a Deny). Fleet, cc-lesson and Claude Code's SendMessage were left as
+  they are.
 - **Fixes after the 2026-10-13 push**: a permission prompt in a shared window reads Needs you, the
   bulk bar counts only what it can do there, and CI runs green on Linux again.
 
