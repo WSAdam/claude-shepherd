@@ -49,6 +49,9 @@ export CC_SEND_DIR="${CC_SEND_DIR:-$CC_TEST_ISOLATION/cc-send}"
 # a SessionEnd (cc_remove) puts back the tickets a session held; a suite's fake session must never
 # touch the real ones.
 export CC_TICKETS_DIR="${CC_TICKETS_DIR:-$CC_TEST_ISOLATION/cc-tickets}"
+# 2026-10-14: a session's start takes Shepherd's notes on its crossings (~/.claude/cc-cross/*.notice),
+# and a SessionEnd (cc_remove) prunes the folder; a suite's fake session must never touch the real ones.
+export CC_CROSS_DIR="${CC_CROSS_DIR:-$CC_TEST_ISOLATION/cc-cross}"
 # 2026-10-02: a Stop guard that blocks leaves a once-marker in ~/.claude/cc-guard, and a SessionEnd
 # (cc_remove) drops the session's; a suite's fake session must never write or drop a real one.
 export CC_GUARD_DIR="${CC_GUARD_DIR:-$CC_TEST_ISOLATION/cc-guard}"

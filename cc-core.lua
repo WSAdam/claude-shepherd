@@ -1677,6 +1677,12 @@ function M.needsYouKind(it, now)
     return "needs", "fleet"
   end
 
+  -- 3b. (2026-10-14) a crossing: text this session wrote for ANOTHER project -- a ticket, a reply, a
+  -- close note -- held until Adam approves it (core.crossTiles, stamped by FX.stepCrossings). Nothing
+  -- reaches the other side without his click, and the record outlives the session, so it always counts.
+  local cx = type(it.crossing) == "table" and it.crossing or nil
+  if cx and (tonumber(cx.n) or 0) > 0 then return "needs", "cross" end
+
   -- 4. a permission prompt. An armed gate takes a decision file; anything else (a gate that
   -- timed out into the native prompt) is Approve/Deny as KEYSTROKES, which a window shared by
   -- several sessions refuses outright -- so from here there is nothing to press, but the session
@@ -14644,7 +14650,9 @@ function M.sendBlocked(it, opts, now)
   end
   if it.procAlive == false then return "has ended" end
   if it.tabless then return "has no tab any more" end
-  if it.needsYou == "needs" or M.askHeld(it, now) or it.status == "approval" then
+  -- 2026-10-14: a card red only for its OWN crossing (text it wants sent elsewhere) isn't waiting on
+  -- an answer of Adam's -- it can take a prompt or a ticket like any idle session.
+  if (it.needsYou == "needs" and it.needsYouSource ~= "cross") or M.askHeld(it, now) or it.status == "approval" then
     local what = NEEDS_WORDS[it.needsYouSource] or (it.status == "approval" and NEEDS_WORDS.approval) or "its card"
     return "is waiting on you (" .. what .. ")"
   end
@@ -14919,6 +14927,7 @@ function M.ticketOfferText(t, fromName)
     .. " -- work filed for this repo:\n\n" .. M.capChars(oneLine(t.title), M.TICKET.titleMax)
   local body = M.capChars(trim(t.body), M.TICKET.bodyMax)
   if body ~= "" then out = out .. "\n\n" .. body end
+  if t.edited then out = out .. "\n\n" .. M.CROSS_EDITED end   -- 2026-10-14: Adam changed it before it crossed
   local n = filerFollowUps(t)
   if n > 0 then
     out = out .. "\n\n(" .. n .. (n == 1 and " follow-up" or " follow-ups") .. " from the filer: " .. cmd .. " show " .. id .. ")"
@@ -14967,6 +14976,7 @@ function M.ticketNewsText(t, news, role, otherName)
   local lines, used, left = {}, #head, 0
   for _, e in ipairs(news and news.entries or {}) do
     local line = "- " .. other .. " replied: " .. M.capChars(trim(e.text), M.TICKET.replyMax)
+      .. (e.edited and (" " .. M.CROSS_EDITED) or "")
     if used + #line + 1 <= M.TICKET.newsBudget then lines[#lines + 1] = line; used = used + #line + 1
     else left = left + 1 end
   end
@@ -14974,6 +14984,7 @@ function M.ticketNewsText(t, news, role, otherName)
   local tail
   if news and news.close then
     lines[#lines + 1] = "- " .. other .. " closed it: " .. M.capChars(trim(news.close.note), M.TICKET.noteMax)
+      .. (news.close.edited and (" " .. M.CROSS_EDITED) or "")
     if role == "holder" then tail = "Stop work on it." end
   else
     tail = "Reply with " .. cmd .. " reply " .. id .. ' "..." if you need more.'
@@ -15044,6 +15055,335 @@ function M.ticketRows(tickets, now, waiting, nameOf)
     if a.filed ~= b.filed then return a.filed < b.filed end
     return a.id < b.id
   end)
+  return rows
+end
+end
+
+-- ---- Crossings (2026-10-14) ----
+-- Adam, 2026-10-14: "projects should not be able to utilize having shepherd to talk to each other,
+-- that needs to be an approved translation between the two rather than something automatic". A
+-- ticket used to reach the other repo's sessions -- and its replies and close come back -- on their
+-- own. Now nothing a session writes for ANOTHER project is published until Adam approves it: the
+-- CLI leaves a request, ~/.claude/cc-cross/<cid>.req.json (cid = <author key>.<epoch>-<n>); Shepherd
+-- claims it into its own record, <cid>.json, which only Shepherd writes (a decision is never read
+-- from a file the session wrote); the author's card goes red with the exact text; Adam edits it if
+-- he likes, then Approves -- Shepherd alone publishes the final text into the ticket -- or Denies,
+-- and the author is told his note. So every ticket reader (the offer, the news, `wait`, a session's
+-- start, the board) only ever sees text Adam passed. Same Unix user for every session: a session
+-- that writes the files directly isn't stopped (D-27) -- every channel Shepherd provides is.
+-- KEEP THE RULES IN SYNC with cc-ticket.sh and cc-lib.sh's cc_cross_* helpers.
+do
+M.CROSS = {
+  -- 2026-10-15 00:00 local: a ticket filed before the gate shipped counts as published (Adam: "let
+  -- them through" -- the 5 open Jabra -> rune tickets). Anything later is published only by a crossing.
+  legacyBefore = 1792036800,
+  previewMax = 120,         -- the card's line
+  noteMax = 500,            -- Adam's note on a Deny
+  partSeconds = 60,         -- a claim or temp this old is a dead writer's
+  keepSeconds = 7 * 86400,  -- a decided record stays this long
+  retrySeconds = 60,        -- a publish that met a busy ticket is tried again after this
+}
+M.CROSS_EDITED = "(edited by Adam)"
+local KINDS = { ticket = true, ["ticket-reply"] = true, ["ticket-close"] = true, withdraw = true }
+local STATES = { pending = true, approved = true, denied = true, void = true, withdrawn = true }
+local function trim(s) return (tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", "")) end
+local function oneLine(s) return trim(tostring(s or ""):gsub("%c+", " ")) end
+local function normPath(p)
+  if type(p) ~= "string" or p:sub(1, 1) ~= "/" or p:find("%c") then return nil end
+  p = p:gsub("/+$", "")
+  return p ~= "" and p or "/"
+end
+local function repoName(side)
+  if type(side) ~= "table" then return "?" end
+  return side.name or (type(side.root) == "string" and side.root:match("([^/]+)/*$")) or "?"
+end
+local function str(v) return type(v) == "string" and v or nil end
+
+function M.crossAuthorOf(cid) return type(cid) == "string" and cid:match("^(.+)%.%d+%-%d+$") or nil end
+function M.crossIdOk(cid)
+  local key = M.crossAuthorOf(cid)
+  return key ~= nil and M.mailboxKeyOk(key)
+end
+-- A file in the crossings folder -> { cid, kind = "req" | "record" | "notice" | "claim" | "tmp", of =
+-- the kind a claim or temp is of }, or nil. KEEP IN SYNC with cc_cross_prune in cc-lib.sh.
+function M.crossFileOf(name)
+  if type(name) ~= "string" then return nil end
+  local inner, part = name:match("^(.+)%.(claim)%.%w+$")
+  if not inner then inner, part = name:match("^(.+)%.(tmp)%.%w+$") end
+  local base, cid, kind = inner or name, nil, nil
+  cid = base:match("^(.+%.%d+%-%d+)%.req%.json$")
+  if cid then kind = "req" else
+    cid = base:match("^(.+%.%d+%-%d+)%.json$")
+    if cid then kind = "record" else
+      cid = base:match("^(.+%.%d+%-%d+)%.notice$")
+      kind = cid and "notice" or nil
+    end
+  end
+  if not cid or not M.crossIdOk(cid) then return nil end
+  if part then return { cid = cid, kind = part, of = kind } end
+  return { cid = cid, kind = kind }
+end
+
+-- The text of a crossing of `kind`, checked: the request the CLI wrote and every edit Adam makes go
+-- through the same caps (core.TICKET, in bytes). -> { title, body } | { text } | { note }, or nil + why.
+local function texts(kind, f)
+  f = type(f) == "table" and f or {}
+  local T = M.TICKET
+  if kind == "ticket" then
+    local title = trim(f.title)
+    if title == "" then return nil, "the title is empty" end
+    if title:find("%c") then return nil, "the title must be one line" end
+    if #title > T.titleMax then return nil, "the title is " .. #title .. " bytes; at most " .. T.titleMax end
+    local body = trim(f.body)
+    if #body > T.bodyMax then return nil, "the body is " .. #body .. " bytes; at most " .. T.bodyMax end
+    return { title = title, body = body }
+  elseif kind == "ticket-reply" then
+    local text = trim(f.text)
+    if text == "" then return nil, "the reply is empty" end
+    if #text > T.replyMax then return nil, "the reply is " .. #text .. " bytes; at most " .. T.replyMax end
+    return { text = text }
+  elseif kind == "ticket-close" then
+    local note = trim(f.note)
+    if note == "" then return nil, "the note is empty" end
+    if #note > T.noteMax then return nil, "the note is " .. #note .. " bytes; at most " .. T.noteMax end
+    return { note = note }
+  elseif kind == "withdraw" then
+    return {}
+  end
+  return nil, "unknown kind"
+end
+
+-- A request read back, or nil + why. The CLI wrote it, so every field is checked again: its body
+-- names its own file, its author is the cid's, and its text fits the caps.
+function M.parseCrossRequest(raw, cid)
+  if not M.crossIdOk(cid) then return nil, "bad id" end
+  if type(raw) ~= "string" then return nil, "unreadable" end
+  local ok, r = pcall(M.json.decode, raw)
+  if not ok or type(r) ~= "table" then return nil, "unreadable" end
+  if r.cid ~= cid then return nil, "not its own name" end
+  if not KINDS[r.kind] then return nil, "unknown kind" end
+  if type(r.from) ~= "table" or r.from.key ~= M.crossAuthorOf(cid) then return nil, "not its author's" end
+  if not M.ticketIdOk(r.ticket) then return nil, "no ticket" end
+  local nonce = str(r.nonce)
+  if not nonce or not nonce:match("^[%w%.%-]+$") then return nil, "no nonce" end
+  local tx, why = texts(r.kind, r)
+  if not tx then return nil, why end
+  local req = {
+    cid = cid, kind = r.kind, nonce = nonce, at = tonumber(r.at) or 0, ticket = r.ticket,
+    from = { key = r.from.key, pid = tostring(r.from.pid or ""):match("^%d+$"), cwd = normPath(r.from.cwd),
+             root = normPath(r.from.root), name = str(r.from.name) and M.capChars(oneLine(r.from.name), 80) or nil },
+  }
+  for k, v in pairs(tx) do req[k] = v end
+  if r.kind == "ticket" then
+    if type(r.to) ~= "table" or not normPath(r.to.root) then return nil, "no target" end
+    req.to = { root = normPath(r.to.root), name = str(r.to.name) and M.capChars(oneLine(r.to.name), 80) or nil }
+  elseif r.kind == "ticket-reply" or r.kind == "ticket-close" then
+    if r.role ~= "filer" and r.role ~= "holder" then return nil, "no role" end
+    req.role = r.role
+  end
+  return req
+end
+
+-- The record Shepherd keeps of a request it holds (pending), written only by Shepherd.
+function M.crossRecord(req, now)
+  if type(req) ~= "table" then return nil end
+  now = tonumber(now) or os.time()
+  return {
+    v = 1, cid = req.cid, kind = req.kind, state = "pending", nonce = req.nonce,
+    at = (tonumber(req.at) or 0) > 0 and req.at or now, heldAt = now,
+    ticket = req.ticket, role = req.role, from = req.from, to = req.to,
+    original = { title = req.title, body = req.body, text = req.text, note = req.note },
+  }
+end
+function M.parseCrossRecord(raw, cid)
+  if not M.crossIdOk(cid) or type(raw) ~= "string" then return nil end
+  local ok, r = pcall(M.json.decode, raw)
+  if not ok or type(r) ~= "table" or r.cid ~= cid or not KINDS[r.kind] or not STATES[r.state] then return nil end
+  if type(r.from) ~= "table" or not M.mailboxKeyOk(r.from.key) or not M.ticketIdOk(r.ticket) then return nil end
+  if type(r.original) ~= "table" then r.original = {} end
+  return r
+end
+
+-- Adam's final text for a record: what he sent (an edit) over the original, checked like the
+-- request was. -> final, or nil + why.
+function M.crossFinal(rec, final)
+  if type(rec) ~= "table" then return nil, "no crossing" end
+  local o, f = rec.original or {}, type(final) == "table" and final or {}
+  local merged = {}
+  for _, k in ipairs({ "title", "body", "text", "note" }) do
+    if f[k] ~= nil then merged[k] = f[k] else merged[k] = o[k] end
+  end
+  return texts(rec.kind, merged)
+end
+
+-- Adam's decision, on a copy-free record: "approve" (with his final text, maybe edited) or "deny"
+-- (with his note). -> the record, or nil + why (it isn't pending, or the edit doesn't fit).
+function M.crossDecide(rec, verdict, final, note, now)
+  if type(rec) ~= "table" or rec.state ~= "pending" then return nil, "it isn't waiting for you any more" end
+  now = tonumber(now) or os.time()
+  if verdict == "deny" then
+    rec.state = "denied"
+    rec.decided = { verdict = "deny", at = now, note = M.capChars(trim(note), M.CROSS.noteMax) }
+    return rec
+  end
+  if verdict ~= "approve" then return nil, "unknown verdict" end
+  local f, why = M.crossFinal(rec, final)
+  if not f then return nil, why end
+  local o, edited = rec.original or {}, false
+  for k, v in pairs(f) do if trim(o[k]) ~= v then edited = true end end
+  rec.state, rec.final = "approved", f
+  rec.decided = { verdict = "approve", at = now, edited = edited or nil }
+  return rec
+end
+
+-- Is `rec`'s author the side of ticket t it says it is? The filer, or the session holding it -- by
+-- key, or by pid after a /clear.
+function M.crossRoleOk(rec, t)
+  if type(rec) ~= "table" or type(t) ~= "table" or type(rec.from) ~= "table" then return false end
+  local key, pid = rec.from.key, tostring(rec.from.pid or "")
+  local function is(side)
+    return type(side) == "table" and (side.key == key or (pid ~= "" and tostring(side.pid or "") == pid))
+  end
+  if rec.role == "filer" then return is(t.from) end
+  if rec.role == "holder" then return is(t.holder) end
+  return false
+end
+
+-- Is ticket t published -- something every reader may see? Shepherd published it (cid), or it was
+-- filed before the gate shipped. KEEP IN SYNC with `published` in CC_TICKET_JQ (cc-lib.sh).
+function M.ticketPublished(t)
+  if type(t) ~= "table" then return false end
+  if type(t.cid) == "string" and t.cid ~= "" then return true end
+  return (tonumber(t.filed) or 0) < M.CROSS.legacyBefore
+end
+
+-- Publish an APPROVED record into ticket t (nil for a filing: the ticket doesn't exist yet), in
+-- place. -> the ticket to write, or nil + why ("exists", "gone", "closed": the ticket closed before
+-- this was written). Publishing twice adds it once (by cid).
+function M.crossTicketPublish(rec, t, now)
+  if type(rec) ~= "table" or rec.state ~= "approved" then return nil, "not approved" end
+  now = tonumber(now) or os.time()
+  local f = rec.final or {}
+  local edited = (type(rec.decided) == "table" and rec.decided.edited) and true or nil
+  if rec.kind == "ticket" then
+    if t ~= nil then return nil, "exists" end
+    local from = rec.from or {}
+    return {
+      v = 1, id = rec.ticket, title = f.title, body = f.body or "",
+      from = { key = from.key, pid = from.pid, cwd = from.cwd, root = from.root, name = from.name },
+      to = rec.to, filed = rec.at, passed = {}, thread = {}, cid = rec.cid, edited = edited, approved = now,
+    }
+  end
+  if type(t) ~= "table" then return nil, "gone" end
+  t.thread = type(t.thread) == "table" and t.thread or {}
+  if rec.kind == "ticket-reply" then
+    for _, e in ipairs(t.thread) do if type(e) == "table" and e.cid == rec.cid then return t, "already" end end
+    if type(t.closed) == "table" and (tonumber(t.closed.at) or 0) < (tonumber(rec.at) or 0) then return nil, "closed" end
+    t.thread[#t.thread + 1] = { by = rec.role, key = rec.from.key, text = f.text, at = now, told = false,
+                                cid = rec.cid, edited = edited }
+    return t
+  elseif rec.kind == "ticket-close" then
+    if type(t.closed) == "table" then
+      if t.closed.cid == rec.cid then return t, "already" end
+      return nil, "closed"
+    end
+    local told = false
+    if rec.role == "filer" and type(t.holder) ~= "table" then told = "none" end   -- nobody to tell
+    t.closed = { by = rec.role, key = rec.from.key, note = f.note, at = now, told = told, cid = rec.cid, edited = edited }
+    return t
+  end
+  return nil, "nothing to publish"
+end
+
+local function what(rec)
+  local to = M.capChars(repoName(rec.to), 80)
+  if rec.kind == "ticket" then
+    return 'your ticket "' .. M.capChars(oneLine((rec.final or rec.original or {}).title), 120) .. '" for ' .. to
+  elseif rec.kind == "ticket-reply" then return "your reply on ticket " .. tostring(rec.ticket) .. " to " .. to
+  elseif rec.kind == "ticket-close" then return "your close note on ticket " .. tostring(rec.ticket) .. " to " .. to end
+  return "your message to " .. to
+end
+local function finalText(rec)
+  local f = rec.final or {}
+  if rec.kind == "ticket" then return f.title .. ((f.body or "") ~= "" and ("\n\n" .. f.body) or "") end
+  return f.text or f.note or ""
+end
+-- What the author is told about a decided record: [shepherd]-marked, or nil when there is nothing to
+-- say (approved as written).
+function M.crossNoticeText(rec)
+  if type(rec) ~= "table" then return nil end
+  local to = M.capChars(repoName(rec.to), 80)
+  if rec.state == "denied" then
+    local note = type(rec.decided) == "table" and trim(rec.decided.note) or ""
+    return M.SHEPHERD_TAG .. " Adam didn't pass on " .. what(rec) .. (note ~= "" and (": " .. note) or " (he left no note).")
+      .. "\nNothing reached " .. to .. (rec.kind == "ticket" and "; the ticket was not filed." or ".")
+      .. " Don't resend it or route around Shepherd -- if it still matters, ask Adam."
+  elseif rec.state == "approved" and type(rec.decided) == "table" and rec.decided.edited then
+    return M.SHEPHERD_TAG .. " Adam passed on " .. what(rec) .. ", edited. What went out:\n\n" .. finalText(rec)
+  elseif rec.state == "void" then
+    return M.SHEPHERD_TAG .. " " .. what(rec):gsub("^your", "Your") .. " didn't go out: "
+      .. (rec.voidWhy == "gone" and "the ticket isn't there any more." or "the ticket was closed first.")
+  end
+  return nil
+end
+
+-- The card's line for a pending record, and the review it opens.
+function M.crossLine(rec)
+  local to, o = M.capChars(repoName(rec.to), 80), rec.original or {}
+  local P = M.CROSS.previewMax
+  if rec.kind == "ticket" then return "↔ wants to file a ticket for " .. to .. ": " .. M.capChars(oneLine(o.title), P) end
+  if rec.kind == "ticket-reply" then return "↔ wants to send " .. to .. " a reply: " .. M.capChars(oneLine(o.text), P) end
+  if rec.kind == "ticket-close" then return "↔ wants to send " .. to .. " its close note: " .. M.capChars(oneLine(o.note), P) end
+  return "↔ wants to send " .. to .. " something"
+end
+function M.crossView(rec)
+  local o, T = rec.original or {}, M.TICKET
+  local to = M.capChars(repoName(rec.to), 80)
+  return {
+    cid = rec.cid, kind = rec.kind, ticket = rec.ticket, to = to, head = M.crossLine(rec),
+    sub = "Nothing reaches " .. to .. " until you approve it. Edit it first if you like -- "
+      .. to .. " sees " .. M.CROSS_EDITED .. " on what you changed.",
+    title = o.title, body = o.body, text = o.text, note = o.note,
+    caps = { title = T.titleMax, body = T.bodyMax, text = T.replyMax, note = T.noteMax, deny = M.CROSS.noteMax },
+  }
+end
+local function oldestFirst(list)
+  table.sort(list, function(a, b)
+    if (a.at or 0) ~= (b.at or 0) then return (a.at or 0) < (b.at or 0) end
+    return a.cid < b.cid
+  end)
+  return list
+end
+-- Per card, its author's pending crossings: tileKeyOf(key, pid) -> the card's key, or nil when the
+-- author has none. -> { [card key] = { n, cid, line, view } } (the oldest's line and view).
+function M.crossTiles(records, tileKeyOf)
+  local pend = {}
+  for _, r in ipairs(records or {}) do if type(r) == "table" and r.state == "pending" then pend[#pend + 1] = r end end
+  local out = {}
+  for _, r in ipairs(oldestFirst(pend)) do
+    local k = type(tileKeyOf) == "function" and tileKeyOf(r.from.key, r.from.pid) or nil
+    if k then
+      local c = out[k]
+      if not c then c = { n = 0, cid = r.cid, line = M.crossLine(r), view = M.crossView(r) }; out[k] = c end
+      c.n = c.n + 1
+    end
+  end
+  return out
+end
+-- The 🎫 board's rows: the pending crossings whose author has no card (onCard(rec) false), so they
+-- can still be decided. nameOf(key, pid) -> a name, or nil. Every string is a session's words.
+function M.crossRows(records, onCard, nameOf)
+  local pend = {}
+  for _, r in ipairs(records or {}) do
+    if type(r) == "table" and r.state == "pending" and not (type(onCard) == "function" and onCard(r)) then pend[#pend + 1] = r end
+  end
+  local rows = {}
+  for _, r in ipairs(oldestFirst(pend)) do
+    local n = type(nameOf) == "function" and nameOf(r.from.key, r.from.pid) or nil
+    rows[#rows + 1] = { cid = r.cid, at = r.at, line = M.crossLine(r),
+                        from = M.capChars(oneLine(n or r.from.name or r.from.key), 80),
+                        fromRepo = M.capChars(repoName({ root = r.from.root }), 80), view = M.crossView(r) }
+  end
   return rows
 end
 end
@@ -25943,8 +26283,11 @@ M.FEATURES = {
     what = "~/.claude/cc-send.sh <session|project> \"prompt\" [--wait] hands a live session a prompt from any shell. A session is named by its key or name; a project by its repo root or name, and gets its best live session -- an idle one before a busy one, never one waiting on you, never the caller. It goes through the session mailbox, marked [shepherd] and ledgered: a busy session gets it at its turn end, an idle one typed where typing is safe, else it waits. --wait prints the reply on stdout and everything else on stderr; slash commands are refused.",
     why = "A script, a cron job or another session can hand work to a live session and use its answer, without anyone switching tabs." },
   { key = "tickets", cat = "Control", new = true, title = "Cross-repo tickets",
-    what = "A session files work for another repo's sessions with ~/.claude/cc-ticket.sh file --repo <root|name> --title T --body B. Shepherd offers it to that repo's least-busy live session (never one waiting on you) through its mailbox; the session takes it within 45 minutes or it goes to another, and a ticket whose session ends goes back too. Replies and the closing note -- closing always needs one -- come back to the filer the same way, at its next start, or from cc-ticket.sh wait in the background. A ticket no session can take waits on that repo's card and on ☰ → Tickets, with Open a tab for it.",
+    what = "A session files work for another repo's sessions with ~/.claude/cc-ticket.sh file --repo <root|name> --title T --body B. Once you approve it (see Crossings), Shepherd offers it to that repo's least-busy live session (never one waiting on you) through its mailbox; the session takes it within 45 minutes or it goes to another, and a ticket whose session ends goes back too. Replies and the closing note -- closing always needs one, and you approve each -- come back to the filer the same way, at its next start, or from cc-ticket.sh wait in the background. A ticket no session can take waits on that repo's card and on ☰ → Tickets, with Open a tab for it. Only the filer, the holder and the target repo's sessions can take or read a ticket.",
     why = "One session can ask another repo's sessions for work it needs and get the answer back, without you carrying the message between tabs." },
+  { key = "crossings", cat = "Control", new = true, title = "Crossings",
+    what = "Nothing one project's session writes for another reaches it on its own. A ticket, every reply and every close note waits on the writing session's card as a red Needs you, with the exact text in boxes you can edit. Approve sends what the boxes say -- the other side sees (edited by Adam) on anything you changed -- and Deny keeps it back, telling the session your note. A crossing never expires and outlives its session's /clear or end; one whose session has no card waits on ☰ → Tickets instead.",
+    why = "Projects shouldn't use Shepherd to talk to each other behind your back: every message between them is a translation you approved." },
   { key = "sharedwin", cat = "Control", new = true, title = "Shared-window guard",
     what = "When several Claude sessions run as tabs in one VS Code window, Shepherd won't type into any of them — no nudge, queue feed or /clear — and says why. Close goes through the Shepherd tab bridge, which closes just that session's tab. Jump and hands-free approvals still work. keystrokes.refuseSharedWindow switches it off.",
     why = "Shepherd types into a window, not a tab, so a message meant for one tab could land in another." },

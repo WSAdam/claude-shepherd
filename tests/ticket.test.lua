@@ -285,9 +285,14 @@ local list = fx._shownItems
 local seq = 0
 local function file(over)
   seq = seq + 1
+  -- REQUIREMENT CHANGE 2026-10-14 (Adam: "...that needs to be an approved translation between the two
+  -- rather than something automatic"): only a PUBLISHED ticket is offered -- Shepherd writes one after
+  -- Adam approves its crossing, carrying the crossing's cid (tests/cross.test.lua) -- so the fixture
+  -- writes the ticket as Shepherd publishes it. (Without cid it only passed while the clock was
+  -- before core.CROSS.legacyBefore.)
   local tk = { v = 1, id = "t" .. NOWP .. "-" .. seq, title = "Ticket " .. seq, body = "Please do thing " .. seq .. ".",
                from = { key = "f1", root = ALPHA, cwd = ALPHA, name = "alpha" }, to = { root = BETA, name = "beta" },
-               filed = NOWP, passed = {}, thread = {} }
+               filed = NOWP, passed = {}, thread = {}, cid = "f1." .. NOWP .. "-" .. seq }
   for k, v in pairs(over or {}) do tk[k] = v end
   write(TK .. "/" .. tk.id .. ".json", json.encode(tk))
   return tk.id

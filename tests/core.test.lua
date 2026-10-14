@@ -8488,7 +8488,9 @@ do
   -- 2026-10-03: 58 -> 59 for grant grading ("grantgrade", flagged new).
   -- 2026-10-03: 59 -> 60 for holding a queued line and the Queues view ("queuehold", flagged new).
   -- 2026-10-04: 60 -> 61 for past sessions in History, with Resume ("pastsessions", flagged new).
-  eq("FEATURES: the 61 new features are flagged", newCount, 61)
+  -- 2026-10-14: 61 -> 62 for crossings, Adam approving what one project sends another ("crossings", flagged new).
+  eq("FEATURES: the 62 new features are flagged", newCount, 62)
+  check("FEATURES: lists crossings", keys.crossings == true)
   check("FEATURES: lists queue hold and the Queues view", keys.queuehold == true)
   check("FEATURES: lists past sessions", keys.pastsessions == true)
   check("FEATURES: lists the grey cards", keys.hookless == true)

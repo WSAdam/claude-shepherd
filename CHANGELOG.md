@@ -4,6 +4,26 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-10-14 — Crossings: Adam approves what one project sends another
+
+- Added: **Crossings**. Adam: "projects should not be able to utilize having shepherd to talk to each
+  other, that needs to be an approved translation between the two rather than something automatic".
+  A ticket a session files for another repo, and every reply and close note on it, used to reach
+  the other side on its own: ticket `t1792000806-…` went confirmations-bot → ChargebackSentinel and
+  back with two replies before anyone looked. Now `cc-ticket.sh` leaves each one as a request in
+  `~/.claude/cc-cross/`, and the writing session's card goes red with the exact text in boxes Adam
+  can edit. **Approve** publishes what the boxes say into the ticket (the receiver sees "(edited by
+  Adam)" on anything he changed) and **Deny** keeps it back, telling the session his note. Shepherd
+  keeps its own record of each one and is the only publisher (`FX.stepCrossings`,
+  `FX.crossDecide`, `core.crossTicketPublish`). A crossing never expires, survives its session's
+  `/clear` and end, and waits on ☰ → 🎫 Tickets when its session has no card. Tickets filed before
+  2026-10-15 went through as they were (D-27).
+- Changed: only a ticket's filer, its holder and its target repo's sessions can `take` or `show` it.
+  Any session could before, by id. A session's repo is where it launched, not where it has `cd`'d
+  (`cc_session_project`). A ticket whose close note waits for Adam isn't offered or taken again.
+- Changed: a card red only for its own crossing can still be offered tickets and cc-send prompts, and
+  its generic Approve/Deny are locked: the crossing has its own.
+
 ## 2026-10-13 — My List lanes and review, merges in auto mode
 
 ### My List

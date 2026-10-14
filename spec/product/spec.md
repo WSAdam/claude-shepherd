@@ -517,6 +517,23 @@ the checker's read-only tools, hooks off, no MCP), in the session's model with a
 its context (§6). Nothing is saved, the session never sees the question, and its transcript is
 only read. It runs in its own lane, never behind a repo's checker or coach. **[DECISION D-26]**
 
+**Crossings** (2026-10-14, Adam's call: "projects should not be able to utilize having shepherd to
+talk to each other, that needs to be an approved translation between the two rather than something
+automatic"). Nothing a session writes for ANOTHER project reaches it on its own: a ticket's filing,
+every reply and every close note waits on the writing session's card as a red Needs you, with the
+exact text, until Adam approves it -- edited if he likes; the receiver sees "(edited by Adam)" -- or
+denies it, and the author is told his note. Both directions are held. The CLI only leaves a request
+(`~/.claude/cc-cross/<cid>.req.json`); Shepherd keeps its own record, which only Shepherd writes,
+and Adam's click is the only thing that publishes the text into a ticket. A crossing never expires
+and outlives its session's `/clear` and end (the 🎫 board carries it when no card does). Taking a
+ticket carries no text and stays immediate, but only a session it was offered to or one of its repo
+-- where the session LAUNCHED, not where it `cd`'d -- can take or read one. Tickets filed before
+crossings shipped (2026-10-15) went through as they were. Limit: every session runs as the same Unix
+user, so one that writes another project's files directly (`cc-inbox`, a ticket file, a transcript)
+isn't stopped; every channel Shepherd provides is, and sessions are told not to route around a
+hold. cc-send between projects is the second unit of this decision; fleet batches from another
+repo's folder, cc-lesson and Claude Code's own SendMessage were left as they are. **[DECISION D-27]**
+
 **Audit:** an append-only JSONL **ledger** (`~/.claude/cc-ledger/`; off in code, on in a fresh
 install's defaults) is the data source for **Fleet insights**, **notification history**, the
 **shift report**, the **session-history browser**, **lineage**, and **gate-decision provenance**.

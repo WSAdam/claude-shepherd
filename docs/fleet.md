@@ -24,7 +24,8 @@ Instances rows and the Stream Deck show an errored session as **Error** in magen
 - **Needs you** is one decision: a card ranks as needing you only when a live counterpart will
   receive your answer *and* the card offers something that changes the outcome (an approval, a
   held question, a merge to review, a batch to approve, a blocked unit, an errored turn to
-  Continue). Anything else is a quiet
+  Continue, a [crossing](automation.md#crossings) -- text it wrote for another project -- to approve).
+  Anything else is a quiet
   **Heads-up** with one line saying why (see
   [Merging and batches → The card](merging-and-batches.md#the-card)).
 - A working session waiting inside one tool for over a minute says which tool and for how long

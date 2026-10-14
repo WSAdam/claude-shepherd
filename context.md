@@ -295,6 +295,19 @@ git history of `todos.md` and `docs/feature-mining/*`.
   per-project $ + budget-alert rules; DR6 an LLM classify pass + fleet-wide opt-in once trusted; DR7 worktree
   cleanup of an abandoned (never-kept) cohort (`git worktree prune`).
 
+## State (2026-10-14) — Crossings
+
+- **Crossings** (D-27): nothing one project's session writes for another reaches it without Adam.
+  `cc-ticket.sh` leaves the filing, each reply and each close note as a request in
+  `~/.claude/cc-cross/`; the writing session's card goes red with the text in editable boxes;
+  Adam's Approve (`FX.crossDecide`) is the only publisher, and a Deny tells the session his note.
+  Only the filer, the holder and the ticket's repo can take or show a ticket. Code:
+  `core.cross*` (the Crossings block after the tickets block), `FX.stepCrossings` / `FX.crossDecide`
+  in the dashboard, `cc_cross_*` and `cc_session_project` in cc-lib.sh. cc-send between projects is
+  the next unit; fleet, cc-lesson and Claude Code's SendMessage were left as they are.
+- **Fixes after the 2026-10-13 push**: a permission prompt in a shared window reads Needs you, the
+  bulk bar counts only what it can do there, and CI runs green on Linux again.
+
 ## State (2026-10-13) — My List lanes and review, merges in auto mode
 
 - **Mining round 3** (2026-10-10): 30 new fleet-manager repos plus NCC Group's research, compared

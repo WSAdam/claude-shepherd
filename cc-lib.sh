@@ -370,13 +370,22 @@ CC_TICKETS_DIR="${CC_TICKETS_DIR:-${HOME}/.claude/cc-tickets}"
 CC_TICKET_LAPSE=2700          # core.TICKET.lapseSeconds: an offer nobody took goes back after 45 minutes
 CC_TICKET_KEEP=604800         # core.TICKET.closedKeepSeconds: a closed ticket stays a week
 CC_TICKET_MAX_AGE=2592000     # core.TICKET.maxAge: any ticket goes after 30 days
+# Crossings (2026-10-14): what a session writes for ANOTHER project -- a ticket, a reply, a close
+# note -- waits in this folder as a request (<cid>.req.json, cid = <author key>.<epoch>-<n>) until
+# Adam approves it in Shepherd; only Shepherd writes its record (<cid>.json) and publishes the text
+# into the ticket. Default MUST match the dashboard's FX.CROSS_DIR.
+CC_CROSS_DIR="${CC_CROSS_DIR:-${HOME}/.claude/cc-cross}"
+CC_CROSS_LEGACY_BEFORE=1792036800   # core.CROSS.legacyBefore: a ticket filed before the gate shipped counts as published
 # The rules every shell reader shares, as jq definitions. KEEP IN SYNC with core.ticketPhase,
-# core.ticketRelease, core.ticketNews and core.ticketTell (cc-core.lua).
+# core.ticketRelease, core.ticketNews, core.ticketTell and core.ticketPublished (cc-core.lua).
 #   norm      an empty list may have been written as {} or left out
+#   published Shepherd published it after Adam approved its crossing (cid), or it predates the gate
 #   phase     closed | open | offered | lapsed (offered, not taken in time: as good as open) | held
 #   release   nobody holds it, and its last holder is never offered it again
 #   news/tell what $role (filer | holder) hasn't been told: the other side's replies and its close
 CC_TICKET_JQ='
+def published: ((.cid // "") | tostring) != ""
+  or (((.filed // 0) | if type == "number" then . else 0 end) < '"$CC_CROSS_LEGACY_BEFORE"');
 def norm: .thread = (if (.thread | type) == "array" then .thread else [] end)
   | .passed = (if (.passed | type) == "array" then .passed else [] end)
   | .holder = (if (.holder | type) == "object" then .holder else null end)
@@ -396,13 +405,14 @@ def tell($role; $how): other($role) as $o
   | .thread |= map(if .by == $o and untold then .told = $how else . end)
   | if .closed != null and .closed.by == $o and (.closed | untold) then .closed.told = $how else . end;
 def oneline: tostring | gsub("[[:cntrl:]]+"; " ");
+def edited: if .edited == true then " (edited by Adam)" else "" end;
 def newstext($role): news($role) as $n
   | (if $role == "filer" then (.holder.name // .holder.key // "the session holding it") else "the filer" end) as $who
   | [ (if $role == "filer"
        then "Ticket \(.id) (\"\(.title | oneline)\"), which you filed for \(.to.name // (.to.root | split("/") | last)):"
        else "Ticket \(.id) (\"\(.title | oneline)\"), which you hold -- from its filer:" end) ]
-    + [ $n.entries[] | "- \($who) replied: \(.text | oneline)" ]
-    + (if $n.close != null then [ "- \($who) closed it: \($n.close.note | oneline)" ] else [] end)
+    + [ $n.entries[] | "- \($who) replied: \(.text | oneline)\(edited)" ]
+    + (if $n.close != null then [ "- \($who) closed it: \($n.close.note | oneline)\($n.close | edited)" ] else [] end)
   | join("\n");
 '
 
@@ -505,6 +515,124 @@ EOF
         if [ -e "$CC_TICKETS_DIR/$id.json" ]; then rm -f "$f"; else mv "$f" "$CC_TICKETS_DIR/$id.json"; fi ;;
       *) rm -f "$f" ;;
     esac
+  done <<EOF
+$files
+EOF
+  return 0
+}
+
+# ---- Crossings (2026-10-14) ----
+# A folder's repo: its main checkout's root (a worktree's too), or -- not a git repo -- the folder.
+# (cc-ticket.sh's --repo and a session's project both read it this way.)
+cc_repo_root() { # $1 folder
+  local d common top
+  d="$(cd -- "$1" 2>/dev/null && pwd -P)" || return 1
+  common="$(cd -- "$d" && git rev-parse --git-common-dir 2>/dev/null)"
+  if [ -n "$common" ]; then
+    common="$(cd -- "$d" && cd -- "$common" 2>/dev/null && pwd -P)"
+    case "$common" in */.git) printf '%s' "${common%/.git}"; return 0 ;; esac
+    top="$(cd -- "$d" && git rev-parse --show-toplevel 2>/dev/null)"
+    [ -n "$top" ] && { printf '%s' "$top"; return 0; }
+  fi
+  printf '%s' "$d"
+}
+# A session's project: the repo of the folder it LAUNCHED in -- never where it has cd'd to since. The
+# launch folder is its cwd or the ancestor whose name, encoded as Claude Code names its projects
+# folder, is the one its transcript lives under; else the transcript's first cwd, when that encodes
+# to it (a session that entered a sibling worktree). A session with no transcript yet is placed by
+# its cwd. Prints nothing (1) when it can't be placed. KEEP IN SYNC with core.launchDirFor. (A path
+# with non-ASCII characters encodes differently here -- byte for byte -- and isn't placed.)
+cc_session_project() { # $1 key
+  local f tp pk cwd d enc launch="" origin
+  f="$(cc_file "$1")"
+  [ -f "$f" ] && cc_have_jq || return 1
+  tp="$(jq -r '.transcript_path // empty' "$f" 2>/dev/null)"
+  cwd="$(jq -r '.cwd // empty' "$f" 2>/dev/null)"
+  if [ -z "$tp" ]; then
+    launch="$cwd"
+  else
+    pk="${tp%/*}"; pk="${pk##*/}"
+    d="$cwd"
+    while [ -n "$d" ]; do
+      enc="$(printf '%s' "$d" | LC_ALL=C sed 's/[^A-Za-z0-9]/-/g')"
+      [ "$enc" = "$pk" ] && { launch="$d"; break; }
+      [ "$d" = "/" ] && break
+      d="${d%/*}"; [ -n "$d" ] || d="/"
+    done
+    if [ -z "$launch" ] && [ -f "$tp" ]; then
+      origin="$(head -c 16384 "$tp" 2>/dev/null | grep -o '"cwd":"[^"]*"' | head -1 | sed 's/^"cwd":"//; s/"$//')"
+      if [ -n "$origin" ] && [ "$(printf '%s' "$origin" | LC_ALL=C sed 's/[^A-Za-z0-9]/-/g')" = "$pk" ]; then
+        launch="$origin"
+      fi
+    fi
+  fi
+  [ -n "$launch" ] && [ -d "$launch" ] || return 1
+  cc_repo_root "$launch"
+}
+# Leave Shepherd a request: what session $1 (claude process $2) wrote for another project, as the jq
+# object $3 (kind, ticket, and the kind's own fields: role, title, body, to, text, note; .from adds to
+# the author's). Written temp-then-rename as <key>.<epoch>-<n>.req.json; prints the cid.
+cc_cross_request() { # $1 key, $2 pid, $3 json object
+  local key="$1" pid="$2" fields="$3" now cid tmp
+  case "$key" in ''|.|..|*/*) return 1 ;; esac
+  cc_have_jq || return 1
+  now="$(cc_now)"
+  cid="$key.$now-$$$RANDOM"
+  mkdir -p "$CC_CROSS_DIR" 2>/dev/null && chmod 700 "$CC_CROSS_DIR" 2>/dev/null
+  tmp="$CC_CROSS_DIR/$cid.req.json.tmp.$$"
+  if jq -n --arg cid "$cid" --arg key "$key" --arg pid "$pid" --arg cwd "$PWD" --argjson now "$now" \
+       --arg nonce "$$.$now.$RANDOM" --argjson f "$fields" \
+       '{v:1, cid:$cid, nonce:$nonce, at:$now,
+         from:({key:$key, cwd:$cwd} + (if $pid != "" then {pid:$pid} else {} end) + ($f.from // {}))}
+        + ($f | del(.from))' > "$tmp" 2>/dev/null && mv "$tmp" "$CC_CROSS_DIR/$cid.req.json"; then
+    printf '%s\n' "$cid"
+    return 0
+  fi
+  rm -f "$tmp" 2>/dev/null
+  return 1
+}
+# The crossings that name ticket $1, as "<state> <kind> <author key> <author pid or -> <file>" lines:
+# Shepherd's records, and requests it hasn't claimed yet (state "pending").
+cc_cross_for_ticket() { # $1 ticket id
+  [ -d "$CC_CROSS_DIR" ] && cc_have_jq || return 0
+  local f files
+  files="$(grep -lF -- "\"$1\"" "$CC_CROSS_DIR"/*.json 2>/dev/null)"
+  while IFS= read -r f; do
+    [ -f "$f" ] || continue
+    jq -r --arg id "$1" --arg f "$f" 'select(.ticket == $id)
+      | "\(.state // "pending") \(.kind) \(.from.key) \(if (.from.pid // "") == "" then "-" else .from.pid end) \($f)"' "$f" 2>/dev/null
+  done <<EOF
+$files
+EOF
+}
+# (KEEP IN SYNC with FX.crossPrune): a claim or temp over a minute old -- a request's claim goes back
+# into place when Shepherd never recorded it (it died claiming it), else it goes; a note nobody took
+# in 30 days; a decided record told over a week ago. Never a pending record, never by key: a
+# session's crossings outlive its /clear and its end -- Adam still decides them.
+cc_cross_prune() {
+  [ -d "$CC_CROSS_DIR" ] || return 0
+  local now f b cid files
+  now="$(cc_now)"
+  files="$(find "$CC_CROSS_DIR" -maxdepth 1 -type f \( -name '*.claim.*' -o -name '*.tmp.*' \) -mmin +1 2>/dev/null)"
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    b="${f##*/}"
+    case "$b" in
+      *.req.json.claim.*)
+        cid="${b%%.req.json.claim.*}"
+        if [ -e "$CC_CROSS_DIR/$cid.json" ]; then rm -f "$f"; else mv "$f" "$CC_CROSS_DIR/$cid.req.json"; fi ;;
+      *) rm -f "$f" ;;
+    esac
+  done <<EOF
+$files
+EOF
+  find "$CC_CROSS_DIR" -maxdepth 1 -type f -name '*.notice' -mtime +30 -exec rm -f {} + 2>/dev/null
+  cc_have_jq || return 0
+  files="$(find "$CC_CROSS_DIR" -maxdepth 1 -type f -name '*.json' ! -name '*.req.json' -mtime +7 2>/dev/null)"
+  while IFS= read -r f; do
+    [ -f "$f" ] || continue
+    [ "$(jq -r --argjson now "$now" '(.state // "pending") != "pending" and (.told.at // null) != null
+         and ($now - .told.at) > 604800' "$f" 2>/dev/null)" = true ] && rm -f "$f"
   done <<EOF
 $files
 EOF
@@ -679,6 +807,8 @@ cc_decide_prune() {
 # cc-guard/<key>.<guard> (2026-10-02): the Stop guards' once-markers, every guard's.
 # cc-merge/<key>.notyet (2026-10-03): the commit Adam answered Not yet for (cc-merge.sh), which the
 # unfinished-unit reminder doesn't push back at him.
+# cc-cross/ (2026-10-14) is keyed by crossing, and kept on purpose: cc_cross_prune drops only stale
+# parts and old decided records (a pending crossing outlives /clear and SessionEnd).
 # cc-hold/key-<key> (2026-10-03): the session's hands-off hold, when no claude process is known; a
 # process hold (cc-hold/<pid>) outlives a /clear and goes once that process is gone (cc_hold_prune).
 # KEEP THE FILE SET IN SYNC with FX.removeStatus in claude-dashboard.lua.
@@ -720,6 +850,9 @@ cc_remove() {
   # Cross-repo tickets: the ones the session had on its plate go back, then every stale file (2026-09-29).
   cc_ticket_release "$1"
   cc_ticket_prune
+  # Crossings (2026-10-14): kept on purpose -- Adam still decides a pending one, and a note waits for
+  # the next start -- so only the stale parts and old decided records go, never by key.
+  cc_cross_prune
   return 0
 }
 
@@ -1751,13 +1884,15 @@ CC_NOTES_DIR="${CC_NOTES_DIR:-${HOME}/.claude/cc-notes}"
 # 2026-09-29: "onpurpose" (DECISIONS.md, unit 33) is one line, so it comes before the long parts.
 # 2026-10-03: "finish" (the unfinished-unit reminder, A2) prints only after a compaction in a unit's
 # worktree -- a summary can drop how a unit finishes -- and is short, so it comes right after the lease.
-CC_CONTEXT_PARTS="notes lease finish decisions tickets onpurpose handoff mailbox"
+# 2026-10-14: "crossings" -- Shepherd's notes on text this session wrote for another project (a Deny's
+# note, what went out after Adam's edit) while it wasn't live -- is short too, right after the tickets.
+CC_CONTEXT_PARTS="notes lease finish decisions tickets crossings onpurpose handoff mailbox"
 CC_CONTEXT_MAX=8000
 CC_PENDING_MAX_AGE=3600   # a respawn's note nobody took within the hour is stale
 
 # 2026-10-03: a session on hold (or a frozen fleet, cc_held) is handed no mail at its start -- the
 # mailbox, Adam's late answers and ticket news wait, and arrive once the hold is lifted.
-CC_HOLD_MAIL_PARTS="mailbox decisions tickets"
+CC_HOLD_MAIL_PARTS="mailbox decisions tickets crossings"
 
 cc_session_context() { # $1 source (startup|resume|clear|compact), $2 key, $3 cwd
   [ -z "${CC_SHEPHERD_INTERNAL:-}" ] || return 0   # Shepherd's own runs take nothing
@@ -2167,7 +2302,7 @@ _cc_ctx_tickets() { # $1 source, $2 key
   files="$(grep -lF -- "\"$key\"" "$CC_TICKETS_DIR"/t*.json 2>/dev/null | sort)"
   while IFS= read -r f; do
     [ -f "$f" ] || continue
-    role="$(jq -r --arg k "$key" "$CC_TICKET_JQ"' norm
+    role="$(jq -r --arg k "$key" "$CC_TICKET_JQ"' norm | select(published)
       | if .from.key == $k then "filer" elif .holder != null and .holder.key == $k then "holder" else empty end' "$f" 2>/dev/null)"
     [ -n "$role" ] || continue
     text="$(jq -r --arg r "$role" "$CC_TICKET_JQ"' norm | if hasnews($r) then newstext($r) else empty end' "$f" 2>/dev/null)"
@@ -2193,6 +2328,35 @@ EOF
   else printf 'News on %s cross-repo tickets (cc-ticket.sh) came while this session was away:\n\n' "$n"; fi
   printf '%s\n\n' "$out"
   printf 'Answer with ~/.claude/cc-ticket.sh reply <id> "..." (close one you hold with --note); ~/.claude/cc-ticket.sh show <id> prints a whole ticket.\n'
+}
+
+# The crossings part of cc_session_context (2026-10-14): the notes Shepherd left this session about
+# text it wrote for another project while it wasn't live to be told (FX.crossTell writes
+# <cid>.notice: a Deny's note, what went out after Adam's edit, a reply that couldn't go out). Only a
+# note whose cid names THIS key; each is claimed with mv, so it is shown once.
+_cc_ctx_crossings() { # $1 source, $2 key
+  local key="$2" f b cid claim text out="" n=0
+  case "$key" in ''|.|..|*/*) return 0 ;; esac
+  [ -d "$CC_CROSS_DIR" ] && cc_have_jq || return 0
+  for f in "$CC_CROSS_DIR/$key".*.notice; do
+    [ -f "$f" ] || continue
+    b="${f##*/}"; cid="${b%.notice}"
+    [[ "$cid" =~ ^(.+)\.[0-9]+-[0-9]+$ ]] && [ "${BASH_REMATCH[1]}" = "$key" ] || continue
+    claim="$f.claim.$$"
+    mv "$f" "$claim" 2>/dev/null || continue   # another start took it first
+    text="$(jq -r '.text // empty' "$claim" 2>/dev/null)"
+    rm -f "$claim"
+    [ -n "$text" ] || continue
+    if cc_ledger_enabled; then
+      cc_ledger_append "$(jq -nc --arg key "$key" --arg cid "$cid" '{type:"crossing_told", key:$key, cid:$cid, via:"start"}')"
+    fi
+    echo "[cc-lib] ✅ handed session $key Shepherd's note on crossing $cid" >&2
+    [ -z "$out" ] || out="$out"$'\n\n'
+    out="$out$text"
+    n=$((n + 1))
+  done
+  [ -n "$out" ] || return 0
+  printf '%s\n' "$out"
 }
 
 # ---- Stop guards (mining round 2, A1, 2026-10-02) -------------------------------------------

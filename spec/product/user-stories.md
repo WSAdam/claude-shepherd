@@ -91,6 +91,15 @@ delegation, idle/auto-spawn routing targets) are intentionally omitted until the
 - As a **fleet operator**, I want ❄ Freeze in the toolbar to hold the whole fleet the same way, with a FROZEN badge on every card, so that I can stop every automatic action at once.
 - As a **fleet operator**, I want mail sent to a held session to wait and go out once I lift the hold, while the skipped automatic sends are never replayed, so that releasing a hold doesn't unleash a backlog of stale actions.
 
+## Crossings between projects
+
+- As a **fleet operator**, I want a ticket one project's session files for another to wait on the filing session's card as a red Needs you, with its exact title and body, until I approve it, so that projects never use Shepherd to talk to each other behind my back.
+- As a **fleet operator**, I want every reply and close note on a ticket held the same way, on the card of the session that wrote it, so that nothing travels back between projects without me either.
+- As a **fleet operator**, I want to edit a held crossing before I approve it, and the receiving session to see "(edited by Adam)" on what I changed, so that I translate what crosses instead of only allowing or blocking it.
+- As a **fleet operator**, I want Deny to keep a crossing back and tell its session my note, at once if it's live or at its next start, so that the session knows why and doesn't try another way round.
+- As a **fleet operator**, I want a crossing to wait for me however long it takes, through its session's /clear and end, and to show on the 🎫 board when its session has no card, so that nothing is lost or decided by a timeout.
+- As a **developer**, I want only a ticket's filer, its holder and its target repo's sessions to take or read it -- a session's repo being where it launched, not where it cd'd -- so that a third project can't reach a ticket by its id.
+
 ## Session observability
 
 - As a **fleet operator**, I want an errored tile to show a coarse cause badge (budget exceeded, timeout, runtime error, model error, user cancelled), so that I know why a session froze without reading its logs.

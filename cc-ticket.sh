@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# cc-ticket.sh - file work for ANOTHER repo's sessions, and get the reply back without anyone
-# relaying it (build program unit 29, 2026-09-29).
+# cc-ticket.sh - file work for ANOTHER repo's sessions, and get the reply back -- every word that
+# crosses approved by Adam first (build program unit 29, 2026-09-29; crossings 2026-10-14).
 #
 #   cc-ticket.sh file --repo <root|name> --title "<T>" [--body "<B>"]   prints the new ticket's id
 #   cc-ticket.sh take <id>                     take a ticket offered to you (or an open one); prints it
@@ -10,19 +10,27 @@
 #   cc-ticket.sh show <id>                     the whole ticket
 #   cc-ticket.sh list                          the tickets this session filed, holds, or its repo waits on
 #
-# A ticket is ~/.claude/cc-tickets/<id>.json. Shepherd offers it to the target repo's least-busy live
-# session (never one waiting on you), through that session's mailbox: a busy session gets it at its
-# turn end, an idle one typed where typing is safe, else it waits in its mailbox until its next turn
-# end or start. The session takes it (take, reply or close) within 45 minutes, or it goes to another
-# session; a ticket whose holder's session ends goes back too. With no session to take it, it shows
-# on that repo's card in Shepherd with "Open a tab for it". Replies and the close come back to the
-# other side the same way -- through its mailbox, at its next start, or from a `wait` running in the
-# background. Every change claims the ticket's file with mv first (cc_ticket_update in cc-lib.sh),
-# so two writers never both win.
+# 2026-10-14 (Adam: "projects should not be able to utilize having shepherd to talk to each other,
+# that needs to be an approved translation between the two rather than something automatic"): what
+# a session writes for the other repo -- the filing, every reply, a close note -- is left as a request
+# in ~/.claude/cc-cross/ (cc_cross_request). Adam sees it on the session's card in Shepherd, may edit
+# it, and approves or denies it; only Shepherd publishes the approved text into the ticket
+# (~/.claude/cc-tickets/<id>.json). A Deny's note reaches the session through its mailbox (or at its
+# next start). Taking a ticket carries no text, so it happens at once.
+#
+# Once published, Shepherd offers a ticket to the target repo's least-busy live session (never one
+# waiting on you), through that session's mailbox. The session takes it (take, reply or close)
+# within 45 minutes, or it goes to another session; a ticket whose holder's session ends goes back
+# too. With no session to take it, it shows on that repo's card in Shepherd with "Open a tab for
+# it". Replies and the close come back to the other side the same way -- through its mailbox, at its
+# next start, or from a `wait` running in the background. A ticket is only ever taken or shown by
+# its filer, its holder, or a session of the repo it's for: a session's repo is where it LAUNCHED
+# (cc_session_project), not where it has cd'd to. Every change claims the ticket's file with mv
+# first (cc_ticket_update in cc-lib.sh), so two writers never both win.
 #
 # Only what a script wants goes to stdout (the id, the ticket, the news); everything else to stderr.
 # Exit codes: 0 done; 2 refused (the arguments, a closed ticket, your own repo); 3 not yours (held
-# by or offered to another session, or you filed it); 4 wait ran out; 5 no such ticket.
+# by or offered to another session, you filed it, or another repo's); 4 wait ran out; 5 no such ticket.
 set -u
 
 # shellcheck source=cc-lib.sh
@@ -39,13 +47,15 @@ cc-ticket.sh file --repo <root|name> --title "<T>" [--body "<B>"]
 cc-ticket.sh take <id> | reply <id> "<text>" | close <id> --note "<note>"
 cc-ticket.sh wait <id> [--timeout <seconds>] | show <id> | list
 
-File work for ANOTHER repo's sessions. `file` prints the ticket's id; Shepherd offers the ticket to
-that repo's least-busy live session, which takes it (take, reply or close) within 45 minutes or it
-goes to another session. With no session there, it waits on the repo's card ("Open a tab for it").
-Replies and the close come back through your mailbox, at your next start, or from `wait` -- run
-that in the background: it prints the next reply or the close. Closing always needs a note.
---repo is a repo's root (or any folder in it, or a worktree) or its name. Must run inside a Claude
-Code session (CLAUDE_CODE_SESSION_ID).
+File work for ANOTHER repo's sessions. Adam approves every word that crosses -- the filing, each
+reply, the close note -- on this session's card in Shepherd first, and may edit it; nothing reaches
+the other repo before he does. Don't resend or route around a held one. Once he passes a filing,
+Shepherd offers the ticket to that repo's least-busy live session, which takes it (take, reply or
+close) within 45 minutes or it goes to another session; with no session there, it waits on the
+repo's card ("Open a tab for it"). Replies and the close come back through your mailbox, at your
+next start, or from `wait` -- run that in the background: it prints the next reply or the close.
+Closing always needs a note. --repo is a repo's root (or any folder in it, or a worktree) or its
+name. Must run inside a Claude Code session (CLAUDE_CODE_SESSION_ID).
 Exit: 0 done, 2 refused, 3 not yours, 4 wait ran out, 5 no such ticket.
 EOF
 }
@@ -104,15 +114,65 @@ ledger() { # <type> <jq object of extra fields>
   cc_ledger_append "$(jq -nc --arg t "$1" --arg key "$ME" --arg cwd "$PWD" --argjson x "$x" \
     '{type:$t, key:$key, session_id:$key, cwd:$cwd} + $x')"
 }
-# The ticket id argument: t<epoch>-<n>, and there.
+# This session's project: the repo it launched in (cc_session_project), else -- a session Shepherd
+# doesn't know yet -- the repo of the folder it runs in. Cached for the run.
+MY_PROJECT=""
+my_project() {
+  [ -n "$MY_PROJECT" ] || MY_PROJECT="$(cc_session_project "$ME" 2>/dev/null)"
+  [ -n "$MY_PROJECT" ] || MY_PROJECT="$(cc_repo_root "$PWD" 2>/dev/null)"
+  printf '%s' "$MY_PROJECT"
+}
+# my_filing <id>: this session's filing of ticket <id> that isn't a published ticket: "<state> <file>"
+# (state pending | approved | denied | withdrawn | void), or nothing.
+my_filing() {
+  local st kind k p file
+  while IFS=' ' read -r st kind k p file; do
+    [ "$kind" = ticket ] || continue
+    if [ "$k" = "$ME" ] || { [ -n "$ME_PID" ] && [ "$p" = "$ME_PID" ]; }; then printf '%s %s' "$st" "$file"; return 0; fi
+  done <<EOF
+$(cc_cross_for_ticket "$1")
+EOF
+  return 1
+}
+# Does a close for ticket <id> wait for Adam (anyone's)?
+closing_waits() {
+  local st kind rest
+  while IFS=' ' read -r st kind rest; do
+    [ "$kind" = ticket-close ] && [ "$st" = pending ] && return 0
+  done <<EOF
+$(cc_cross_for_ticket "$1")
+EOF
+  return 1
+}
+# Leave Adam a request (cc_cross_request), or refuse. Prints the cid.
+cross() { # <json object of the kind's fields>
+  cc_cross_request "$ME" "$ME_PID" "$1" || refuse "couldn't leave the request for Adam in $CC_CROSS_DIR"
+}
+held() { # <what> <where>
+  say "⏸ Held for Adam: $1 reaches nobody in $2 until he approves it on this session's card in Shepherd -- he may edit it first."
+  say "   Don't resend it or route around Shepherd. If he denies it, his note reaches you through your mailbox."
+}
+# The ticket id argument: t<epoch>-<n>, and there -- a published ticket (cc-lib.sh's `published`),
+# or this session's own filing that Adam hasn't passed yet (FILING: "<state> <file>").
 ticket_id() {
   ID="${1:-}"
   [ -n "$ID" ] || usage_error "give the ticket's id"
   [[ "$ID" =~ ^t[0-9]+-[0-9]+$ ]] || refuse "'$ID' isn't a ticket id (they look like t1790000000-4242)"
   F="$CC_TICKETS_DIR/$ID.json"
+  FILING=""
   # cc_ticket_there, not one look at the file and one at its claims: a writer can put the file
   # back between the two (2026-09-30, the six-way take).
-  if ! cc_ticket_there "$ID"; then say "❌ cc-ticket: no ticket $ID"; exit 5; fi
+  if cc_ticket_there "$ID" && [ "$(snapshot | jq -r "$CC_TICKET_JQ"' published' 2>/dev/null)" = true ]; then return 0; fi
+  FILING="$(my_filing "$ID")" && return 0
+  say "❌ cc-ticket: no ticket $ID"; exit 5
+}
+# Commands that need the published ticket refuse a filing Adam hasn't passed.
+need_ticket() {
+  [ -n "$FILING" ] || return 0
+  case "${FILING%% *}" in
+    pending|approved) refuse "ticket $ID is still waiting for Adam's approval -- it can't take that until he passes it" ;;
+    *) refuse "ticket $ID was never filed -- Adam didn't pass it on (his note reached your mailbox)" ;;
+  esac
 }
 # The ticket as it stands (from its claim when a writer has it this instant). A writer can put the
 # file back between the two reads, so they are tried again before giving up (as cc_ticket_there).
@@ -124,6 +184,23 @@ snapshot() {
     [ "$n" = 3 ] || sleep 0.05
   done
   return 1
+}
+# Who this session is to ticket JSON $1: filer | holder (offered or taken) | "".
+role_of() {
+  printf '%s' "$1" | jq -r --arg me "$ME" --arg pid "$ME_PID" --arg name "" --argjson now "$(now)" \
+    "$CC_TICKET_JQ $RULES"' norm | if is_filer then "filer" elif is_holder then "holder" else "" end' 2>/dev/null
+}
+# Is this session one of the repo ticket JSON $1 is for? (Its launch project, not where it cd'd.)
+in_target_repo() {
+  local root mine
+  root="$(printf '%s' "$1" | jq -r '.to.root // empty' 2>/dev/null)"
+  mine="$(my_project)"
+  [ -n "$root" ] && [ -n "$mine" ] && [ "$root" = "$mine" ]
+}
+target_name() { printf '%s' "$1" | jq -r '.to.name // (.to.root | split("/") | last)' 2>/dev/null; }
+other_name() { # <ticket json> <role>: the repo a reply or close from <role> goes to
+  if [ "$2" = holder ]; then printf '%s' "$1" | jq -r '.from.name // (.from.root // "" | split("/") | last)' 2>/dev/null
+  else target_name "$1"; fi
 }
 # Say what an update that changed nothing came back with, and exit with its code.
 refused() { # <update's output> <update's code>
@@ -142,6 +219,21 @@ refused() { # <update's output> <update's code>
     *)       refuse "couldn't change ticket $ID" ;;
   esac
 }
+# Take ticket JSON $1 for this session before it writes on it (a reply or close takes an open
+# ticket first): only a session it is offered to, or one of the repo it's for, and never while a
+# close waits for Adam. Sets TOOK. Taking carries no text, so it happens at once.
+take_it() {
+  local res rc
+  TOOK=""
+  if [ "$(role_of "$1")" != holder ]; then
+    in_target_repo "$1" || not_yours "ticket $ID is for $(target_name "$1") -- only a session of that repo can take it"
+    closing_waits "$ID" && not_yours "a close for ticket $ID is waiting for Adam -- nobody takes it meanwhile"
+  fi
+  res="$(update "$ID" '(.holder == null or (is_holder and (.holder.taken | not))) as $took | take | . + {took: $took}')"; rc=$?
+  [ "$rc" -eq 0 ] || refused "$res" "$rc"
+  [ "$(printf '%s' "$res" | jq -r '.took' 2>/dev/null)" = true ] && TOOK=1
+  return 0
+}
 age() { # <epoch> -> "5m", "3h", "2d"
   local s=$(( $(now) - ${1:-0} ))
   [ "$s" -ge 0 ] || s=0
@@ -150,21 +242,39 @@ age() { # <epoch> -> "5m", "3h", "2d"
   else printf '%sd' $(( s / 86400 )); fi
 }
 # A ticket, for a reader: its title, who filed it for where, where it stands, the body, the replies.
-render() { # stdin: the ticket
-  jq -r --argjson now "$(now)" --arg age "$1" "$CC_TICKET_JQ"' norm
+# A close note that went to nobody (the filer's, with nobody holding the ticket) is the filer's alone.
+render() { # <age> <viewer role>; stdin: the ticket
+  jq -r --argjson now "$(now)" --arg age "$1" --arg viewer "${2:-}" "$CC_TICKET_JQ"' norm
     | (.to.name // (.to.root | split("/") | last)) as $to
     | (.from.name // (.from.root // "" | split("/") | last)) as $fromrepo
     | (.holder.name // .holder.key // "") as $h
     | phase($now) as $p
-    | "Ticket \(.id): \(.title | oneline)",
+    | "Ticket \(.id): \(.title | oneline)\(edited)",
       "Filed \($age) ago by \(.from.key) in \($fromrepo) for \($to) (\(.to.root)).",
-      (if $p == "closed" then "Closed by the \(.closed.by): \(.closed.note | oneline)"
+      (if $p == "closed" then
+         (if .closed.told == "none" and $viewer != "filer" then "Closed by the \(.closed.by)."
+          else "Closed by the \(.closed.by): \(.closed.note | oneline)\(.closed | edited)" end)
        elif $p == "held" then "Held by \($h)."
        elif $p == "offered" then "Offered to \($h), not taken yet."
        else "Open: nobody has it yet." end),
       (if (.body // "") != "" then "", .body else empty end),
       (if (.thread | length) > 0 then "", "Replies:",
-         (.thread[] | "- the \(.by) (\(.key)): \(.text | oneline)") else empty end)'
+         (.thread[] | "- the \(.by) (\(.key)): \(.text | oneline)\(edited)") else empty end)'
+}
+# This session's crossings on ticket $ID that still wait for Adam, one line each (for show).
+my_waiting() {
+  local st kind k p file
+  while IFS=' ' read -r st kind k p file; do
+    [ "$st" = pending ] || continue
+    if [ "$k" = "$ME" ] || { [ -n "$ME_PID" ] && [ "$p" = "$ME_PID" ]; }; then
+      case "$kind" in
+        ticket-reply) printf -- '- your reply, waiting for Adam: %s\n' "$(jq -r '.original.text // .text // ""' "$file" 2>/dev/null | tr '\n' ' ')" ;;
+        ticket-close) printf -- '- your close note, waiting for Adam: %s\n' "$(jq -r '.original.note // .note // ""' "$file" 2>/dev/null | tr '\n' ' ')" ;;
+      esac
+    fi
+  done <<EOF
+$(cc_cross_for_ticket "$ID")
+EOF
 }
 
 case "$CMD" in
@@ -188,30 +298,17 @@ file)
   [[ "$TITLE" =~ [[:cntrl:]] ]] && refuse "the title must be one line"
   TITLE="$(trim "$TITLE")"
   [ -n "$TITLE" ] || refuse "the title is empty"
-  [ "${#TITLE}" -le "$TITLE_MAX" ] || refuse "the title is longer than $TITLE_MAX characters"
+  [ "$(bytes "$TITLE")" -le "$TITLE_MAX" ] || refuse "the title is longer than $TITLE_MAX bytes"
   BODY="$(trim "$BODY")"
   [ "$(bytes "$BODY")" -le "$BODY_MAX" ] || refuse "the body is $(bytes "$BODY") bytes; at most $BODY_MAX go in a ticket (point at a file for more)"
   [[ "$REPO" =~ [[:cntrl:]] ]] && refuse "--repo holds a control character"
 
-  # A folder's repo: its main checkout's root (a worktree's too), or -- not a git repo -- the folder.
-  repo_root() {
-    local d common top
-    d="$(cd -- "$1" 2>/dev/null && pwd -P)" || return 1
-    common="$(cd -- "$d" && git rev-parse --git-common-dir 2>/dev/null)"
-    if [ -n "$common" ]; then
-      common="$(cd -- "$d" && cd -- "$common" 2>/dev/null && pwd -P)"
-      case "$common" in */.git) printf '%s' "${common%/.git}"; return 0 ;; esac
-      top="$(cd -- "$d" && git rev-parse --show-toplevel 2>/dev/null)"
-      [ -n "$top" ] && { printf '%s' "$top"; return 0; }
-    fi
-    printf '%s' "$d"
-  }
   case "$REPO" in
     */*|.|..|"~"|"~/"*)
       p="$REPO"
       case "$p" in "~") p="$HOME" ;; "~/"*) p="$HOME/${p#"~/"}" ;; esac
       [ -d "$p" ] || refuse "no such folder: $p"
-      TO="$(repo_root "$p")" || refuse "can't enter $p"
+      TO="$(cc_repo_root "$p")" || refuse "can't enter $p"
       ;;
     *)
       # a name: the repos of the sessions Shepherd knows (their status files' folders), by folder name
@@ -219,7 +316,7 @@ file)
       MATCHES=""
       while IFS= read -r cwd; do
         [ -n "$cwd" ] && [ -d "$cwd" ] || continue
-        r="$(repo_root "$cwd")" || continue
+        r="$(cc_repo_root "$cwd")" || continue
         [ "$(printf '%s' "${r##*/}" | tr '[:upper:]' '[:lower:]')" = "$want" ] || continue
         case $'\n'"$MATCHES"$'\n' in *$'\n'"$r"$'\n'*) ;; *) MATCHES="$MATCHES${MATCHES:+$'\n'}$r" ;; esac
       done < <(jq -r '.cwd // empty | select(type == "string")' "$CC_DIR"/*.json 2>/dev/null | sort -u)
@@ -233,31 +330,24 @@ file)
       TO="$MATCHES"
       ;;
   esac
-  MINE="$(repo_root "$PWD")"
-  [ "$TO" != "$MINE" ] || refuse "$TO is this session's own repo -- a ticket is work for ANOTHER repo's sessions (hand one of your own a prompt with cc-send.sh)"
+  MINE="$(my_project)"
+  [ "$TO" != "$MINE" ] && [ "$TO" != "$(cc_repo_root "$PWD")" ] \
+    || refuse "$TO is this session's own repo -- a ticket is work for ANOTHER repo's sessions (hand one of your own a prompt with cc-send.sh)"
 
-  NOW="$(now)"
-  ID="t$NOW-$$$RANDOM"
-  mkdir -p "$CC_TICKETS_DIR" 2>/dev/null && chmod 700 "$CC_TICKETS_DIR" 2>/dev/null
-  TMP="$CC_TICKETS_DIR/$ID.json.tmp.$$"
-  if ! jq -n --arg id "$ID" --arg title "$TITLE" --arg body "$BODY" --arg me "$ME" --arg pid "$ME_PID" \
-       --arg cwd "$PWD" --arg mine "$MINE" --arg to "$TO" --argjson now "$NOW" '
-       { v: 1, id: $id, title: $title, body: $body,
-         from: ({ key: $me, cwd: $cwd, root: $mine, name: ($mine | split("/") | last) }
-                + (if $pid != "" then { pid: $pid } else {} end)),
-         to: { root: $to, name: ($to | split("/") | last) },
-         filed: $now, holder: null, passed: [], thread: [], closed: null }' > "$TMP" 2>/dev/null \
-     || ! mv "$TMP" "$CC_TICKETS_DIR/$ID.json"; then
-    rm -f "$TMP"
-    refuse "couldn't write the ticket in $CC_TICKETS_DIR"
-  fi
-  ledger ticket_filed "$(jq -nc --arg id "$ID" --arg to "$TO" '{ticket:$id, repo:$to}')"
+  ID="t$(now)-$$$RANDOM"
+  FIELDS="$(jq -nc --arg id "$ID" --arg title "$TITLE" --arg body "$BODY" --arg mine "$MINE" --arg to "$TO" \
+    '{kind: "ticket", ticket: $id, title: $title, body: $body,
+      to: {root: $to, name: ($to | split("/") | last)},
+      from: {root: $mine, name: ($mine | split("/") | last)}}')"
+  CID="$(cross "$FIELDS")"
+  ledger crossing_requested "$(jq -nc --arg id "$ID" --arg to "$TO" --arg cid "$CID" '{kind:"ticket", ticket:$id, repo:$to, cid:$cid}')"
   printf '%s\n' "$ID"
-  say "📮 Filed $ID for ${TO##*/} ($TO). Shepherd offers it to a live session there -- an idle one before a busy one, never one waiting on Adam; with none, it waits on that repo's card."
-  say "   Replies and the close reach you through your mailbox (or at your next start); '$CMD_PATH wait $ID' in the background blocks until one comes."
+  held "ticket $ID" "${TO##*/} ($TO)"
+  say "   Once he passes it, Shepherd offers it to a live session there -- an idle one before a busy one, never one waiting on Adam; with none, it waits on that repo's card."
+  say "   Replies and the close reach you through your mailbox (or at your next start), each approved by Adam too; '$CMD_PATH wait $ID' in the background blocks until one comes."
   hb="$(tr -dc '0-9' < "$(cc_heartbeat_file)" 2>/dev/null)"
   if [ -z "$hb" ] || [ $(( $(date +%s) - hb )) -gt "$PANEL_MAX_AGE" ]; then
-    say "⚠️ Shepherd isn't running, so nothing offers the ticket yet -- it waits in $CC_TICKETS_DIR until Shepherd runs."
+    say "⚠️ Shepherd isn't running, so Adam can't see it yet -- it waits in $CC_CROSS_DIR until Shepherd runs."
   fi
   exit 0
   ;;
@@ -266,32 +356,33 @@ file)
 take)
   [ $# -le 1 ] || usage_error "take takes just the ticket's id"
   ticket_id "${1:-}"
-  RES="$(update "$ID" 'take')"; rc=$?
-  [ "$rc" -eq 0 ] || refused "$RES" "$rc"
+  need_ticket
+  S="$(snapshot)"
+  [ "$(role_of "$S")" = filer ] && not_yours "you filed ticket $ID -- the target repo's session takes it (reply or close it as the filer)"
+  take_it "$S"
   ledger ticket_taken "$(jq -nc --arg id "$ID" '{ticket:$id}')"
-  snapshot | render "$(age "$(snapshot | jq -r '.filed // 0')")"
-  say "✅ Ticket $ID is yours. Reply as you go: $CMD_PATH reply $ID \"...\"; close it with $CMD_PATH close $ID --note \"what you did\"."
+  snapshot | render "$(age "$(snapshot | jq -r '.filed // 0')")" holder
+  say "✅ Ticket $ID is yours. Reply as you go: $CMD_PATH reply $ID \"...\"; close it with $CMD_PATH close $ID --note \"what you did\". Adam approves each before the filer sees it."
   ;;
 
 # ---- reply ----
 reply)
   [ $# -eq 2 ] || usage_error "reply takes the ticket's id and the text, quoted"
   ticket_id "$1"
+  need_ticket
   TEXT="$(trim "$2")"
   [ -n "$TEXT" ] || refuse "the reply is empty"
   [ "$(bytes "$TEXT")" -le "$REPLY_MAX" ] || refuse "the reply is $(bytes "$TEXT") bytes; at most $REPLY_MAX"
-  RES="$(update "$ID" '
-    if phase($now) == "closed" then {ticket: null, result: "closed"}
-    elif is_filer then {ticket: (.thread += [{by: "filer", key: $me, text: $text, at: $now, told: false}]), result: "replied", role: "filer"}
-    else (.holder == null or (is_holder and (.holder.taken | not))) as $took | take as $r
-      | if $r.ticket == null then $r
-        else {ticket: ($r.ticket | .thread += [{by: "holder", key: $me, text: $text, at: $now, told: false}]),
-              result: "replied", role: "holder", took: $took} end end' --arg text "$TEXT")"; rc=$?
-  [ "$rc" -eq 0 ] || refused "$RES" "$rc"
-  ROLE="$(printf '%s' "$RES" | jq -r '.role')"
-  ledger ticket_reply "$(printf '%s' "$RES" | jq -c --arg id "$ID" '{ticket:$id, role:.role} + (if .took then {took:true} else {} end)')"
-  if [ "$ROLE" = filer ]; then say "📨 Replied on $ID -- the session holding it gets it (or the next one it's offered to)."
-  else say "📨 Replied on $ID -- the filer gets it. Close it with $CMD_PATH close $ID --note \"...\" when you're done."; fi
+  S="$(snapshot)"
+  [ "$(printf '%s' "$S" | jq -r --argjson now "$(now)" "$CC_TICKET_JQ"' norm | phase($now)')" != closed ] || refuse "ticket $ID is closed"
+  ROLE="$(role_of "$S")" TOOK=""
+  if [ "$ROLE" != filer ]; then take_it "$S"; ROLE=holder; S="$(snapshot)"; fi
+  CID="$(cross "$(jq -nc --arg id "$ID" --arg role "$ROLE" --arg text "$TEXT" '{kind:"ticket-reply", ticket:$id, role:$role, text:$text}')")"
+  ledger crossing_requested "$(jq -nc --arg id "$ID" --arg role "$ROLE" --arg cid "$CID" --arg took "$TOOK" \
+    '{kind:"ticket-reply", ticket:$id, role:$role, cid:$cid} + (if $took != "" then {took:true} else {} end)')"
+  [ -z "$TOOK" ] || say "✅ Ticket $ID is yours now."
+  held "your reply on $ID" "$(other_name "$S" "$ROLE")"
+  [ "$ROLE" = filer ] || say "   Close it with $CMD_PATH close $ID --note \"...\" when you're done."
   ;;
 
 # ---- close ----
@@ -311,18 +402,40 @@ close)
   NOTE="$(trim "$NOTE")"
   [ -n "$NOTE" ] || refuse "the note is empty -- say what you did, or why not"
   [ "$(bytes "$NOTE")" -le "$NOTE_MAX" ] || refuse "the note is $(bytes "$NOTE") bytes; at most $NOTE_MAX"
-  RES="$(update "$ID" '
-    if phase($now) == "closed" then {ticket: null, result: "closed"}
-    elif is_filer then {ticket: (.closed = {by: "filer", key: $me, note: $note, at: $now,
-                                           told: (if .holder == null then "none" else false end)}), result: "closed-it", role: "filer"}
-    else (.holder == null or (is_holder and (.holder.taken | not))) as $took | take as $r
-      | if $r.ticket == null then $r
-        else {ticket: ($r.ticket | .closed = {by: "holder", key: $me, note: $note, at: $now, told: false}),
-              result: "closed-it", role: "holder", took: $took} end end' --arg note "$NOTE")"; rc=$?
-  [ "$rc" -eq 0 ] || refused "$RES" "$rc"
-  ledger ticket_closed "$(printf '%s' "$RES" | jq -c --arg id "$ID" '{ticket:$id, role:.role} + (if .took then {took:true} else {} end)')"
-  if [ "$(printf '%s' "$RES" | jq -r '.role')" = filer ]; then say "✅ Closed $ID -- the session holding it (if any) is told to stop."
-  else say "✅ Closed $ID -- the filer gets your note."; fi
+  # the filer's own filing, still waiting for Adam: withdrawn (nothing ever crossed)
+  if [ -n "$FILING" ]; then
+    case "${FILING%% *}" in
+      pending|approved)
+        CID="$(cross "$(jq -nc --arg id "$ID" '{kind:"withdraw", ticket:$id}')")"
+        ledger crossing_requested "$(jq -nc --arg id "$ID" --arg cid "$CID" '{kind:"withdraw", ticket:$id, cid:$cid}')"
+        say "✅ Withdrew $ID before Adam passed it on -- nothing reached the other repo."
+        exit 0 ;;
+      *) refuse "ticket $ID was never filed -- nothing to close" ;;
+    esac
+  fi
+  S="$(snapshot)"
+  [ "$(printf '%s' "$S" | jq -r --argjson now "$(now)" "$CC_TICKET_JQ"' norm | phase($now)')" != closed ] || refuse "ticket $ID is closed"
+  ROLE="$(role_of "$S")" TOOK=""
+  if [ "$ROLE" = filer ] && [ "$(printf '%s' "$S" | jq -r '.holder == null')" = true ]; then
+    # nobody holds it: the note goes to no one, so nothing crosses -- closed at once, the note private
+    RES="$(update "$ID" 'if phase($now) == "closed" then {ticket: null, result: "closed"}
+      elif is_filer and .holder == null then {ticket: (.closed = {by: "filer", key: $me, note: $note, at: $now, told: "none"}), result: "closed-it"}
+      else {ticket: null, result: "held"} end' --arg note "$NOTE")"; rc=$?
+    if [ "$rc" -eq 0 ]; then
+      ledger ticket_closed "$(jq -nc --arg id "$ID" '{ticket:$id, role:"filer"}')"
+      say "✅ Closed $ID -- nobody held it, so nothing went to the other repo."
+      exit 0
+    fi
+    [ "$(printf '%s' "$RES" | jq -r '.result // empty' 2>/dev/null)" = held ] || refused "$RES" "$rc"
+    S="$(snapshot)"   # someone took it meanwhile: the note crosses, so it waits for Adam
+  fi
+  if [ "$ROLE" != filer ]; then take_it "$S"; ROLE=holder; S="$(snapshot)"; fi
+  CID="$(cross "$(jq -nc --arg id "$ID" --arg role "$ROLE" --arg note "$NOTE" '{kind:"ticket-close", ticket:$id, role:$role, note:$note}')")"
+  ledger crossing_requested "$(jq -nc --arg id "$ID" --arg role "$ROLE" --arg cid "$CID" --arg took "$TOOK" \
+    '{kind:"ticket-close", ticket:$id, role:$role, cid:$cid} + (if $took != "" then {took:true} else {} end)')"
+  held "your close note on $ID" "$(other_name "$S" "$ROLE")"
+  [ "$ROLE" = filer ] && say "   Once he passes it, the session holding it is told to stop." \
+    || say "   Once he passes it, the ticket closes and the filer gets your note. Stop work on it."
   ;;
 
 # ---- wait ----
@@ -340,8 +453,27 @@ wait)
   done
   case "$TIMEOUT" in ''|*[!0-9]*) usage_error "--timeout takes whole seconds" ;; esac
   [ "$TIMEOUT" -gt 0 ] || usage_error "--timeout takes whole seconds (at least 1)"
-  ROLE="$(snapshot | jq -r --arg me "$ME" --arg pid "$ME_PID" --arg name "" --argjson now "$(now)" \
-    "$CC_TICKET_JQ $RULES"' norm | if is_filer then "filer" elif is_holder then "holder" else "" end' 2>/dev/null)"
+  SECONDS=0
+  # the filer's own filing, still waiting for Adam: wait for his decision first
+  if [ -n "$FILING" ]; then
+    say "⏳ Ticket $ID waits for Adam's approval (up to ${TIMEOUT}s here)..."
+    while :; do
+      case "${FILING%% *}" in
+        denied)    printf 'Ticket %s was not filed: Adam didn'"'"'t pass it on (his note reaches you through your mailbox).\n' "$ID"; exit 0 ;;
+        withdrawn) printf 'Ticket %s was withdrawn before it was filed.\n' "$ID"; exit 0 ;;
+        void)      printf 'Ticket %s was not filed.\n' "$ID"; exit 0 ;;
+      esac
+      if cc_ticket_there "$ID" && [ "$(snapshot | jq -r "$CC_TICKET_JQ"' published' 2>/dev/null)" = true ]; then
+        say "✅ Adam passed ticket $ID on -- now waiting for news on it."
+        FILING=""
+        break
+      fi
+      [ "$SECONDS" -lt "$TIMEOUT" ] || { say "⌛ cc-ticket: Adam hasn't decided on $ID in ${TIMEOUT}s."; exit 4; }
+      sleep "$POLL"
+      FILING="$(my_filing "$ID")" || FILING="pending -"
+    done
+  fi
+  ROLE="$(role_of "$(snapshot)")"
   [ -n "$ROLE" ] || not_yours "ticket $ID isn't yours to wait on (you neither filed nor hold it)"
   WAIT_PID="$$"
   # Registered on the ticket, so Shepherd leaves this side's news to the waiter instead of the mailbox.
@@ -354,7 +486,6 @@ wait)
   trap 'unregister' EXIT
   trap 'exit 130' INT TERM HUP
   say "⏳ Waiting on ticket $ID (up to ${TIMEOUT}s) for $( [ "$ROLE" = filer ] && echo "the holder's reply or its close" || echo "the filer's reply" )..."
-  SECONDS=0
   while :; do
     S="$(snapshot)"
     if [ -n "$S" ]; then
@@ -368,7 +499,8 @@ wait)
           exit 0
         fi
       elif [ "$(printf '%s' "$S" | jq -r '(.closed | type) == "object"' 2>/dev/null)" = true ]; then
-        printf '%s\n' "$(printf '%s' "$S" | jq -r --arg r "$ROLE" '"Ticket \(.id) is closed (by \(if .closed.by == $r then "you" else "the " + .closed.by end)): \(.closed.note)"')"
+        printf '%s\n' "$(printf '%s' "$S" | jq -r --arg r "$ROLE" '"Ticket \(.id) is closed (by \(if .closed.by == $r then "you" else "the " + .closed.by end))"
+          + (if .closed.told == "none" and .closed.by != $r then "." else ": \(.closed.note)" end)')"
         exit 0
       fi
     fi
@@ -381,23 +513,48 @@ wait)
 show)
   [ $# -eq 1 ] || usage_error "show takes the ticket's id"
   ticket_id "$1"
+  if [ -n "$FILING" ]; then
+    FFILE="${FILING#* }"
+    case "${FILING%% *}" in
+      pending|approved) STATE="not filed yet: waiting for Adam's approval" ;;
+      denied) STATE="not filed: Adam didn't pass it on" ;;
+      withdrawn) STATE="withdrawn before it was filed" ;;
+      *) STATE="not filed" ;;
+    esac
+    jq -r --arg state "$STATE" '(.original // .) as $o
+      | "Ticket \(.ticket) (\($state)): \($o.title // "")", "For \(.to.name // (.to.root // "" | split("/") | last)) (\(.to.root // "")).",
+        (if ($o.body // "") != "" then "", $o.body else empty end)' "$FFILE"
+    exit 0
+  fi
   S="$(snapshot)" || { say "❌ cc-ticket: no ticket $ID"; exit 5; }
-  printf '%s' "$S" | render "$(age "$(printf '%s' "$S" | jq -r '.filed // 0')")"
+  ROLE="$(role_of "$S")"
+  [ -n "$ROLE" ] || in_target_repo "$S" || not_yours "ticket $ID is between other repos -- only its filer, its holder or a session of $(target_name "$S") sees it"
+  printf '%s' "$S" | render "$(age "$(printf '%s' "$S" | jq -r '.filed // 0')")" "$ROLE"
+  W="$(my_waiting)"
+  [ -z "$W" ] || printf '\n%s' "$W"
   ;;
 list)
   [ $# -eq 0 ] || usage_error "list takes nothing"
-  ROOT="$(cd -- "$PWD" && git rev-parse --git-common-dir 2>/dev/null)"
-  ROOT="$( [ -n "$ROOT" ] && cd -- "$ROOT" 2>/dev/null && pwd -P)"
-  ROOT="${ROOT%/.git}"
-  [ -n "$ROOT" ] || ROOT="$(pwd -P)"
+  ROOT="$(my_project)"
   OUT=""
   for f in "$CC_TICKETS_DIR"/t*.json; do
     [ -f "$f" ] || continue
     line="$(jq -r --arg me "$ME" --arg pid "$ME_PID" --arg name "" --arg root "$ROOT" --argjson now "$(now)" \
-      "$CC_TICKET_JQ $RULES"' norm | phase($now) as $p
+      "$CC_TICKET_JQ $RULES"' norm | select(published) | phase($now) as $p
       | select(is_filer or is_holder or (.to.root == $root and ($p == "open" or $p == "lapsed" or $p == "offered")))
       | "\(.id)  \($p | if . == "lapsed" then "open" else . end)  \(.title | oneline)  (\(if is_filer then "you filed it" elif is_holder then "you hold it" else "waiting for this repo" end))"' "$f" 2>/dev/null)"
     [ -n "$line" ] && OUT="$OUT$line"$'\n'
+  done
+  # this session's filings that wait for Adam (no ticket yet)
+  for f in "$CC_CROSS_DIR"/*.json; do
+    [ -f "$f" ] || continue
+    line="$(jq -r --arg me "$ME" --arg pid "$ME_PID" 'select(.kind == "ticket" and ((.state // "pending") == "pending" or .state == "approved")
+        and (.from.key == $me or ($pid != "" and (.from.pid // "") == $pid)))
+      | "\(.ticket)  waiting for Adam  \((.original.title // .title // "") | gsub("[[:cntrl:]]+"; " "))  (you filed it)"' "$f" 2>/dev/null)"
+    [ -n "$line" ] || continue
+    case "$OUT" in *"${line%%  *}  "*) continue ;; esac
+    [ -f "$CC_TICKETS_DIR/${line%%  *}.json" ] && continue
+    OUT="$OUT$line"$'\n'
   done
   if [ -z "$OUT" ]; then say "No tickets filed by, held by or waiting for this session."; exit 0; fi
   printf '%s' "$OUT"

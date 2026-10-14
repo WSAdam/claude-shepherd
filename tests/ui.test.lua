@@ -4113,7 +4113,61 @@ do
   check("tickets: cc-lib.sh defaults CC_TICKETS_DIR to the same folder",
         ls:find('CC_TICKETS_DIR="${CC_TICKETS_DIR:-${HOME}/.claude/cc-tickets}"', 1, true) ~= nil)
   -- 2026-10-03: the list gained "finish" (A2's compaction part) after the lease
-  check("tickets: SessionStart has a tickets part", ls:find('CC_CONTEXT_PARTS="notes lease finish decisions tickets onpurpose handoff mailbox"', 1, true) ~= nil)
+  -- 2026-10-14: ...and "crossings" (Shepherd's notes on held crossings) after the tickets
+  check("tickets: SessionStart has a tickets part",
+        ls:find('CC_CONTEXT_PARTS="notes lease finish decisions tickets crossings onpurpose handoff mailbox"', 1, true) ~= nil)
+end
+
+-- ---- Crossings are stepped every tick, and only Adam's click publishes (2026-10-14) ----
+-- Adam: "projects should not be able to utilize having shepherd to talk to each other, that needs to be
+-- an approved translation between the two rather than something automatic". tests/cross.test.lua drives
+-- FX.stepCrossings and FX.crossDecide itself; these pin the wiring: the step runs BEFORE the needs-you
+-- stamp (it.crossing makes the author's card red), the bridge's one way in, the folder both halves
+-- share, a decision read back from disk, and that nothing but a decision publishes into a ticket.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local tick = src:match("function FX%._refreshBody%(%)(.-)\nend\n") or ""
+  local stamp, step = tick:find("FX.annotateNeedsYou(list)", 1, true), tick:find("pcall(FX.stepCrossings, list)", 1, true)
+  check("crossings: the tick steps them, isolated in a pcall", step ~= nil)
+  check("crossings: ...BEFORE the needs-you stamp reads it.crossing", stamp ~= nil and step ~= nil and step < stamp)
+  check("crossings: ...and before the tickets step (a waiting close keeps its ticket from being offered)",
+        step ~= nil and tick:find("pcall(FX.stepTickets, list)", 1, true) ~= nil and step < tick:find("pcall(FX.stepTickets, list)", 1, true))
+  check("crossings: the bridge's one way in is Adam's decision",
+        src:find('if a == "cross-decide" then FX.crossDecide(tostring(payload.v or ""), tostring(payload.text or "")); return end', 1, true) ~= nil)
+  check("crossings: FX.CROSS_DIR reads CC_CROSS_DIR, as cc-lib.sh does",
+        src:find('FX.CROSS_DIR = os.getenv("CC_CROSS_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-cross")', 1, true) ~= nil)
+  local dec = src:match("function FX%.crossDecide%(cid, payloadJson%)(.-)\nend\n") or ""
+  check("crossings: a decision re-reads the record from disk and needs it pending",
+        dec:find("local rec = FX.crossLoad(cid)", 1, true) ~= nil and dec:find('rec.state ~= "pending"', 1, true) ~= nil)
+  check("crossings: ...decides once (a double click)", dec:find("FX._cross.sent[cid]", 1, true) ~= nil)
+  -- the only callers of the publisher are Adam's decision and the retry of an approved record
+  local n = 0
+  for _ in src:gmatch("FX%.crossPublish%(") do n = n + 1 end
+  check("crossings: only a decision (and its retry) publishes", n == 3)   -- the definition, crossDecide, stepCrossings' retry
+  local step2 = src:match("function FX%.stepCrossings%(list%)(.-)\nend\n") or ""
+  check("crossings: the retry publishes only an APPROVED record",
+        step2:find('rec.state == "approved" and not rec.published', 1, true) ~= nil)
+  check("crossings: the tickets step offers only published tickets",
+        (src:match("function FX%.stepTickets%(list%)(.-)\nend\n") or ""):find("core.ticketPublished(t)", 1, true) ~= nil)
+  local lib = io.open(ROOT .. "cc-lib.sh", "r")
+  local ls = lib and lib:read("*a") or ""
+  if lib then lib:close() end
+  check("crossings: cc-lib.sh defaults CC_CROSS_DIR to the same folder",
+        ls:find('CC_CROSS_DIR="${CC_CROSS_DIR:-${HOME}/.claude/cc-cross}"', 1, true) ~= nil)
+  check("crossings: a held session's start takes no crossing notes either", ls:find('CC_HOLD_MAIL_PARTS="mailbox decisions tickets crossings"', 1, true) ~= nil)
+  check("crossings: cc_remove prunes them, never by key", (ls:match("\ncc_remove%(%) {(.-)\n}\n") or ""):find("cc_cross_prune\n", 1, true) ~= nil)
+  local tkf = io.open(ROOT .. "cc-ticket.sh", "r")
+  local ts = tkf and tkf:read("*a") or ""
+  if tkf then tkf:close() end
+  check("crossings: cc-ticket.sh never writes a ticket file itself (Shepherd publishes)",
+        not ts:find('> "$CC_TICKETS_DIR', 1, true) and not ts:find('mv "$TMP" "$CC_TICKETS_DIR', 1, true))
+  check("crossings: ...it leaves requests for Adam (cc_cross_request)", ts:find("cc_cross_request", 1, true) ~= nil)
+  check("crossings: the generic Approve/Deny lock on a card red only for its crossing",
+        src:find('var crossOnly = !remote && it.needsYouSource === "cross"', 1, true) ~= nil
+        and src:find("lockCtl(bap, crossOnly ? CROSS_LOCK_T", 1, true) ~= nil
+        and src:find("lockCtl(bdeny, crossOnly ? CROSS_LOCK_T", 1, true) ~= nil)
 end
 
 -- ---- Capture as scenario (2026-09-29) ----

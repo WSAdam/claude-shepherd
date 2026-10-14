@@ -494,6 +494,15 @@ echo ""
 echo "== node: the Tickets board and the card's badge, every session word escaped, a click sends only the id or the card's key (behavioral, runs the shipped ticketRowsHtml) =="
 node "$DIR/tickets-view.test.js" || fail=1
 echo ""
+echo "== lua: crossings -- a ticket, reply or close for another project held on its author's card until Adam approves it (edited if he likes), Shepherd the only publisher, a Deny's note to the author (stubbed hs) =="
+HOME="$(mktemp -d)" lua "$DIR/cross.test.lua" || fail=1
+echo ""
+echo "== bash: crossings -- cc-ticket.sh leaves requests for Adam, a third repo can't take or show a ticket, a session's project is where it launched, notes at the next start, the removers =="
+bash "$DIR/cross.test.sh" || fail=1
+echo ""
+echo "== node: a crossing's review on the card and the board -- edits survive the refresh, a click sends the id and Adam's text, every session word escaped (behavioral, runs the shipped renderCrossing) =="
+node "$DIR/cross-view.test.js" || fail=1
+echo ""
 echo "== bash: the find-only audit's own hook -- a playwright call naming a file is denied, one without passes silently; the settings and MCP config are valid JSON =="
 bash "$DIR/audit-preset.test.sh" || fail=1
 echo ""

@@ -5180,6 +5180,11 @@ function FX.removeStatus(key)
     if not okt then print("[cc-dashboard] ❌ tickets release failed: " .. tostring(errt)) end
     okt, errt = pcall(FX.ticketPrune)
     if not okt then print("[cc-dashboard] ❌ tickets prune failed: " .. tostring(errt)) end
+    -- crossings (2026-10-14) are kept on purpose: a pending one outlives /clear and SessionEnd (Adam
+    -- still decides it, and a Deny leaves a note for the next start). Only stale parts go.
+    -- (cc_remove too: cc_cross_prune.)
+    okt, errt = pcall(FX.crossPrune)
+    if not okt then print("[cc-dashboard] ❌ crossings prune failed: " .. tostring(errt)) end
   end
   -- pinned links (2026-09-29) belong to a worktree, not this key -- they outlive /clear -- so only
   -- the pins of a worktree that is gone go (cc_remove runs cc_pins_prune)
@@ -10345,6 +10350,13 @@ function FX.stepTickets(list)
     return
   end
   local tickets = FX.readTickets()
+  -- 2026-10-14 (crossings): only a published ticket -- Shepherd wrote it after Adam approved it, or it
+  -- predates the gate -- is offered, told or shown. One written into the folder any other way isn't.
+  do
+    local pub = {}
+    for _, t in ipairs(tickets) do if core.ticketPublished(t) then pub[#pub + 1] = t end end
+    tickets = pub
+  end
   local byKeyT, byPid = {}, {}
   for _, it in ipairs(list or {}) do
     if type(it) == "table" and it.key and not it.remote then
@@ -10376,7 +10388,8 @@ function FX.stepTickets(list)
   local held = core.ticketHeldCounts(tickets, now)
   for i, t in ipairs(tickets) do
     local ph = core.ticketPhase(t, now)
-    if ph == "open" or ph == "lapsed" then
+    -- 2026-10-14: a ticket whose close waits for Adam isn't offered again (its holder may have ended)
+    if (ph == "open" or ph == "lapsed") and not (FX._cross and FX._cross.closing[t.id]) then
       local tabbing = tonumber(t.tabAt) and now - tonumber(t.tabAt) < core.TICKET.tabGraceSeconds
       if tabbing or t._busy or not (routeNow or not FX._tickets.waiting[t.id]) then
         waiting[t.id] = FX._tickets.waiting[t.id] or tabbing or nil
@@ -10428,7 +10441,11 @@ end
 function FX.pushTickets()
   if not wv then return end
   local rows = FX.ticketRows()
-  local js = "ccTickets(" .. ((#rows == 0) and "[]" or core.json.encode(rows)) .. ")"
+  -- 2026-10-14: the crossings whose author has no card, to decide on the board instead
+  local okc, cross = pcall(FX.crossRows)
+  if not okc or type(cross) ~= "table" then cross = {} end
+  local js = "ccTickets(" .. ((#rows == 0) and "[]" or core.json.encode(rows)) .. ","
+    .. ((#cross == 0) and "[]" or core.json.encode(cross)) .. ")"
   pcall(function() wv:evaluateJavaScript(js) end)
 end
 
@@ -10519,7 +10536,7 @@ end
 function FX.openTicketTab(id)
   if not core.ticketIdOk(id) then return false end
   local t = core.parseTicket(FX.readFile(FX.TICKETS_DIR .. "/" .. id .. ".json"), id)
-  if not t then FX.alert("⚠️ Ticket " .. id .. " isn't there any more"); return false end
+  if not t or not core.ticketPublished(t) then FX.alert("⚠️ Ticket " .. id .. " isn't there any more"); return false end
   local ph = core.ticketPhase(t, FX.now())
   if ph ~= "open" and ph ~= "lapsed" then
     FX.alert("⚠️ Ticket " .. id .. (ph == "closed" and " is closed" or " is with a session already") .. " -- no tab needed")
@@ -10587,6 +10604,323 @@ function FX.ticketPrune()
       if mt and now - mt > core.TICKET.partSeconds then
         if f.kind == "claim" and not names[f.id .. ".json"] then os.rename(path, FX.TICKETS_DIR .. "/" .. f.id .. ".json")
         else os.remove(path) end
+      end
+    end
+  end
+end
+
+-- ---- Crossings (2026-10-14) ----
+-- Adam: "projects should not be able to utilize having shepherd to talk to each other, that needs to
+-- be an approved translation between the two rather than something automatic". cc-ticket.sh leaves
+-- what a session writes for ANOTHER project -- a ticket, a reply, a close note -- as a request in
+-- FX.CROSS_DIR (<cid>.req.json). Each tick FX.stepCrossings claims each request into Shepherd's own
+-- record (<cid>.json: only Shepherd writes it, so a decision is never read from the session's file),
+-- stamps the author's card (it.crossing: red Needs you, before FX.annotateNeedsYou reads it), and
+-- retries what a busy ticket held back. Adam's click (FX.crossDecide) is the ONLY thing that
+-- publishes -- Shepherd writes the final text into the ticket (core.crossTicketPublish) -- and the
+-- author is told a Deny's note or an edit (FX.crossTell). Records outlive their session (a /clear or
+-- SessionEnd): the card is found by key, else by pid, else the 🎫 board lists it.
+FX.CROSS_DIR = os.getenv("CC_CROSS_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-cross")
+-- records: the last tick's; closing: ticket id -> true while its close waits for Adam; sent: cid ->
+-- true once decided here (a double click decides once); retry: cid -> when a held-back publish is
+-- tried again; nextPrune: the hourly prune.
+FX._cross = { records = {}, closing = {}, sent = {}, retry = {}, nextPrune = 0 }
+function FX.crossLoad(cid)
+  if not core.crossIdOk(cid) then return nil end
+  return core.parseCrossRecord(FX.readFile(FX.CROSS_DIR .. "/" .. cid .. ".json"), cid)
+end
+function FX.crossSave(rec)
+  return FX.writeFileAtomic(FX.CROSS_DIR .. "/" .. rec.cid .. ".json", core.json.encode(rec))
+end
+-- The sides of ticket t: the repo a reply or close from `role` goes to.
+function FX.crossOtherSide(t, role)
+  if role == "holder" then return { root = t.from.root, name = t.from.name } end
+  return { root = t.to.root, name = t.to.name }
+end
+-- Claim request file `fn` (one tick's rename wins) into a record. A withdraw closes the author's own
+-- pending filing instead; a reply or close whose author isn't the side it claims is void at once.
+function FX.crossClaim(fn, now)
+  local f = core.crossFileOf(fn)
+  if not f or f.kind ~= "req" then return end
+  local path = FX.CROSS_DIR .. "/" .. fn
+  local claim = path .. ".claim.shepherd"
+  if not os.rename(path, claim) then return end
+  local req, why = core.parseCrossRequest(FX.readFile(claim), f.cid)
+  if not req then
+    os.remove(claim)
+    print("[cc-dashboard] ⚠️ crossings: dropped request " .. f.cid .. ": " .. tostring(why))
+    return
+  end
+  if FX.crossLoad(f.cid) then os.remove(claim); return end   -- a stray copy of one already held
+  if req.kind == "withdraw" then
+    for _, r in ipairs(FX._cross.records or {}) do
+      if r.kind == "ticket" and r.state == "pending" and r.ticket == req.ticket
+         and (r.from.key == req.from.key or (req.from.pid and tostring(r.from.pid or "") == req.from.pid)) then
+        local cur = FX.crossLoad(r.cid)
+        if cur and cur.state == "pending" then
+          cur.state, cur.decided = "withdrawn", { verdict = "withdraw", at = now }
+          cur.told = { at = now, via = "none" }   -- the author did it: nothing to tell
+          FX.crossSave(cur)
+          print("[cc-dashboard] ✅ crossings: " .. cur.cid .. " withdrawn by its author")
+          FX.appendLedger({ type = "crossing_withdrawn", cid = cur.cid, key = req.from.key, ticket = req.ticket })
+        end
+      end
+    end
+    os.remove(claim)
+    return
+  end
+  local rec = core.crossRecord(req, now)
+  if req.kind ~= "ticket" then
+    local t = core.parseTicket(FX.readFile(FX.TICKETS_DIR .. "/" .. req.ticket .. ".json"), req.ticket)
+    if t and core.ticketPublished(t) and core.crossRoleOk(rec, t) then
+      rec.to = FX.crossOtherSide(t, rec.role)
+    else
+      rec.state, rec.voidWhy = "void", (t and core.ticketPublished(t)) and "not yours" or "gone"
+      rec.to = t and FX.crossOtherSide(t, rec.role) or { name = "the other repo" }
+      rec.decided = { verdict = "void", at = now }
+    end
+  end
+  if not FX.crossSave(rec) then
+    os.rename(claim, path)
+    print("[cc-dashboard] ❌ crossings: couldn't record " .. f.cid)
+    return
+  end
+  os.remove(claim)
+  if rec.state == "void" then
+    print("[cc-dashboard] ⚠️ crossings: " .. rec.cid .. " void (" .. tostring(rec.voidWhy) .. ")")
+    FX.appendLedger({ type = "crossing_void", cid = rec.cid, kind = rec.kind, key = req.from.key, ticket = rec.ticket,
+                      why = rec.voidWhy })
+  else
+    print("[cc-dashboard] ⏸ crossings: holding " .. rec.cid .. " (" .. rec.kind .. ") for Adam")
+    FX.appendLedger({ type = "crossing_held", cid = rec.cid, kind = rec.kind, key = req.from.key, ticket = rec.ticket,
+                      to = rec.to and rec.to.root or nil })
+    pcall(function()
+      local to = type(rec.to) == "table" and (rec.to.name or rec.to.root) or "another project"
+      FX.alert("↔ " .. tostring(rec.from.name or rec.from.key) .. " wants to send " .. tostring(to)
+               .. " something -- it waits for you on its card")
+    end)
+  end
+end
+-- Publish an approved record (Shepherd's write, after Adam's click). -> true when published (or it
+-- already was), false when a busy ticket holds it back (retried) or it went void (the author is told).
+function FX.crossPublish(rec, now)
+  if rec.state ~= "approved" or rec.published then return rec.published ~= nil end
+  local path = FX.TICKETS_DIR .. "/" .. rec.ticket .. ".json"
+  local voidWhy
+  if rec.kind == "ticket" then
+    local cur = core.parseTicket(FX.readFile(path), rec.ticket)
+    if cur and cur.cid == rec.cid then
+      rec.published = { at = now }
+    elseif cur then
+      voidWhy = "exists"
+    else
+      local t = core.crossTicketPublish(rec, nil, now)
+      if not (t and FX.writeFileAtomic(path, core.json.encode(t))) then
+        FX._cross.retry[rec.cid] = now + core.CROSS.retrySeconds
+        print("[cc-dashboard] ❌ crossings: couldn't write ticket " .. rec.ticket .. " for " .. rec.cid)
+        return false
+      end
+      rec.published = { at = now }
+      FX.appendLedger({ type = "ticket_filed", ticket = rec.ticket, repo = rec.to and rec.to.root, key = rec.from.key,
+                        cid = rec.cid })
+    end
+  else
+    -- gone: neither the ticket's file nor a writer's claim of it is there (a claim means busy)
+    local there = FX.readFile(path) ~= nil
+    if not there then
+      for _, fn in ipairs(FX.readDir(FX.TICKETS_DIR)) do
+        if fn:sub(1, #rec.ticket + 6) == rec.ticket .. ".json." then there = true end
+      end
+    end
+    if not there then voidWhy = "gone" end
+    if not voidWhy then
+      local pubWhy
+      local nt, why = FX.ticketUpdate(rec.ticket, function(x)
+        local r, w = core.crossTicketPublish(rec, x, now)
+        pubWhy = w
+        if not r or w == "already" then return nil end
+        return r
+      end)
+      if nt or pubWhy == "already" then
+        rec.published = { at = now }
+        if rec.kind == "ticket-close" and nt then
+          FX.appendLedger({ type = "ticket_closed", ticket = rec.ticket, role = rec.role, key = rec.from.key, cid = rec.cid })
+        end
+      elseif pubWhy == "closed" or pubWhy == "gone" then
+        voidWhy = pubWhy
+      else
+        FX._cross.retry[rec.cid] = now + core.CROSS.retrySeconds   -- busy: another writer has the ticket
+        print("[cc-dashboard] ⚠️ crossings: " .. rec.cid .. " waits for ticket " .. rec.ticket .. " (" .. tostring(why) .. ")")
+        return false
+      end
+    end
+  end
+  if voidWhy then
+    rec.state, rec.voidWhy = "void", voidWhy
+    FX.crossSave(rec)
+    print("[cc-dashboard] ⚠️ crossings: " .. rec.cid .. " approved but void (" .. voidWhy .. ")")
+    FX.appendLedger({ type = "crossing_void", cid = rec.cid, kind = rec.kind, key = rec.from.key, ticket = rec.ticket, why = voidWhy })
+    return false
+  end
+  FX.crossSave(rec)
+  print("[cc-dashboard] ✅ crossings: published " .. rec.cid .. " into ticket " .. rec.ticket)
+  FX.appendLedger({ type = "crossing_published", cid = rec.cid, kind = rec.kind, key = rec.from.key, ticket = rec.ticket })
+  return true
+end
+-- Tell a decided record's author what it needs to hear (core.crossNoticeText: a Deny's note, an
+-- edit, a void) -- through its live card's mailbox (found by key, or by pid after a /clear), else as
+-- <cid>.notice for its next start (_cc_ctx_crossings). Marked told either way.
+function FX.crossTell(rec, tileOf, now)
+  if rec.state == "pending" or rec.told then return end
+  if rec.state == "approved" and not rec.published then return end   -- told once it is out (or void)
+  local text = core.crossNoticeText(rec)
+  local via = "none"
+  if text then
+    local it = tileOf(rec.from.key, rec.from.pid)
+    local d = (it and it.procAlive ~= false and not it.tabless) and FX.deliverTo(it, text, { kind = "cross", from = "shepherd" }) or nil
+    if d then via = d.route
+    elseif FX.writeFileAtomic(FX.CROSS_DIR .. "/" .. rec.cid .. ".notice",
+                              core.json.encode({ cid = rec.cid, key = rec.from.key, text = text, at = now })) then
+      via = "notice"
+    else
+      return
+    end
+  end
+  rec.told = { at = now, via = via }
+  FX.crossSave(rec)
+  if via ~= "none" then
+    FX.appendLedger({ type = "crossing_told", cid = rec.cid, key = rec.from.key, via = via })
+  end
+end
+-- tileOf(key, pid) over a tick's list: the session's local card, by key, else by pid (a /clear).
+function FX.crossTileOf(list)
+  local byKeyC, byPidC = {}, {}
+  for _, it in ipairs(list or {}) do
+    if type(it) == "table" and it.key and not it.remote then
+      byKeyC[it.key] = it
+      local p = tostring(it.session_pid or "")
+      if p ~= "" then byPidC[p] = it end
+    end
+  end
+  return function(key, pid)
+    return (key and byKeyC[key]) or (pid and pid ~= "" and byPidC[tostring(pid)]) or nil
+  end
+end
+function FX.stepCrossings(list)
+  local now = FX.now()
+  local names = FX.readDir(FX.CROSS_DIR)
+  if #names == 0 then
+    FX._cross.records, FX._cross.closing = {}, {}
+    for _, it in ipairs(list or {}) do it.crossing = nil end
+    return
+  end
+  for _, fn in ipairs(names) do
+    local f = core.crossFileOf(fn)
+    if f and f.kind == "req" then
+      local okc, errc = pcall(FX.crossClaim, fn, now)
+      if not okc then print("[cc-dashboard] ❌ crossings: claiming " .. fn .. " failed: " .. tostring(errc)) end
+    end
+  end
+  local tileOf = FX.crossTileOf(list)
+  local records, closing = {}, {}
+  for _, fn in ipairs(FX.readDir(FX.CROSS_DIR)) do
+    local f = core.crossFileOf(fn)
+    if f and f.kind == "record" then
+      local rec = FX.crossLoad(f.cid)
+      if rec then
+        if rec.state == "approved" and not rec.published and (FX._cross.retry[rec.cid] or 0) <= now then
+          FX.crossPublish(rec, now)
+        end
+        if rec.state ~= "pending" and not rec.told then FX.crossTell(rec, tileOf, now) end
+        if rec.state == "pending" and rec.kind == "ticket-close" then closing[rec.ticket] = true end
+        records[#records + 1] = rec
+      end
+    end
+  end
+  local tiles = core.crossTiles(records, function(key, pid)
+    local it = tileOf(key, pid)
+    return it and it.key or nil
+  end)
+  for _, it in ipairs(list or {}) do it.crossing = (not it.remote) and tiles[it.key] or nil end
+  FX._cross.records, FX._cross.closing = records, closing
+  for k, at in pairs(FX._cross.retry) do if at <= now - 3600 then FX._cross.retry[k] = nil end end
+  if now >= (FX._cross.nextPrune or 0) then
+    FX._cross.nextPrune = now + 3600
+    local okp, errp = pcall(FX.crossPrune)
+    if not okp then print("[cc-dashboard] ❌ crossings prune failed: " .. tostring(errp)) end
+  end
+end
+-- Adam's click: { verdict = "approve" | "deny", title, body, text, note (his final text), why (a
+-- Deny's note) }, for crossing `cid`. Re-read from disk, decided once, published, the author told.
+-- -> true, or false (a toast says why).
+function FX.crossDecide(cid, payloadJson)
+  if not core.crossIdOk(cid) then return false end
+  if FX._cross.sent[cid] then FX.alert("⚠️ That crossing is decided already"); return false end
+  local rec = FX.crossLoad(cid)
+  if not rec or rec.state ~= "pending" then FX.alert("⚠️ That crossing isn't waiting for you any more"); return false end
+  local okj, p = pcall(core.json.decode, tostring(payloadJson or ""))
+  p = (okj and type(p) == "table") and p or {}
+  local now = FX.now()
+  local verdict = (p.verdict == "deny") and "deny" or ((p.verdict == "approve") and "approve" or nil)
+  if not verdict then return false end
+  local final = {}
+  for _, k in ipairs({ "title", "body", "text", "note" }) do if type(p[k]) == "string" then final[k] = p[k] end end
+  local decided, why = core.crossDecide(rec, verdict, final, type(p.why) == "string" and p.why or "", now)
+  if not decided then
+    FX.alert("⚠️ Not sent: " .. tostring(why))
+    return false
+  end
+  if not FX.crossSave(decided) then FX.alert("❌ Couldn't record that decision"); return false end
+  FX._cross.sent[cid] = true
+  print("[cc-dashboard] ✅ crossings: " .. cid .. " " .. decided.state .. " by Adam"
+        .. ((decided.decided and decided.decided.edited) and " (edited)" or ""))
+  if verdict == "approve" then
+    FX.appendLedger({ type = "crossing_approved", cid = cid, kind = decided.kind, key = decided.from.key,
+                      ticket = decided.ticket, edited = decided.decided.edited or nil })
+    FX.crossPublish(decided, now)
+  else
+    FX.appendLedger({ type = "crossing_denied", cid = cid, kind = decided.kind, key = decided.from.key,
+                      ticket = decided.ticket, noted = (decided.decided.note or "") ~= "" or nil })
+  end
+  local items = FX.allItems()
+  FX.crossTell(decided, FX.crossTileOf(items), now)
+  local to = type(decided.to) == "table" and (decided.to.name or decided.to.root) or "the other repo"
+  FX.alert(verdict == "approve" and ("✅ Passed on to " .. tostring(to)) or ("✋ Kept from " .. tostring(to)))
+  pcall(FX.stepCrossings, items)
+  pcall(FX.stepTickets, items)
+  return true
+end
+-- The 🎫 board's rows for crossings whose author has no card (core.crossRows).
+function FX.crossRows()
+  local items = FX.allItems()
+  local tileOf = FX.crossTileOf(items)
+  return core.crossRows(FX._cross.records or {}, function(r) return tileOf(r.from.key, r.from.pid) ~= nil end,
+    function(key, pid) local it = tileOf(key, pid); return it and FX.ticketSessionName(it) or nil end)
+end
+-- (KEEP IN SYNC with cc_cross_prune): a decided record told over keepSeconds ago; a notice nobody
+-- took within core.TICKET.maxAge; a claim or temp over partSeconds old -- a request's claim goes back
+-- into place when it was never recorded (the claimer died), else it goes.
+function FX.crossPrune()
+  local now = FX.now()
+  local names = {}
+  for _, fn in ipairs(FX.readDir(FX.CROSS_DIR)) do names[fn] = true end
+  for fn in pairs(names) do
+    local f = core.crossFileOf(fn)
+    local path = FX.CROSS_DIR .. "/" .. fn
+    if f and f.kind == "record" then
+      local rec = FX.crossLoad(f.cid)
+      local at = rec and rec.told and tonumber(rec.told.at)
+      if rec and rec.state ~= "pending" and at and now - at > core.CROSS.keepSeconds then os.remove(path) end
+    elseif f and (f.kind == "claim" or f.kind == "tmp" or f.kind == "notice") then
+      local mt
+      pcall(function() mt = tonumber((hs.fs.attributes(path, "modification"))) end)
+      local limit = (f.kind == "notice") and core.TICKET.maxAge or core.CROSS.partSeconds
+      if mt and now - mt > limit then
+        if f.kind == "claim" and f.of == "req" and not names[f.cid .. ".json"] then
+          os.rename(path, FX.CROSS_DIR .. "/" .. f.cid .. ".req.json")
+        else
+          os.remove(path)
+        end
       end
     end
   end
@@ -14790,6 +15124,7 @@ local function handleBridgeMsg(msg)
   -- 2026-09-29: cross-repo tickets -- "Open a tab for it" from the board (the ticket's id) or from a
   -- card's badge (the card's key: Lua reads the ticket from the card); the board asks for its rows
   if a == "ticket-tab" then FX.openTicketTab(tostring(payload.v or "")); return end
+  if a == "cross-decide" then FX.crossDecide(tostring(payload.v or ""), tostring(payload.text or "")); return end
   if a == "ticket-tab-card" then FX.openTicketTabFor(tostring(payload.v or "")); return end
   if a == "tickets-open" then pcall(FX.pushTickets); return end
   if a == "release-ask" then FX.releaseAsk(tostring(payload.v or "")); return end
@@ -16743,6 +17078,22 @@ local HTML = [[
   /* a merge request waiting for you (or one that came back blocked) */
   .tile.merge { box-shadow:0 0 0 2px #14b8a6, 0 0 10px #14b8a6; }
   #d-merge { display:none; margin:6px 0; padding:8px 10px; border:1px solid #14b8a6; border-radius:8px; font-size:12px; }
+  /* crossings (2026-10-14): text this session wrote for ANOTHER project, held for Adam -- he reads it,
+     edits it in the boxes if he likes, then approves or denies it */
+  #d-cross { display:none; margin:6px 0; padding:8px 10px; border:1px solid var(--danger); border-radius:8px; font-size:12px; }
+  #d-cross .dm-head { font-weight:600; }
+  #d-cross .dm-sub { opacity:.85; margin-top:3px; white-space:pre-wrap; }
+  #d-cross .dx-field { display:block; width:100%; box-sizing:border-box; margin-top:6px; background:var(--surface);
+                       color:var(--text); border:1px solid var(--border); border-radius:8px; font:inherit; padding:5px 8px; }
+  #d-cross textarea.dx-field { resize:vertical; min-height:70px; max-height:260px; }
+  #d-cross .dm-acts { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; align-items:center; }
+  #d-cross #dx-why { flex:1 1 140px; min-width:120px; background:var(--surface); color:var(--text);
+                     border:1px solid var(--border); border-radius:8px; font-size:12px; padding:5px 8px; }
+  #d-cross button:disabled { opacity:.45; cursor:not-allowed; }
+  #tk-body .tk-cross { border-left:2px solid var(--danger); }
+  #tk-body .tk-cross .dx-field { display:block; width:100%; box-sizing:border-box; margin-top:4px; background:var(--surface);
+                                 color:var(--text); border:1px solid var(--border); border-radius:6px; font:inherit; padding:4px 6px; }
+  #tk-body .tk-cross textarea.dx-field { resize:vertical; min-height:56px; }
   /* 2026-09-15: the request's text, commits, files and diff scroll in a capped body, so the
      Merge / Not yet row below it never leaves the panel however wordy the request is */
   #d-merge .dm-body { max-height:220px; overflow-y:auto; }
@@ -18447,6 +18798,21 @@ local HTML = [[
       </div>
       <div class="dm-acts" id="db-live"><button id="db-stop" onclick="batchAct('batch-stop')" title="No more tabs, and no merges on this batch's grant">Stop batch</button></div>
     </div>
+    <!-- Crossings (2026-10-14): text this session wrote for ANOTHER project, held until Adam approves
+         it. A fixed skeleton renderCrossing fills with textContent and .value only; the boxes are
+         refilled only when the crossing changes, so an edit in progress survives the refresh. -->
+    <div id="d-cross">
+      <div class="dm-head" id="dx-head"></div>
+      <div class="dm-sub" id="dx-sub"></div>
+      <input id="dx-title" class="dx-field" aria-label="Title">
+      <textarea id="dx-text" class="dx-field" aria-label="Text"></textarea>
+      <div class="dm-acts">
+        <button id="dx-approve" onclick="crossAct('approve')" title="Send it on as the boxes above read now">Approve</button>
+        <input id="dx-why" maxlength="500" placeholder="Note for the session if you deny it (optional)">
+        <button id="dx-deny" onclick="crossAct('deny')" title="Nothing reaches the other project; the session gets your note">Deny</button>
+      </div>
+      <div class="dm-sub" id="dx-more"></div>
+    </div>
     <div id="d-tabless"><span id="dt-text"></span> <button id="b-endsess" onclick="endSessionFor(selectedKey)" title="Stop this leftover claude process (asks first)">End session</button></div>
     <!-- Ready to merge (2026-09-11): a fixed skeleton that renderMerge fills with
          textContent only; the note input is never rebuilt, so a half-typed note survives. -->
@@ -19051,7 +19417,7 @@ local HTML = [[
   <div id="tickets">
     <div class="ov-head"><span>🎫 Tickets</span><button class="s-x" onclick="closeTickets()">✕</button></div>
     <div class="ov-body" id="tk-body"></div>
-    <div class="ov-foot"><span>Work sessions filed for other repos with cc-ticket.sh. Shepherd offers each to a live session of its repo -- the least busy, never one waiting on you; one that nobody there can take waits here and on that repo's card.</span></div>
+    <div class="ov-foot"><span>Work sessions filed for other repos with cc-ticket.sh. Every filing, reply and close note waits for your approval first -- on its session's card, or here when that session has no card. Shepherd offers each approved ticket to a live session of its repo -- the least busy, never one waiting on you; one that nobody there can take waits here and on that repo's card.</span></div>
   </div>
 
   <div id="queues">
@@ -23401,6 +23767,66 @@ local HTML = [[
       document.getElementById("db-live").style.display = b.phase === "approved" ? "flex" : "none";
       if(fresh) document.getElementById("db-merge").checked = !!b.mergeWhenGreen;
     }
+    // ---- Crossings (2026-10-14): text this session wrote for ANOTHER project, held for Adam ----
+    // it.crossing (core.crossTiles, stamped by FX.stepCrossings): the oldest pending crossing's line and
+    // view, and how many wait. The boxes are refilled only when the crossing changes (CROSS_ID), so an
+    // edit survives the 1s refresh. Every word came from a session: textContent and .value only.
+    var CROSS_ID = null, CROSS_KIND = null, CROSS_SENT = null, CROSS_SENT_T = 0;
+    var CROSS_LOCK_T = "Nothing here waits on a permission prompt -- approve or deny the crossing in the box below";
+    // What a click sends for crossing kind `kind`: Adam's final text from the boxes (approve) or his note (deny).
+    function crossPayload(kind, verdict, title, text, why){
+      if(verdict === "deny") return { verdict: "deny", why: String(why || "") };
+      var p = { verdict: "approve" };
+      if(kind === "ticket"){ p.title = String(title || ""); p.body = String(text || ""); }
+      else if(kind === "ticket-reply") p.text = String(text || "");
+      else p.note = String(text || "");
+      return p;
+    }
+    // Which of the view's texts goes in the big box, and its cap.
+    function crossBox(v){
+      var caps = (v && v.caps) || {};
+      if(!v) return { text: "", max: 2000 };
+      if(v.kind === "ticket") return { text: v.body || "", max: caps.body || 2500 };
+      if(v.kind === "ticket-reply") return { text: v.text || "", max: caps.text || 2000 };
+      return { text: v.note || "", max: caps.note || 1000 };
+    }
+    function renderCrossing(it){
+      var box = document.getElementById("d-cross");
+      if(!box) return;
+      var c = it && !it.remote && it.crossing;
+      if(!c || !c.cid || !c.view){ box.style.display = "none"; CROSS_ID = null; CROSS_KIND = null; return; }
+      box.style.display = "block";
+      var v = c.view, fresh = CROSS_ID !== c.cid;
+      CROSS_ID = c.cid; CROSS_KIND = v.kind;
+      document.getElementById("dx-head").textContent = c.line || v.head || "";
+      document.getElementById("dx-sub").textContent = v.sub || "";
+      var ti = document.getElementById("dx-title"), tx = document.getElementById("dx-text");
+      ti.style.display = v.kind === "ticket" ? "" : "none";
+      if(fresh){
+        var bx = crossBox(v);
+        ti.value = v.kind === "ticket" ? (v.title || "") : "";
+        ti.maxLength = (v.caps && v.caps.title) || 200;
+        tx.value = bx.text;
+        tx.maxLength = bx.max;
+        document.getElementById("dx-why").value = "";
+      }
+      // a click greys both buttons until Shepherd answers -- or, when it refused (the toast says why), a moment later
+      var busy = CROSS_SENT === c.cid && (Date.now() - CROSS_SENT_T) < 3000;
+      document.getElementById("dx-approve").disabled = busy;
+      document.getElementById("dx-deny").disabled = busy;
+      var more = (c.n | 0) - 1, m = document.getElementById("dx-more");
+      m.textContent = more > 0 ? (more + " more from this session after this one") : "";
+      m.style.display = more > 0 ? "" : "none";
+    }
+    function crossAct(verdict){
+      if(!CROSS_ID) return;
+      var p = crossPayload(CROSS_KIND, verdict, document.getElementById("dx-title").value,
+                           document.getElementById("dx-text").value, document.getElementById("dx-why").value);
+      CROSS_SENT = CROSS_ID; CROSS_SENT_T = Date.now();
+      document.getElementById("dx-approve").disabled = true;
+      document.getElementById("dx-deny").disabled = true;
+      send("cross-decide", CROSS_ID, JSON.stringify(p));
+    }
     function batchAct(a){
       if(!selectedKey || !BATCH_ID) return;
       if(a === "batch-stop" && !confirm("Stop this batch? Claude can't open more of its tabs, and no more merges go through on its grant.")) return;
@@ -23829,6 +24255,7 @@ local HTML = [[
       renderChecker(it);
       renderSeanceDetail(it);   // 2026-10-02: Ask this session
       renderBatch(it);
+      renderCrossing(it);   // 2026-10-14: text it wrote for another project, held for Adam
       var dtl = document.getElementById("d-tabless");
       if(dtl){
         dtl.style.display = it.tabless ? "block" : "none";
@@ -23836,7 +24263,10 @@ local HTML = [[
           ? "⊘ No tab in its VS Code window — a leftover process (a new conversation was started in its tab), or the Claude sidebar." : "";
       }
       var bdeny = document.getElementById("b-deny");
-      lockCtl(bdeny, (remote && !remoteWait) ? REMOTE_T : ((shared && !gateWait) ? SHARED_T : ""));
+      // 2026-10-14: a card red only for its OWN crossing has no prompt here -- an Approve would type
+      // keystrokes at nothing. Its Approve and Deny are the crossing's, in its box (renderCrossing).
+      var crossOnly = !remote && it.needsYouSource === "cross" && st !== "approval" && st !== "error" && !gateWait;
+      lockCtl(bdeny, crossOnly ? CROSS_LOCK_T : ((remote && !remoteWait) ? REMOTE_T : ((shared && !gateWait) ? SHARED_T : "")));
       // The deny reason travels only with a headless deny on THIS machine (a sidecar beside the
       // gate's decision file): a keystroke deny has nowhere to put it, a remote one drops it.
       var dnote = document.getElementById("deny-note");
@@ -23858,8 +24288,8 @@ local HTML = [[
       }
       // Remote: Approve works only as a headless gate decision (waiting), and
       // Continue (keystrokes) never does. A shared window: the same rule.
-      lockCtl(bap, (remote && (!remoteWait || st === "error")) ? REMOTE_T
-        : ((shared && (!gateWait || st === "error")) ? SHARED_T : ""));
+      lockCtl(bap, crossOnly ? CROSS_LOCK_T : ((remote && (!remoteWait || st === "error")) ? REMOTE_T
+        : ((shared && (!gateWait || st === "error")) ? SHARED_T : "")));
       // 2026-09-22: re-stamped every tick so the revealed gate row disappears again the
       // moment the gate is answered. The body class does the hiding; these two say which
       // subset the CSS lets back through (see the body.nochrome rules).
@@ -26622,16 +27052,51 @@ local HTML = [[
     // session can take first, with "Open a tab for it". Titles, bodies, replies, notes, names and ids
     // come from sessions, so each goes through esc(); a click sends only the id TICKETS.rows holds --
     // never text read back out of the markup.
-    var TICKETS = { rows: [], latest: [], sig: "", open: false };
-    function ccTickets(rows){
+    // 2026-10-14: `cross` -- the crossings whose session has no card (core.crossRows) -- lead the board,
+    // each with its text in boxes Adam can edit and Approve / Deny; a re-render keeps what he typed.
+    var TICKETS = { rows: [], latest: [], cross: [], crossShown: [], sig: "", open: false };
+    function ccTickets(rows, cross){
       rows = Array.isArray(rows) ? rows : [];
-      var waiting = rows.filter(function(r){ return r && r.phase === "waiting"; }).length;
+      cross = Array.isArray(cross) ? cross : [];
+      var waiting = rows.filter(function(r){ return r && r.phase === "waiting"; }).length + cross.length;
       var b = document.getElementById("tm-tickets-badge");
       if(b){ b.textContent = waiting ? String(waiting > 99 ? "99+" : waiting) : ""; b.style.display = waiting ? "inline-block" : "none"; }
-      var sig = JSON.stringify(rows);
+      var sig = JSON.stringify([rows, cross]);
       if(sig === TICKETS.sig) return;
-      TICKETS.sig = sig; TICKETS.latest = rows;
+      TICKETS.sig = sig; TICKETS.latest = rows; TICKETS.cross = cross;
       if(TICKETS.open) renderTickets(rows);
+    }
+    function crossRowsHtml(cross){
+      if(!cross || !cross.length) return "";
+      return cross.map(function(r, i){
+        var v = (r && r.view) || {}, bx = crossBox(v);
+        var h = '<div class="ib-row tk-cross" data-ci="' + i + '"><div class="ib-q">' + esc(r.line || v.head || "") + '</div>'
+          + '<div class="ib-meta">' + esc(r.from || "") + ' in ' + esc(r.fromRepo || "") + ' · its session has no card — decide it here'
+          + (r.at ? ' · ' + esc(fmtAge(r.at)) + ' ago' : '') + '</div>'
+          + '<div class="ib-meta">' + esc(v.sub || "") + '</div>';
+        if(v.kind === "ticket"){
+          h += '<input class="dx-field" data-f="title" data-ci="' + i + '" maxlength="' + ((v.caps && v.caps.title) | 0 || 200)
+            + '" value="' + esc(v.title || "") + '">';
+        }
+        h += '<textarea class="dx-field" data-f="text" data-ci="' + i + '" maxlength="' + (bx.max | 0) + '">' + esc(bx.text) + '</textarea>'
+          + '<div class="ib-free"><button class="ib-btn" data-ci="' + i + '" data-v="approve" onclick="crossBoardAct(event)">Approve</button>'
+          + ' <input class="dx-field" data-f="why" data-ci="' + i + '" maxlength="500" placeholder="Note if you deny it">'
+          + ' <button class="ib-btn" data-ci="' + i + '" data-v="deny" onclick="crossBoardAct(event)">Deny</button></div>';
+        return h + '</div>';
+      }).join("");
+    }
+    function crossBoardAct(ev){
+      if(ev && ev.stopPropagation) ev.stopPropagation();
+      var t = ev && ev.target && ev.target.closest ? ev.target.closest("[data-ci]") : null;
+      if(!t) return;
+      var i = parseInt(t.getAttribute("data-ci"), 10), r = TICKETS.crossShown[i];
+      if(!r || typeof r.cid !== "string") return;
+      var body = document.getElementById("tk-body");
+      function field(f){ var el = body && body.querySelector('.dx-field[data-ci="' + i + '"][data-f="' + f + '"]'); return el ? el.value : ""; }
+      var p = crossPayload((r.view || {}).kind, t.getAttribute("data-v") === "deny" ? "deny" : "approve",
+                           field("title"), field("text"), field("why"));
+      t.disabled = true;
+      send("cross-decide", r.cid, JSON.stringify(p));
     }
     var TK_PHASES = { waiting: 1, open: 1, offered: 1, held: 1, closed: 1 };
     function ticketRowsHtml(rows){
@@ -26671,7 +27136,19 @@ local HTML = [[
     function renderTickets(rows){
       var body = document.getElementById("tk-body"); if(!body) return;
       TICKETS.rows = rows;
-      body.innerHTML = ticketRowsHtml(rows);
+      // what Adam typed into a crossing's boxes survives the re-render, by crossing and box
+      var drafts = {};
+      Array.prototype.forEach.call(body.querySelectorAll(".tk-cross .dx-field"), function(el){
+        var r = TICKETS.crossShown[parseInt(el.getAttribute("data-ci"), 10)];
+        if(r && typeof r.cid === "string") drafts[r.cid + "|" + el.getAttribute("data-f")] = el.value;
+      });
+      TICKETS.crossShown = TICKETS.cross || [];
+      body.innerHTML = crossRowsHtml(TICKETS.crossShown) + ticketRowsHtml(rows);
+      Array.prototype.forEach.call(body.querySelectorAll(".tk-cross .dx-field"), function(el){
+        var r = TICKETS.crossShown[parseInt(el.getAttribute("data-ci"), 10)];
+        var k = r ? r.cid + "|" + el.getAttribute("data-f") : null;
+        if(k && Object.prototype.hasOwnProperty.call(drafts, k)) el.value = drafts[k];
+      });
     }
     function openTickets(){
       TICKETS.open = true;
@@ -27421,6 +27898,8 @@ local HTML = [[
         meta = it.merge.line;   // ready to merge / queued / merging / blocked (core.mergeLine)
       } else if(it.fleet && it.fleet.line){
         meta = it.fleet.line;   // a batch this session proposes or drives (core.batchView)
+      } else if(it.crossing && it.crossing.line){
+        meta = it.crossing.line;   // 2026-10-14: text for another project, held for Adam (core.crossLine)
       } else if(it.tabless){
         meta = TABLESS_T;   // a claude process with no tab in its window (2026-09-11)
       } else {
@@ -29653,6 +30132,12 @@ function FX._refreshBody()
   do
     local okd, errd = pcall(FX.stepDecisions, list)
     if not okd then print("[cc-dashboard] ❌ decisions step failed: " .. tostring(errd)) end
+  end
+  -- crossings (2026-10-14): text a session wrote for ANOTHER project, held for Adam -- claimed into
+  -- Shepherd's own records and stamped on the author's card before the needs-you stamp reads it
+  do
+    local okx, errx = pcall(FX.stepCrossings, list)
+    if not okx then print("[cc-dashboard] ❌ crossings step failed: " .. tostring(errx)) end
   end
   -- the My List review heads-up (2026-10-13): a project past the review line stamps it.wlReview on
   -- its cards, before the needs-you stamp reads it; the badge and the one banner per crossing too

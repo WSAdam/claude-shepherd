@@ -70,6 +70,13 @@ assert_eq "a ticket's body is esc()'d"           "yes" "$(has "'<div class=\"tk-
 assert_eq "a ticket's last reply is esc()'d"     "yes" "$(has "esc(r.last.by) + ': ' + esc(r.last.text)")"
 assert_eq "a ticket's closing note is esc()'d"   "yes" "$(has "'<div class=\"tk-note\">Closing note: ' + esc(r.note)")"
 assert_eq "the card's ticket tooltip is esc()'d" "yes" "$(has "'<span class=\"tk-b\" title=\"' + esc(tip)")"
+# crossings (2026-10-14): a held crossing's line, its author's name and its text on the board were
+# written by sessions -- crossRowsHtml's `r.` and `v.` fields (tests/cross-view.test.js runs it); the
+# card's own review box is filled with textContent and .value only
+assert_eq "a crossing's line is esc()'d"          "yes" "$(has "<div class=\"ib-q\">' + esc(r.line || v.head || \"\")")"
+assert_eq "a crossing's author is esc()'d"        "yes" "$(has "esc(r.from || \"\") + ' in ' + esc(r.fromRepo || \"\")")"
+assert_eq "a crossing's title box is esc()'d"     "yes" "$(has "'\" value=\"' + esc(v.title || \"\")")"
+assert_eq "a crossing's text box is esc()'d"      "yes" "$(has "'\">' + esc(bx.text) + '</textarea>'")"
 # On purpose (2026-09-29): DECISIONS.md is anyone's text -- onPurposeHtml's `op.` (an entry) and
 # the form's draft never reach HTML raw (tests/onpurpose-view.test.js runs it)
 assert_eq "an On purpose entry's what is esc()'d"   "yes" "$(has 'esc(op.what)')"

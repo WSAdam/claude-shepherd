@@ -17,6 +17,7 @@ stop_bg() { local p; for p in $BG; do kill "$p" 2>/dev/null; done; BG=""; }
 trap 'stop_bg; rm -rf "$TMP"' EXIT
 export CC_STATUS_DIR="$TMP/status"
 export CC_TICKETS_DIR="$TMP/cc-tickets"
+export CC_CROSS_DIR="$TMP/cc-cross"
 export CC_TICKET_POLL=0.1
 unset CLAUDE_CODE_SESSION_ID CC_TICKET_NOW
 mkdir -p "$CC_STATUS_DIR"
@@ -44,6 +45,30 @@ has() { case "$1" in *"$2"*) echo yes ;; *) echo "no: $1" ;; esac; }
 both() { [ "$(has "$1" "$2")" = yes ] && [ "$(has "$1" "$3")" = yes ] && echo yes || echo "no: $1"; }
 lacks() { case "$1" in *"$2"*) echo "no: $1" ;; *) echo yes ;; esac; }
 leftovers() { find "$CC_TICKETS_DIR" -maxdepth 1 \( -name '*.claim.*' -o -name '*.tmp.*' \) 2>/dev/null | grep -c .; }
+# REQUIREMENT CHANGE 2026-10-14 (Adam: "projects should not be able to utilize having shepherd to talk
+# to each other, that needs to be an approved translation between the two rather than something
+# automatic"): a filing, a reply and a close note now wait in cc-cross as requests until Adam approves
+# them, and Shepherd publishes them (tests/cross.test.lua, tests/cross.test.sh). This suite is about the
+# CLI around a PUBLISHED ticket, so `approve` stands in for Adam's click and Shepherd's publish: every
+# request waiting, as written. reqof <ticket id>: the request (if any) that names it.
+reqof() { grep -lF -- "\"$1\"" "$CC_CROSS_DIR"/*.req.json 2>/dev/null | head -1; }
+approve() {
+  local f k t
+  mkdir -p "$CC_TICKETS_DIR"   # Shepherd makes the folder when it publishes the first ticket
+  for f in "$CC_CROSS_DIR"/*.req.json; do
+    [ -f "$f" ] || continue
+    k="$(jq -r .kind "$f")"; t="$(jq -r .ticket "$f")"
+    case "$k" in
+      ticket) jq '{v:1, id:.ticket, title, body, from:(.from | {key, pid, cwd, root, name}), to, filed:.at,
+                   holder:null, passed:[], thread:[], closed:null, cid}' "$f" > "$CC_TICKETS_DIR/$t.json" ;;
+      ticket-reply) jq --slurpfile r "$f" '.thread += [{by:$r[0].role, key:$r[0].from.key, text:$r[0].text, at:$r[0].at,
+                    told:false, cid:$r[0].cid}]' "$CC_TICKETS_DIR/$t.json" > "$TMP/pub" && mv "$TMP/pub" "$CC_TICKETS_DIR/$t.json" ;;
+      ticket-close) jq --slurpfile r "$f" '.closed = {by:$r[0].role, key:$r[0].from.key, note:$r[0].note, at:$r[0].at,
+                    told:false, cid:$r[0].cid}' "$CC_TICKETS_DIR/$t.json" > "$TMP/pub" && mv "$TMP/pub" "$CC_TICKETS_DIR/$t.json" ;;
+    esac
+    rm -f "$f"
+  done
+}
 
 # ---- the CLI: help, and refused outside a session ----
 bash "$TK" --help > "$TMP/out" 2>&1; CODE=$?
@@ -81,17 +106,22 @@ tk f1 "$A" file --repo "$B" --title "Bump the parser to 2.x" --body "alpha's bui
 assert_eq "file: exit 0" "0" "$CODE"
 T1="$OUT"
 assert_eq "...prints only the ticket id on stdout" "yes" "$( [[ "$T1" =~ ^t[0-9]+-[0-9]+$ ]] && echo yes || echo "no: $T1")"
-assert_eq "...written to cc-tickets/<id>.json" "yes" "$([ -f "$CC_TICKETS_DIR/$T1.json" ] && echo yes || echo no)"
-assert_eq "...addressed to the target repo's main checkout" "$B" "$(tf "$T1" '.to.root')"
-assert_eq "...from the filing session and its repo" "f1 $A" "$(tf "$T1" '"\(.from.key) \(.from.root)"')"
-assert_eq "...open: no holder, no replies, not closed" "null 0 null" "$(tf "$T1" '"\(.holder) \(.thread | length) \(.closed)"')"
-assert_eq "...carrying the title and body" "Bump the parser to 2.x" "$(tf "$T1" '.title')"
+# REQUIREMENT CHANGE 2026-10-14 (above): the filing waits for Adam as a request; no ticket file yet
+assert_eq "...held for Adam: a request in cc-cross, no ticket file yet" "yes no" \
+  "$([ -n "$(reqof "$T1")" ] && echo yes || echo no) $([ -f "$CC_TICKETS_DIR/$T1.json" ] && echo yes || echo no)"
+assert_eq "...addressed to the target repo's main checkout" "$B" "$(jq -r '.to.root' "$(reqof "$T1")")"
+assert_eq "...from the filing session and its repo" "f1 $A" "$(jq -r '"\(.from.key) \(.from.root)"' "$(reqof "$T1")")"
+assert_eq "...carrying the title and body" "Bump the parser to 2.x" "$(jq -r '.title' "$(reqof "$T1")")"
 assert_eq "...and stderr says how it gets there" "yes" "$(has "$ERR" "live session")"
 tk f1 "$A" file --repo beta --title "By name"
-assert_eq "a repo's name resolves through the sessions Shepherd knows" "$B" "$(tf "$OUT" '.to.root')"
+assert_eq "a repo's name resolves through the sessions Shepherd knows" "$B" "$(jq -r '.to.root' "$(reqof "$OUT")")"
+rm -f "$(reqof "$OUT")"
 tk f1 "$A" file --repo "$BWT" --title "By worktree"
-assert_eq "a worktree's folder files to its repo's main checkout" "$B" "$(tf "$OUT" '.to.root')"
-rm -f "$CC_TICKETS_DIR/$OUT.json"
+assert_eq "a worktree's folder files to its repo's main checkout" "$B" "$(jq -r '.to.root' "$(reqof "$OUT")")"
+rm -f "$(reqof "$OUT")"
+approve
+assert_eq "once Adam approves it, it is open: no holder, no replies, not closed" "null 0 null" \
+  "$(tf "$T1" '"\(.holder) \(.thread | length) \(.closed)"')"
 
 # ---- take ----
 tk f1 "$A" take "$T1"
@@ -113,10 +143,14 @@ assert_eq "an id that isn't one: exit 2" "2" "$CODE"
 # ---- reply ----
 tk w1 "$B" reply "$T1" "On it -- bumping now."
 assert_eq "the holder replies: exit 0" "0" "$CODE"
-assert_eq "...recorded as the holder's, not yet told" "holder w1 false" "$(tf "$T1" '.thread[0] | "\(.by) \(.key) \(.told)"')"
+# REQUIREMENT CHANGE 2026-10-14 (above): held for Adam until he approves it
+assert_eq "...held for Adam: the thread is untouched until he approves it" "0" "$(tf "$T1" '.thread | length')"
+approve
+assert_eq "...then recorded as the holder's, not yet told" "holder w1 false" "$(tf "$T1" '.thread[0] | "\(.by) \(.key) \(.told)"')"
 tk f1 "$A" reply "$T1" "Thanks -- 2.1 at least, please."
 assert_eq "the filer replies: exit 0" "0" "$CODE"
-assert_eq "...recorded as the filer's" "filer" "$(tf "$T1" '.thread[1].by')"
+approve
+assert_eq "...recorded as the filer's (once approved)" "filer" "$(tf "$T1" '.thread[1].by')"
 tk w2 "$BWT" reply "$T1" "me too"
 assert_eq "a third session can't reply to a held ticket: exit 3" "3" "$CODE"
 tk w1 "$B" reply "$T1" ""
@@ -132,7 +166,10 @@ tk w2 "$BWT" close "$T1" --note "not mine"
 assert_eq "a third session can't close it: exit 3" "3" "$CODE"
 tk w1 "$B" close "$T1" --note "Bumped to 2.1.0 and tagged v2.1.0."
 assert_eq "the holder closes it with a note: exit 0" "0" "$CODE"
-assert_eq "...closed by the holder, the filer not yet told" "holder false" "$(tf "$T1" '.closed | "\(.by) \(.told)"')"
+# REQUIREMENT CHANGE 2026-10-14 (above): the close note waits for Adam too
+assert_eq "...held for Adam: not closed until he approves it" "null" "$(tf "$T1" '.closed')"
+approve
+assert_eq "...then closed by the holder, the filer not yet told" "holder false" "$(tf "$T1" '.closed | "\(.by) \(.told)"')"
 tk w1 "$B" reply "$T1" "one more thing"
 assert_eq "a closed ticket takes no reply: exit 2" "2" "$CODE"
 tk w1 "$B" close "$T1" --note "again"
@@ -155,12 +192,14 @@ assert_eq "wait on a ticket that isn't yours: exit 3" "3" "$CODE"
 # wait blocks until the reply comes
 tk f1 "$A" file --repo "$B" --title "Second"
 T2="$OUT"
+approve
 ( cd "$A" && CLAUDE_CODE_SESSION_ID=f1 bash "$TK" wait "$T2" --timeout 20 > "$TMP/wait.out" 2> "$TMP/wait.err"; echo $? > "$TMP/wait.code" ) &
 WPID=$!; BG="$BG $WPID"
 for _ in $(seq 1 50); do [ "$(tf "$T2" '.waiting.filer.pid // empty')" != "" ] && break; sleep 0.1; done
 assert_eq "a waiter registers itself on the ticket (Shepherd holds the mailbox back for it)" "yes" \
   "$([ -n "$(tf "$T2" '.waiting.filer.pid // empty')" ] && echo yes || echo no)"
 tk w1 "$B" reply "$T2" "Here is the answer: 42."
+approve
 wait "$WPID" 2>/dev/null
 assert_eq "...exits 0 once the reply comes" "0" "$(cat "$TMP/wait.code")"
 assert_eq "...printing it on stdout" "yes" "$(has "$(cat "$TMP/wait.out")" "Here is the answer: 42.")"
@@ -173,6 +212,7 @@ assert_eq "wait on no such ticket: exit 5" "5" "$CODE"
 # ---- the claim race: every writer claims the file with mv first; one take wins ----
 tk f1 "$A" file --repo "$B" --title "Race"
 T3="$OUT"
+approve
 for n in 1 2 3 4 5 6; do
   status "r$n" "$B"
   ( cd "$B" && CLAUDE_CODE_SESSION_ID="r$n" bash "$TK" take "$T3" > /dev/null 2>&1; echo $? > "$TMP/race.$n" ) &
@@ -185,12 +225,14 @@ assert_eq "...the others are told it's held (exit 3)" "5" "$(cat "$TMP"/race.* |
 assert_eq "...the ticket names the winner" "$winner" "$(tf "$T3" '.holder.key')"
 assert_eq "...and is whole JSON, with no claim or temp left behind" "ok 0" "$(jq -e . "$CC_TICKETS_DIR/$T3.json" > /dev/null && echo ok) $(leftovers)"
 # a writer that finds the file claimed by another waits its turn instead of failing
+# REQUIREMENT CHANGE 2026-10-14 (above): a filer's reply no longer writes the ticket (it waits for
+# Adam as a request), so the writer here is the holder taking it again -- an update all the same.
 mv "$CC_TICKETS_DIR/$T3.json" "$CC_TICKETS_DIR/$T3.json.claim.99999"
 ( sleep 0.4; mv "$CC_TICKETS_DIR/$T3.json.claim.99999" "$CC_TICKETS_DIR/$T3.json" ) &
-tk f1 "$A" reply "$T3" "Any news?"
+tk "$winner" "$B" take "$T3"
 wait
-assert_eq "a reply that meets a claimed file retries until it's back: exit 0" "0" "$CODE"
-assert_eq "...and lands" "Any news?" "$(tf "$T3" '.thread[-1].text')"
+assert_eq "a take that meets a claimed file retries until it's back: exit 0" "0" "$CODE"
+assert_eq "...and lands" "$winner true" "$(tf "$T3" '"\(.holder.key) \(.holder.taken)"')"
 
 # ---- a writer puts the ticket back between another's two looks (2026-09-30) ----
 # 2026-09-30: the six-way race above sometimes told only 4 of its 5 losers "held": the fifth got
@@ -210,6 +252,7 @@ putback_between_looks() { # <ticket id>: claim it as another writer, who puts it
 }
 tk f1 "$A" file --repo "$B" --title "Between two looks"
 T5="$OUT"
+approve
 putback_between_looks "$T5"
 tk w1 "$B" take "$T5"
 assert_eq "a take whose two looks straddle another writer's put-back still finds the ticket: exit 0" "0" "$CODE"
@@ -263,7 +306,9 @@ assert_eq "...and the tickets a session FILED stay, for its next start" "yes" "$
 # ---- the filer's next start: news it hasn't been told ([Shepherd: tickets]) ----
 tk f1 "$A" file --repo "$B" --title "Third"
 T4="$OUT"
+approve
 tk w1 "$B" reply "$T4" "Done in 5 minutes."
+approve
 CTX="$( . "$ROOT/cc-lib.sh"; cc_session_context startup f1 "$A" 2>/dev/null )"
 assert_eq "SessionStart shows the filer a reply it wasn't told" "yes" "$(has "$CTX" "[Shepherd: tickets]")"
 assert_eq "...the reply itself, with the ticket's id" "yes" "$(both "$CTX" "$T4" "Done in 5 minutes.")"
@@ -274,8 +319,10 @@ CTX="$( . "$ROOT/cc-lib.sh"; cc_session_context startup w1 "$B" 2>/dev/null )"
 assert_eq "the holder's start doesn't get its own reply back" "yes" "$(lacks "$CTX" "Done in 5 minutes")"
 
 # ---- show, list ----
+# REQUIREMENT CHANGE 2026-10-14 (above): show was open to anyone; now only to the filer, the holder
+# and the target repo's sessions (a third repo is refused: tests/cross.test.sh). w2 is beta's.
 tk w2 "$BWT" show "$T4"
-assert_eq "show prints a ticket to anyone" "0" "$CODE"
+assert_eq "show prints a ticket to a session of the repo it's for" "0" "$CODE"
 assert_eq "...its title and thread" "yes" "$(both "$OUT" "Third" "Done in 5 minutes.")"
 tk f1 "$A" list
 assert_eq "list shows the tickets the session filed" "yes" "$(both "$OUT" "$T1" "$T4")"
@@ -284,9 +331,12 @@ assert_eq "list shows the tickets the session filed" "yes" "$(both "$OUT" "$T1" 
 echo '{"ledger":{"enabled":true}}' > "$CC_CONFIG_FILE"
 tk f1 "$A" file --repo "$B" --title "Ledgered"
 T5="$OUT"
+approve
 tk w1 "$B" close "$T5" --note "Not ours: it's gamma's parser."
-assert_eq "the ledger records ticket_filed and ticket_closed" "1 1" \
-  "$(cat "$CC_LEDGER_DIR"/*.jsonl | jq -r --arg id "$T5" 'select(.ticket == $id) | .type' | sort | uniq -c | awk '{print $1}' | paste -sd' ' -)"
+# REQUIREMENT CHANGE 2026-10-14 (above): the CLI records the REQUESTS; ticket_filed and ticket_closed
+# are Shepherd's now, written when it publishes them (tests/cross.test.lua)
+assert_eq "the ledger records the filing and the close as requests (crossing_requested)" "ticket ticket-close" \
+  "$(cat "$CC_LEDGER_DIR"/*.jsonl | jq -r --arg id "$T5" 'select(.ticket == $id and .type == "crossing_requested") | .kind' | paste -sd' ' -)"
 echo '{}' > "$CC_CONFIG_FILE"
 
 # ---- prune: old closed tickets and stale parts go ----

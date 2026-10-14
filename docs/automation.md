@@ -445,8 +445,9 @@ reply="$(~/.claude/cc-send.sh ~/Programming/wgsUltra "Summarise what you changed
 
 A session that needs something done in **another** repo -- a fix, a release, an answer only that
 repo's sessions can give -- files a ticket with `~/.claude/cc-ticket.sh` instead of asking you to
-carry the message. Shepherd hands it to a live session there, and the replies and the closing note
-come back to the session that filed it.
+carry the message. Once you approve it ([Crossings](#crossings)), Shepherd hands it to a live
+session there, and the replies and the closing note -- each approved by you too -- come back to the
+session that filed it.
 
 ```bash
 id=$(~/.claude/cc-ticket.sh file --repo ~/Programming/parser --title "Bump to 2.x and tag a release" \
@@ -458,7 +459,9 @@ id=$(~/.claude/cc-ticket.sh file --repo ~/Programming/parser --title "Bump to 2.
   looked up among the sessions Shepherd knows; a name two repos share is refused with both roots
   listed. A ticket is for another repo: a session's own repo is refused (hand one of your own
   sessions a prompt with [cc-send](#send-a-prompt-from-a-shell)). The title is one line of at most
-  200 characters, the body at most 2,500 bytes. `file` prints only the ticket's id on stdout.
+  200 bytes, the body at most 2,500 bytes. `file` prints only the ticket's id on stdout. The
+  ticket isn't filed until you approve it: until then only its filer sees it (`show`, `list`,
+  `wait`, and `close` withdraws it).
 - **Who gets it.** Each tick Shepherd offers every open ticket to the target repo's least-busy
   live session: the one with the fewest tickets on its plate, then an idle one before a busy one.
   Never the filer, never a session waiting on you, one that has ended or lost its tab, or one that
@@ -470,16 +473,20 @@ id=$(~/.claude/cc-ticket.sh file --repo ~/Programming/parser --title "Bump to 2.
 - **Taking it.** The session takes the ticket with `cc-ticket.sh take <id>` (which prints it),
   `reply` or `close`, within 45 minutes of the offer. Otherwise the offer lapses and Shepherd offers
   the ticket to another session. A ticket whose holder's session ends goes back as well, and is
-  never offered to that session again.
+  never offered to that session again. Only a session it is offered to, or one of the repo it is
+  for, can take it -- a session's repo is the one it launched in, not one it has `cd`'d into -- and
+  nobody takes it while a close note on it waits for you.
 - **Nobody to take it.** When no session of that repo can take it (none is open, or each is
   waiting on you), the ticket waits on that repo's card as **🎫 N** with **Open a tab for it**, and
   on the board. **Open a tab for it** opens a Claude tab in the repo's window with the ticket's
   `take` typed in, never sent: check it and press Return. Shepherd then leaves the ticket to that
   tab for 10 minutes.
-- **Replies and the close.** `cc-ticket.sh reply <id> "…"` goes to the other side: the holder's
-  replies to the filer, the filer's to the holder. `cc-ticket.sh close <id> --note "…"` closes it,
-  and **closing always needs a note**: what was done, or why it isn't this repo's to do. The holder
-  or the filer can close a ticket. Each side gets the other's news through its mailbox while it is
+- **Replies and the close.** `cc-ticket.sh reply <id> "…"` goes to the other side, once you approve
+  it: the holder's replies to the filer, the filer's to the holder. `cc-ticket.sh close <id> --note
+  "…"` closes it, and **closing always needs a note**: what was done, or why it isn't this repo's to
+  do. The holder or the filer can close a ticket; the close waits for you like a reply, except a
+  filer's close of a ticket nobody holds, which closes at once (its note goes to no one, so it stays
+  the filer's). Each side gets the other's news through its mailbox while it is
   live, at its next start (a `[Shepherd: tickets]` part) when it isn't, or from a
   `cc-ticket.sh wait <id>` it has running. While a `wait` runs, Shepherd leaves that side's news to
   it, so nothing arrives twice.
@@ -487,19 +494,53 @@ id=$(~/.claude/cc-ticket.sh file --repo ~/Programming/parser --title "Bump to 2.
   tab for it**, then the open, offered and held ones, then the closed ones with their notes, for a
   week. The menu item counts the tickets waiting.
 - **Commands.** `file`, `take`, `reply`, `close`, `wait [--timeout <seconds>]` (default 3600),
-  `show <id>` (the whole ticket) and `list` (the tickets this session filed or holds, and the ones
-  waiting for its repo). Every command must run inside a Claude Code session. Exit codes: 0 done ·
-  2 refused (the arguments, a closed ticket, your own repo) · 3 not yours (another session holds it
-  or has been offered it, or you filed it) · 4 `wait` ran out · 5 no such ticket.
-- **Under the hood.** A ticket is `~/.claude/cc-tickets/<id>.json`. Every writer changes it the
-  same way: the CLI, SessionStart, both removers and Shepherd each claim the file by renaming it,
-  write the changed ticket whole into place, then drop the claim. When two writers race, one
-  rename wins and the others wait their turn. Delivery is cc-send's `FX.deliverTo`. A session that
-  ends puts back the tickets it held, and keeps the ones it filed for its next start. Closed tickets
-  are pruned after a week, and any ticket after 30 days. The ledger records `ticket_filed`,
-  `ticket_taken`, `ticket_reply`, `ticket_closed`, `ticket_offered`, `ticket_reclaimed`,
-  `ticket_news` and `ticket_tab`. With [dry run](#dry-run-and-the-automation-trace) on for the
-  mailbox, nothing is handed over and the ticket waits.
+  `show <id>` (the whole ticket, with your own crossings on it that still wait for you) and `list`
+  (the tickets this session filed or holds, its filings waiting for your approval, and the ones
+  waiting for its repo). Only the filer, the holder and the target repo's sessions can `show` a
+  ticket. Every command must run inside a Claude Code session. Exit codes: 0 done · 2 refused (the
+  arguments, a closed ticket, your own repo) · 3 not yours (another session holds it or has been
+  offered it, you filed it, or it's another repo's) · 4 `wait` ran out · 5 no such ticket.
+- **Under the hood.** A ticket is `~/.claude/cc-tickets/<id>.json`, written first by Shepherd when
+  you approve its filing. Every writer changes it the same way: the CLI, SessionStart, both removers
+  and Shepherd each claim the file by renaming it, write the changed ticket whole into place, then
+  drop the claim. When two writers race, one rename wins and the others wait their turn. Delivery is
+  cc-send's `FX.deliverTo`. A session that ends puts back the tickets it held, and keeps the ones it
+  filed for its next start. Closed tickets are pruned after a week, and any ticket after 30 days.
+  The ledger records `crossing_requested` (the CLI), `ticket_filed` and `ticket_closed` (Shepherd,
+  when it publishes them), `ticket_taken`, `ticket_offered`, `ticket_reclaimed`, `ticket_news` and
+  `ticket_tab`. With [dry run](#dry-run-and-the-automation-trace) on for the mailbox, nothing is
+  handed over and the ticket waits.
+
+## Crossings
+
+Nothing one project's session writes for another reaches it on its own. A ticket's filing, every
+reply and every close note is a **crossing**: it waits on the card of the session that wrote it as a
+red **Needs you** until you decide it.
+
+- **What you see.** The card's line says `↔ wants to file a ticket for <repo>: <title>` (or "…a
+  reply", "…its close note"). Its detail panel shows the exact text in boxes you can edit, and says
+  how many more wait behind it.
+- **Approve** sends what the boxes say. Anything you changed reaches the other side marked
+  **(edited by Adam)**, and the session that wrote it is told what went out. **Deny** keeps it back:
+  nothing reaches the other project, and the session gets your note (if you leave one) through its
+  mailbox, or at its next start (a `[Shepherd: crossings]` part) when it isn't live.
+- **It waits for you.** A crossing never expires, and it outlives its session's `/clear` (the card is
+  found by its claude process) and its end. One whose session has no card any more waits on
+  **☰ → 🎫 Tickets** instead, with the same boxes and buttons. A session waiting only on its own
+  crossing can still be offered tickets and prompts.
+- **The session's side.** `cc-ticket.sh` says the text is held for you, and not to resend it or
+  route around Shepherd. A filer can withdraw a filing that still waits with `close`.
+- **Under the hood.** The CLI leaves a request, `~/.claude/cc-cross/<cid>.req.json` (`cid` is
+  `<session key>.<epoch>-<n>`). Shepherd claims it into its own record, `<cid>.json`, which only
+  Shepherd writes, so a decision is never read from a file a session wrote. Your click is the only
+  thing that publishes the text into the ticket. Tickets filed before crossings shipped
+  (2026-10-15) go through as they were. The ledger records `crossing_held`, `crossing_approved`
+  (and whether you edited it), `crossing_denied`, `crossing_published`, `crossing_void` (a reply to
+  a ticket that closed first, or one that claims a side that isn't its author's),
+  `crossing_withdrawn` and `crossing_told` -- never the text itself.
+- **What it doesn't stop.** Every session runs as you, so one that writes another project's files
+  directly isn't stopped by this (D-27 in [the spec](../spec/product/spec.md)); every channel
+  Shepherd provides is gated.
 
 ## Resume at the limit reset
 
