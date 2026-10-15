@@ -2655,7 +2655,15 @@ function M.mergeGateOutcome(code, output)
   code = tonumber(code)
   if code == 0 then return "passed" end
   local s = tostring(output or "")
-  if s:find(M.TEST_LOCK_TOKEN, 1, true) or s:find(M.GATE_NORUN_TOKEN, 1, true) then return "couldntRun" end
+  -- 2026-10-15: a refusal says its token FIRST THING ON A LINE (run.sh's lock, every
+  -- GATE_NORUN_TOKEN echo), before any test has failed. Anywhere else it is a test echoing it:
+  -- this repo's core.test.lua prints the gate lines it builds, token and all, so every red run
+  -- that included it read couldn't-run (retried every 90s) and no red-first proof here was red.
+  local t = "\n" .. s
+  if (t:find("\n" .. M.TEST_LOCK_TOKEN, 1, true) or t:find("\n" .. M.GATE_NORUN_TOKEN, 1, true))
+      and not t:find("\nFAIL %- ") and not t:find("\nnot ok ") then
+    return "couldntRun"
+  end
   -- "command not found" only means the gate couldn't START when no test ran: a suite that ran
   -- can print it from a test that proves a missing tool (install.test.sh does).
   if s:lower():find("command not found", 1, true) and not M.gateLogRanTests(s) then return "couldntRun" end

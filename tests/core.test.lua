@@ -10919,6 +10919,51 @@ do
      }, "\n")), "failed")
   eq("...and a log with no test output at all still couldn't run",
      core.mergeGateOutcome(2, "make: lua: command not found\nmake: *** [lint] Error 127\n"), "couldntRun")
+
+  -- ---- a test that echoes the couldn't-run token is not a refusal (2026-10-15) ----
+  -- 2026-10-15: every red-first run on this repo that included tests/core.test.lua read "couldn't
+  -- run (exit 1)" -- its passing lines print the gate lines they build, CC_GATE_CANNOT_RUN and
+  -- all, and mergeGateOutcome took the token ANYWHERE in the log as a refusal. The fixture is
+  -- the real log of f54d3db's red-first run at bb8ba67 (its core.test.lua section).
+  do
+    local fh = io.open(HERE .. "fixtures/red-first/core-test-red.log", "r")
+    check("gate outcome: tests/fixtures/red-first/core-test-red.log is there", fh ~= nil)
+    local log = fh and fh:read("a") or ""
+    if fh then fh:close() end
+    check("...a real red run whose passing lines echo the couldn't-run token",
+          log:find("echo " .. core.GATE_NORUN_TOKEN .. ":", 1, true) ~= nil and log:find("\nFAIL - ", 1, true) ~= nil)
+    eq("a red run whose passing tests echo the couldn't-run token reads red", core.mergeGateOutcome(1, log), "failed")
+    local plan = { command = "bash tests/run.sh {files}", run = { "tests/core.test.lua" }, atBase = {} }
+    local v = core.redFirstVerdict(plan, { state = core.mergeGateOutcome(1, log), code = 1, output = log }, nil)
+    eq("...so the red-first proof proves tests/core.test.lua red", v and v.state, "red")
+    -- the whole-suite gate on this repo: `make lint` (its real output), then the same section
+    local lint = table.concat({
+      "Checking cc-core.lua                              OK",
+      "Checking claude-dashboard.lua                     OK",
+      "",
+      "Total: 0 warnings / 0 errors in 2 files",
+      "ok   - no bare (unretained) hs.timer.doAfter/doEvery in claude-dashboard.lua",
+      "ok   - guard fires on a planted bare timer (no vacuous pass)",
+      "-- lint-timers.sh: 2 run, 0 failed --",
+      "✅ lint: luac syntax OK",
+    }, "\n") .. "\n"
+    eq("...and a red `make lint && make test` here reads red, not couldn't-run",
+       core.mergeGateOutcome(2, lint .. log .. "make: *** [test] Error 1\n"), "failed")
+    eq("...as does a suite that crashed after echoing it, naming no failing test",
+       core.mergeGateOutcome(2, lint .. "== lua: pure logic ==\n" .. log:match("(ok   %- the gate command[^\n]*\n)")
+         .. "lua: tests/core.test.lua:12: attempt to call a nil value (field 'newFn')\n❌ SOME TESTS FAILED\n"), "failed")
+    eq("...and a failing test's captured output that STARTS a line with it is still that test's",
+       core.mergeGateOutcome(1, "== tests/run-lock.test.sh ==\nFAIL - the preamble runs (expected [REACHED-THE-SUITES] got [\n"
+         .. core.TEST_LOCK_TOKEN .. "\n❌ tests/run.sh is already running in this checkout (pid 4242).])\n"
+         .. "-- run-lock.test.sh: 9 run, 1 failed --\n❌ SOME TESTS FAILED\n"), "failed")
+    -- the refusals themselves say it first thing on a line, and still couldn't run
+    eq("the run.sh lock after make lint's passing lines still couldn't run",
+       core.mergeGateOutcome(2, lint .. core.TEST_LOCK_TOKEN .. "\n❌ tests/run.sh is already running in this checkout (pid 4242).\n"
+         .. "make: *** [test] Error " .. core.TEST_LOCK_EXIT .. "\n"), "couldntRun")
+    eq("...and so does a gate whose scratch copy has gone, behind make's exit 2",
+       core.mergeGateOutcome(2, "fatal: invalid reference: abc1234\n" .. core.GATE_NORUN_TOKEN
+         .. ": the scratch copy of the gate is gone\nmake: *** [gate] Error " .. core.TEST_LOCK_EXIT .. "\n"), "couldntRun")
+  end
   -- ...and it is RETRIED: the usual reason is Adam's own hand-run of the same suite holding the
   -- lock, which clears in minutes. A verdict that never retried would wedge the request until
   -- the unit pushed a new commit -- turning a passing branch into a permanent "not ready".

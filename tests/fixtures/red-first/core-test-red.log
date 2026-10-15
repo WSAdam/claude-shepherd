@@ -1,0 +1,13 @@
+Preparing worktree (detached HEAD bb8ba67)
+== tests/core.test.lua ==
+ok   - config: nested true  (got=true want=true)
+ok   - config: false preserved (not default)  (got=false want=false)
+ok   - FEATURES: lists the user-stories tab
+FAIL - FEATURES: the 62 new features are flagged  (got=61 want=62)
+FAIL - FEATURES: lists crossings
+ok   - FEATURES: lists queue hold and the Queues view
+ok   - the gate command cds into the worktree, single-quoted  ({ cd '/r/A/.claude/worktrees/it'\''s' || { echo CC_GATE_CANNOT_RUN: cannot enter '/r/A/.claude/worktrees/it'\''s'; exit 9; }; make lint && make test ; } > '/tmp/cc/g.log' 2>&1)
+ok   - repo gate: a shell gate runs the scratch copy's text with $0 = the checkout's own .worktree-check  (got=[ -r '/s/repogate-1' ] || { echo CC_GATE_CANNOT_RUN: the scratch copy of the gate is gone; exit 9; }; '/bin/sh' -c "$(cat '/s/repogate-1')" '/r/A/.claude/worktrees/it'\''s/.worktree-check' want=[ -r '/s/repogate-1' ] || { echo CC_GATE_CANNOT_RUN: the scratch copy of the gate is gone; exit 9; }; '/bin/sh' -c "$(cat '/s/repogate-1')" '/r/A/.claude/worktrees/it'\''s/.worktree-check')
+ok   - repo gate: #!/usr/bin/env bash  (got=[ -r '/s/g' ] || { echo CC_GATE_CANNOT_RUN: the scratch copy of the gate is gone; exit 9; }; '/usr/bin/env' 'bash' -c "$(cat '/s/g')" '/r/A/.worktree-check' want=[ -r '/s/g' ] || { echo CC_GATE_CANNOT_RUN: the scratch copy of the gate is gone; exit 9; }; '/usr/bin/env' 'bash' -c "$(cat '/s/g')" '/r/A/.worktree-check')
+-- core.test.lua: 6073 run, 2 failed --
+❌ SOME TESTS FAILED

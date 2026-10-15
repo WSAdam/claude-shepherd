@@ -181,7 +181,10 @@ checks that too, once the pre-merge gate has passed:
   (durations and line numbers aside) is counted as old. If that run couldn't run, every failure
   counts and the review says so.
 - A run that **couldn't run** (the suite's lock, a missing command, a scratch worktree git wouldn't
-  make, a timeout) never counts as red.
+  make, a timeout) never counts as red. A refusal is read only from its token at the **start of a
+  line** in a log where no test failed (`CC_TEST_SUITE_LOCKED`, `CC_GATE_CANNOT_RUN: …`): a test
+  that prints the token mid-line, as this repo's `core.test.lua` does, is still a test, and its
+  red run reads red. The same rule decides the gate's own *failed* vs *couldn't run*.
 - The review shows it under the checker line: *proved red*, *not red* with the files that had no
   new failure, or *couldn't run*, with the new failing lines and how many already fail on main.
   It's a hint like the claim check: **Merge** and a batch unit's merge on your grant never wait for
