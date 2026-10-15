@@ -7099,6 +7099,9 @@ function FX.mainGreenFire(r, cfg, ident)
   local g = FX._mainGreenRuns[commonDir]
   if g and (g.state == "queued" or g.state == "running") then return g end
   if g then
+    -- 2026-10-15: a run that finished since the last tick is judged before it goes, or its verdict
+    -- is lost (a due firing comes before the tick's judging; so can the board's Run)
+    if FX.mainGreenJudge(commonDir, g, cfg) then FX.mainGreenSave() end
     if g.logPath then pcall(os.remove, g.logPath) end
     if g.script then pcall(os.remove, g.script) end
     FX._mainGreenRuns[commonDir] = nil
@@ -7144,6 +7147,22 @@ function FX.mainGreenEvent(commonDir, rec, event, g, cfg)
   end
 end
 
+-- Judge one finished run, once: the verdict into the state, its news, and its log goes (the record
+-- keeps the failing lines). true when the state changed (the caller saves). The tick judges every
+-- finished run, and FX.mainGreenFire judges one before a new firing replaces it.
+function FX.mainGreenJudge(cd, g, cfg)
+  if type(g) ~= "table" or not g.doneAt or g.judged then return false end
+  g.judged = true
+  local state = FX.mainGreenLoad()
+  local rec, event = core.mainGreenVerdict(state[cd], g, FX.now())
+  local changed = rec ~= state[cd]
+  if changed then state[cd] = rec end
+  FX.mainGreenEvent(cd, rec, event, g, cfg)
+  if g.logPath then pcall(os.remove, g.logPath); g.logPath = nil end
+  if g.script then pcall(os.remove, g.script); g.script = nil end
+  return changed
+end
+
 -- Tick, after the stacks (repoKey) and the holds are stamped.
 function FX.stepMainGreen(list, cfg)
   local state = FX.mainGreenLoad()
@@ -7173,17 +7192,10 @@ function FX.stepMainGreen(list, cfg)
       end
     end
   end
-  -- each finished run, judged once; its log goes (the record keeps the failing lines)
+  -- each finished run, judged once
   local changed = false
   for cd, g in pairs(FX._mainGreenRuns) do
-    if g.doneAt and not g.judged then
-      g.judged = true
-      local rec, event = core.mainGreenVerdict(state[cd], g, FX.now())
-      if rec ~= state[cd] then state[cd] = rec; changed = true end
-      FX.mainGreenEvent(cd, rec, event, g, cfg)
-      if g.logPath then pcall(os.remove, g.logPath); g.logPath = nil end
-      if g.script then pcall(os.remove, g.script); g.script = nil end
-    end
+    if FX.mainGreenJudge(cd, g, cfg) then changed = true end
   end
   if changed then FX.mainGreenSave() end
   if queued then FX.mergeGatePump() end

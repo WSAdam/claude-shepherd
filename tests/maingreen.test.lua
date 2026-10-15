@@ -322,6 +322,31 @@ quiet(function() panelCb({ body = json.encode({ a = "schedule-delete", v = "main
 tick()
 check("deleting the routine drops the repo's flag", flag() == nil and saved()["/r/R/.git"] == nil)
 
+-- ---- a verdict survives the routine firing again before the tick that judges it (2026-10-15) ----
+-- 2026-10-15: FX.mainGreenFire dropped a finished run it hadn't judged yet, and FX.stepMainGreen fires
+-- due routines before judging, so a firing in the tick right after a run ended lost its verdict: the
+-- first red block above flaked 6 FAILs whenever a minute boundary fell between its ticks.
+routines({ mg() })
+tick()
+local b0 = #banners
+local gA = lastGate("GATE-R")
+check("the routine is back and runs", gA ~= nil and gA.running)
+if not gA then finish() end
+finishTask(gA, 1, RED)
+refire()   -- due again in the very tick that would judge gA
+tick()
+check("a red run's verdict survives the routine firing again before it is judged  (" .. (#banners - b0) .. ")",
+      #banners == b0 + 1 and flag() ~= nil)
+local gB = lastGate("GATE-R")
+check("...and the new firing still runs", gB ~= nil and gB ~= gA and gB.running)
+if not gB then finish() end
+finishTask(gB, 0, GREEN)
+quiet(function() panelCb({ body = json.encode({ a = "schedule-run-now", v = "main-green-R" }) }) end)   -- Run, before the tick
+tick()
+check("a green verdict survives the board's Run before it is judged", flag() == nil and (saved()["/r/R/.git"] or {}).state == "green")
+finishTask(lastGate("GATE-R"), 0, GREEN)
+tick()
+
 -- ---- the real shell line, against a real repo ----
 local R = T .. "/repo"
 local function sh(c) return os.execute("cd '" .. R .. "' && " .. c .. " >/dev/null 2>&1") == true end
