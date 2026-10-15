@@ -958,9 +958,13 @@ _CC_AA_KWRE=""; _CC_AA_ASSIGNS=""
 # word, so the keyword looks also try each held word with quotes, backslashes and line
 # continuations allowed between its letters. A second regex, never a ${s//...} rewrite: bash 3.2
 # took over two minutes to strip the quotes from a 56KB command, and this runs on every tool call.
-_CC_AA_QSEP=$'(["\'\\\\]|\\\\\n)*'         # between letters in shell text: " ' \ or \<newline>
-_CC_AA_QSEP_JSON='(["'"'"'\\]|\\n)*'      # ...in the hook's JSON: \" ' \\ and \\\n
+_CC_AA_QSEP=$'(["\'\\\\]|\\\\\n|\\$["\'])*'         # between letters in shell text: " ' \ \<newline> $' $"
+_CC_AA_QSEP_JSON='(["'"'"'\\]|\\n|\$\\?["'"'"'])*'  # ...in the hook's JSON: \" ' \\ \\\n $' $\"
 _CC_AA_QCH='["'"'"'\\]'                   # a text with none of these can't spell one that way
+# 2026-10-15: an escape inside $'...' can spell any letter (git $'p\x75sh' is git push), so no
+# keyword look on the raw text can rule it out: a text with one always goes to the parser, which
+# decodes it (_cc_sc_ansic). Matches the shell text and the hook's JSON alike.
+_CC_AA_ANSIC_RE=$'\\$\'[^\']*\\\\'
 _CC_AA_KWREQ=""; _CC_AA_QWORDS=""; _CC_AA_QLOOSE=""; _CC_AA_QOUT=""
 
 # Words joined by | (a dot escaped as \.) -> the same alternation with $2 between the letters of
@@ -1004,6 +1008,7 @@ cc_always_ask_candidate() {
     re="(^|[^[:alnum:]_]|\\\\[nrt])($_CC_AA_QOUT)([^[:alnum:]_]|\$)"
     [[ $1 =~ $re ]] && return 0
   fi
+  [[ $1 =~ $_CC_AA_ANSIC_RE ]] && return 0                            # `git $'p\x75sh'`
   cc_always_ask_names_extras "$CC_CONFIG_FILE" && return 0
   re='"session_id"[[:space:]]*:[[:space:]]*"([^"]*)"'
   if [[ $1 =~ $re ]] && [ -n "${BASH_REMATCH[1]}" ]; then
@@ -1055,7 +1060,7 @@ cc_always_ask_match() {
   _CC_AA_KWRE="(^|[^[:alnum:]_])($words)([^[:alnum:]_]|\$)$loose"
   [ "$all" = 1 ] && _CC_AA_KWRE='.'
   _CC_AA_KWREQ=""; _CC_AA_QWORDS="$words"; _CC_AA_QLOOSE="$loose"
-  _cc_aa_kw "$cmd" || return 1
+  _cc_aa_kw "$cmd" || [[ $cmd =~ $_CC_AA_ANSIC_RE ]] || return 1
   _CC_AA_ASSIGNS=""
   _cc_aa_text "$cmd" 0
 }
@@ -1242,8 +1247,11 @@ _cc_sc_dollar() {   # at a $, bare or inside "..."
         case "${s:j:1}" in \\) j=$((j + 2)); continue ;; \') break ;; esac
         j=$((j + 1))
       done
-      inner="${s:i+2:j-i-2}"; word="$word$inner"
-      case "$inner" in *\\*) wdyn=1 ;; esac
+      inner="${s:i+2:j-i-2}"
+      case "$inner" in
+        *\\*) _cc_sc_ansic "$inner"; word="$word$_CC_SC_ANSI"; [ "$_CC_SC_ANSI_ODD" = 1 ] && wdyn=1 ;;
+        *) word="$word$inner" ;;
+      esac
       i=$((j + 1)) ;;
     \") i=$((i + 1)); _cc_sc_dquote ;;                 # $"...": a translated string
     [A-Za-z_])
@@ -1252,6 +1260,47 @@ _cc_sc_dollar() {   # at a $, bare or inside "..."
     [0-9@*#?\$!-]) word="$word\$$nx"; i=$((i + 2)); wdyn=1 ;;
     *) word="$word\$"; i=$((i + 1)) ;;
   esac
+}
+
+# The text bash makes of the inside of a $'...' (2026-10-15), into _CC_SC_ANSI: \xHH, \NNN, \uHHHH,
+# \UHHHHHHHH, \cX and the letter escapes decoded as bash does, a NUL ending it as it ends bash's
+# string. Printable ASCII comes out as itself, so git $'p\x75sh' is git push to every look. Anything
+# else (a control or non-ASCII character) comes out as "?" -- never the scanner's own separators --
+# and sets _CC_SC_ANSI_ODD=1, so the word stays an expansion the way it was before decoding.
+_cc_sc_ansic() {
+  local t="$1" out="" k=0 m=${#1} ch d h v max hex
+  _CC_SC_ANSI_ODD=0
+  while [ "$k" -lt "$m" ]; do
+    ch="${t:k:1}"
+    if [ "$ch" != '\' ]; then out="$out$ch"; k=$((k + 1)); continue; fi
+    d="${t:k+1:1}"; k=$((k + 2)); v=""; ch=""
+    case "$d" in
+      a|b|e|E|f|n|r|t|v) v=1 ;;                             # a control character
+      \\|\'|\"|\?) ch="$d" ;;
+      [0-7])
+        h="$d"
+        while [ ${#h} -lt 3 ] && [[ ${t:k:1} == [0-7] ]]; do h="$h${t:k:1}"; k=$((k + 1)); done
+        v=$((8#$h & 255)) ;;
+      x|u|U)
+        max=2; [ "$d" = u ] && max=4; [ "$d" = U ] && max=8
+        h=""
+        while [ ${#h} -lt "$max" ] && [[ ${t:k:1} == [0-9A-Fa-f] ]]; do h="$h${t:k:1}"; k=$((k + 1)); done
+        if [ -n "$h" ]; then v=$((16#$h)); else ch="\\$d"; fi ;;
+      c) k=$((k + 1)); v=1 ;;                                # \cX: a control character
+      '') ch='\' ;;
+      *) ch="\\$d" ;;                                        # bash keeps an unknown escape as it is
+    esac
+    if [ -n "$v" ]; then
+      [ "$v" = 0 ] && break                                  # NUL ends bash's string
+      if [ "$v" -ge 32 ] && [ "$v" -le 126 ]; then
+        printf -v hex '%x' "$v"; printf -v ch "\\x$hex"
+      else
+        ch='?'; _CC_SC_ANSI_ODD=1
+      fi
+    fi
+    out="$out$ch"
+  done
+  _CC_SC_ANSI="$out"
 }
 
 _cc_sc_backtick() {   # at an opening `: the inside runs as commands

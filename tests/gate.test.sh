@@ -1069,6 +1069,26 @@ free "r'm'dir old"
 free "printf '%s' p\"ush\""
 free 'terraform pl"an"' 'terraform apply'
 
+# ---- ANSI-C and translated quoting (2026-10-15) ----
+# 2026-10-15: after the quote-split fix, $'...' still hid a held word: the cheap keyword look allowed
+# no $ between letters (r$'m' -rf ran), and the parser kept a $'...' with an escape as an expansion it
+# could not read, so git $'p\x75sh' (bash runs git push) and $'\x72m' -rf ran without a click.
+held "r\$'m' -rf build" 'rm -rf'
+held 'r$"m" -rf build' 'rm -rf'
+held "git \$'p\\x75sh' origin main" 'git push'
+held "git \$'\\160ush'" 'git push'
+held "git \$'pu\\u0073h'" 'git push'
+held "\$'\\x72m' -rf build" 'rm -rf'
+held "cd x && git \$'p\\x75'sh" 'git push'
+free "echo \$'git p\\x75sh'"
+free "git \$'p\\x75ll'"
+free "git \$'p\\x75sh\\x2dhooks'"
+free "printf \$'a\\tb\\n'"
+# an escape that decodes to a control character keeps the word an expansion (as before decoding):
+# never a word split that could pose as the parser's own separators
+held "git \$'x\\x1fpush'" 'hidden command'
+free "git \$'x\\x1fpull'"
+
 # the rules Settings lists (core.ALWAYS_ASK_BUILTINS) are the ones the matcher holds, by label
 lua - "$ROOT/cc-core.lua" > "$TMP/aa-builtins.txt" 2>/dev/null <<'LUA'
 local core = dofile(arg[1])
@@ -1237,6 +1257,16 @@ assert_eq "always-ask: a quote-split held word that is only text stays untouched
 rm -f "$SPY/calls"
 aa_req aaq7 'ls \"a b\" '"'c'"' d\\ e' | PATH="$SPY:$PATH" CC_GATE_FLAG="$AA_NOFLAG" CC_CONFIG_FILE="$TMP/none.json" bash "$APP" >/dev/null 2>&1
 assert_eq "always-ask: a quoted Bash command with no held word spawns no jq" "0" "$(grep -c . "$SPY/calls" 2>/dev/null || echo 0)"
+# 2026-10-15: ...nor through ANSI-C or translated quoting: r$'m', r$"m" and an escape inside $'...'
+rm -f "$HB"
+out="$(aa_req aaq8 "r\$'m' -rf build" | CC_GATE_FLAG="$AA_NOFLAG" bash "$APP" 2>/dev/null)"
+assert_eq "always-ask: an ANSI-C-split rm -rf gives ask (gate unarmed)" "ask" "$(decision "$out")"
+out="$(aa_req aaq9 'r$\"m\" -rf build' | CC_GATE_FLAG="$AA_NOFLAG" bash "$APP" 2>/dev/null)"
+assert_eq "always-ask: a translated-string-split rm -rf gives ask (gate unarmed)" "ask" "$(decision "$out")"
+out="$(aa_req aaq10 "git \$'p\\\\x75sh' origin main" | CC_GATE_FLAG="$AA_NOFLAG" bash "$APP" 2>/dev/null)"
+assert_eq "always-ask: a hex-escaped git push gives ask (gate unarmed)" "ask" "$(decision "$out")"
+out="$(aa_req aaq11 "echo \$'git p\\\\x75sh'" | CC_GATE_FLAG="$AA_NOFLAG" bash "$APP" 2>/dev/null)"
+assert_eq "always-ask: an escaped held word that is only text stays untouched" "" "$out"
 
 # ---- talk mode (build program unit 6, 2026-09-28) ------------------------------------------
 # A session in talk mode (~/.claude/cc-talk/<key>, the panel's toggle) can read and talk but not
