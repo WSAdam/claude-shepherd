@@ -801,5 +801,56 @@ do
   os.remove(T .. "/.claude/cc-config.json")
   quiet(function() fx.batchStop("drv", "bgr") end)
 end
+
+-- ---- a unit whose session ended settles, and its batch finishes (2026-10-15) ----
+-- 2026-10-15: a unit whose session ended with no merge or blocked result had no outcome forever, so
+-- core.batchFinished never fired and the driver's card read Driving until Adam stopped the batch.
+do
+  local core = rawget(_G, "__ccDashboard").core
+  local function evs(id)
+    local out, raw = {}, read(FD .. "/" .. id .. ".events.jsonl") or ""
+    for line in raw:gmatch("[^\n]+") do
+      local okd, e = pcall(json.decode, line)
+      if okd and type(e) == "table" then out[#out + 1] = e.unit .. ":" .. e.event end
+    end
+    return table.concat(out, " ")
+  end
+  write(FD .. "/bend.json", json.encode({ v = 1, id = "bend", nonce = "n-bend", driver = { session_id = "drv", pid = "4242", name = "A-drv" },
+    repo = "/r/A", commonDir = "/r/A/.git", title = "Ends", mergeWhenGreen = false, at = os.time(), phase = "approved",
+    units = { { type = "feat", slug = "kap", task = "Add kap.", branch = "feat/kap" },
+              { type = "fix", slug = "lam", task = "Fix lam.", branch = "fix/lam" } } }))
+  write(FD .. "/bend.state.json", json.encode({ grant = { approved = true, grantMerge = false, at = os.time() },
+    units = { kap = { session = { id = "uk", name = "A-k", pid = "5301" }, result = "merged" },
+              lam = { session = { id = "ul", name = "A-l", pid = "5302" } } } }))
+  fx._fleetState.bend = nil
+  local realProbe, realNow = fx.probeAlive, fx.now
+  fx.probeAlive = function(pids) local o = {} for p in pairs(pids or {}) do o[p] = (p ~= "5301" and p ~= "5302") end return o end
+  tick()
+  local s = decoded(FD .. "/bend.state.json") or { units = { lam = {} }, grant = {} }
+  check("ended unit: Shepherd notes when its session went  (goneAt=" .. tostring(s.units.lam.goneAt) .. ")",
+        tonumber(s.units.lam.goneAt) ~= nil and s.units.lam.endedAt == nil)
+  check("...and the batch still runs: a /clear or a respawn may bring it back", not s.grant.stopped)
+  -- the session comes back (a respawn resumes its id): the clock is cleared
+  status("ul", "/r/A/.claude/worktrees/lam", "5302", { status = "working", since = os.time() })
+  tick()
+  s = decoded(FD .. "/bend.state.json") or { units = { lam = {} }, grant = {} }
+  check("ended unit: back inside the grace -> no longer counted as gone", s.units.lam.goneAt == nil)
+  -- gone for good: no card, and its process has exited
+  os.remove(T .. "/status/ul.json")
+  tick()
+  fx.now = function() return realNow() + core.BATCH_UNIT_END_GRACE + 1 end
+  tick()
+  s = decoded(FD .. "/bend.state.json") or { units = { lam = {} }, grant = {} }
+  check("ended unit: gone for the whole grace -> settled as ended", tonumber(s.units.lam.endedAt) ~= nil)
+  check("...and the driver is told  (" .. evs("bend") .. ")", evs("bend"):find("lam:ended", 1, true) ~= nil)
+  tick()
+  s = decoded(FD .. "/bend.state.json") or { units = { lam = {} }, grant = {} }
+  check("...and the batch finishes on its own  (" .. tostring(s.grant.finished) .. ")",
+        s.grant.stopped == true and s.grant.finished == "1 merged, 1 ended" and read(FD .. "/bend.stop") ~= nil)
+  local n = select(2, evs("bend"):gsub("lam:ended", ""))
+  tick()
+  check("...told once  (" .. evs("bend") .. ")", n == 1 and select(2, evs("bend"):gsub("lam:ended", "")) == 1)
+  fx.probeAlive, fx.now = realProbe, realNow
+end
 check("no keystroke anywhere", taps == 0)
 finish()

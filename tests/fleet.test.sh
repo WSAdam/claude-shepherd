@@ -406,6 +406,20 @@ assert_eq "status: while a blocker works, the units behind it wait (unopened, no
   "$(jq -r '.outcomes.unopened | join(",")' "$TMP/so2.out")"
 assert_eq "status: ...and say for what" "waits for one" "$(jq -r '.units[1].note' "$TMP/so2.out")"
 assert_eq "status: ...a unit with nothing to wait for has no note" "null" "$(jq -r '.units[0].note' "$TMP/so2.out")"
+# 2026-10-15: a unit whose session ended with no merge or blocked result read "working" for good, and
+# the units behind it waited forever. Shepherd now settles it as ended (endedAt in its state).
+jq -n '{grant: {approved: true, grantMerge: true}, units: {one: {session: {id: "s1", name: "r-1"}, goneAt: 100, endedAt: 700}}}' > "$FD/$IO.state.json"
+fleet drv se status --batch "$IO"
+assert_eq "status: a unit Shepherd settled as ended is ended, not working" "one" "$(jq -r '.outcomes.ended | join(",")' "$TMP/se.out")"
+assert_eq "status: ...and counted" "1 0" "$(jq -r '"\(.counts.ended) \(.counts.working)"' "$TMP/se.out")"
+assert_eq "status: ...saying why" "yes" "$(jq -r '.units[0].note | test("no merge or blocked result")' "$TMP/se.out" | sed 's/true/yes/')"
+assert_eq "status: the units behind an ended one are blocked, so the batch can finish" "two,three" \
+  "$(jq -r '.outcomes.blocked | join(",")' "$TMP/se.out")"
+assert_eq "status: ...saying it's an ended unit" "blocked by an ended unit (one)" "$(jq -r '.units[2].note' "$TMP/se.out")"
+jq -n '{grant: {approved: true, grantMerge: true}, units: {one: {session: {id: "s1", name: "r-1"}, goneAt: 100}}}' > "$FD/$IO.state.json"
+fleet drv sg status --batch "$IO"
+assert_eq "status: gone inside the grace is still working, and says so" "working yes" \
+  "$(jq -r '"\(.units[0].outcome) \(.units[0].note | tostring | test("gone"))"' "$TMP/sg.out" | sed 's/true/yes/')"
 fleet drv sto stop --batch "$IO"
 
 # ---- coverage index (2026-09-29, build program unit 25) ----

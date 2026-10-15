@@ -13647,7 +13647,8 @@ do
   -- every event name is one the relay documents
   local known = {}
   for _, n in ipairs(core.UNIT_EVENTS or {}) do known[n] = true end
-  eq("UNIT_EVENTS: nine events", #(core.UNIT_EVENTS or {}), 9)
+  -- 2026-10-15 requirement change: nine became ten -- "ended", a unit settled with no result
+  eq("UNIT_EVENTS: ten events", #(core.UNIT_EVENTS or {}), 10)
   check("UNIT_EVENTS: the ones the driver is told about",
         known.tab_opened and known.asked and known.turn_finished and known.merge_requested and known.gate_red
         and known.checker_fail and known.merged and known.blocked and known.session_ended)
@@ -16273,6 +16274,114 @@ do
   end
   if fh then fh:close() end
   check("bulk: ...the table was read (15+ cases)", n >= 15)
+end
+
+-- ---- A batch unit whose session ended settles as ended (2026-10-15) ----
+-- 2026-10-15: a unit whose session ended with no merge or blocked result stayed "working" for good
+-- (batchUnitOutcome only knew merged/blocked/session), so batchFinished never fired and the driver's
+-- card read Driving until Adam stopped the batch by hand. Gone for BATCH_UNIT_END_GRACE, it is ended.
+do
+  local function unit(t, slug, extra)
+    local u = { type = t, slug = slug, task = "Do " .. slug .. ".", branch = t .. "/" .. slug }
+    for k, v in pairs(extra or {}) do u[k] = v end
+    return u
+  end
+  local eb = core.parseBatch(core.json.encode({
+    v = 1, id = "b1760", nonce = "n1", driver = { session_id = "drv", pid = "4242", name = "repo-drv" },
+    repo = "/r/main", commonDir = "/r/main/.git", title = "Two units", mergeWhenGreen = true,
+    units = { unit("feat", "alpha"), unit("fix", "beta") }, at = 100, phase = "approved" }))
+  local eg = { approved = true, grantMerge = true, at = 100 }
+  local function list(t) return table.concat(t or { "<nil>" }, ",") end
+  local G = core.BATCH_UNIT_END_GRACE
+  check("settle: the grace is a named constant of about ten minutes  (" .. tostring(G) .. ")",
+        type(G) == "number" and G >= 300 and G <= 1200)
+
+  -- the broken state, as the live batch left it: alpha merged, beta's session gone with no result
+  local live = { units = {
+    alpha = { session = { id = "sa", name = "main-a1", pid = "5001" }, result = "merged" },
+    beta  = { session = { id = "sb", name = "main-b1", pid = "5002" } } } }
+  check("settle: a unit whose session just went is still working (a /clear or respawn may follow)",
+        core.batchUnitOutcome(live.units.beta) == "working" and core.batchFinished(eb, eg, live, false) == false)
+
+  -- core.unitSettle(us, gone, now) -> goneAt, endedAt. gone: true = gone, false = seen alive, nil = unknown
+  local beta = live.units.beta
+  local goneAt, endedAt = core.unitSettle(beta, true, 1000)
+  check("settle: first seen gone -> goneAt is now, not ended yet", goneAt == 1000 and endedAt == nil)
+  beta.goneAt = goneAt
+  goneAt, endedAt = core.unitSettle(beta, true, 1000 + G - 1)
+  check("settle: gone, inside the grace -> the same goneAt, still not ended", goneAt == 1000 and endedAt == nil)
+  check("settle: ...and the unit is still working", core.batchUnitOutcome(beta) == "working")
+  goneAt, endedAt = core.unitSettle(beta, true, 1000 + G)
+  check("settle: gone for the whole grace -> ended, at that moment", goneAt == 1000 and endedAt == 1000 + G)
+  beta.endedAt = endedAt
+  goneAt, endedAt = core.unitSettle(beta, true, 1000 + G + 50)
+  check("settle: ...and stays ended at the time it settled", goneAt == 1000 and endedAt == 1000 + G)
+  goneAt, endedAt = core.unitSettle(beta, nil, 1000 + G + 60)
+  check("settle: unknown liveness (ps couldn't answer) changes nothing", goneAt == 1000 and endedAt == 1000 + G)
+  goneAt, endedAt = core.unitSettle({ session = beta.session, goneAt = 1000 }, false, 1000 + 30)
+  check("settle: seen alive again inside the grace (a /clear, a respawn) -> the clock is cleared",
+        goneAt == nil and endedAt == nil)
+  goneAt, endedAt = core.unitSettle({ session = beta.session, goneAt = 1000, endedAt = 1000 + G }, false, 1000 + 2 * G)
+  check("settle: a unit seen alive after it settled (Adam resumed it) is working again", goneAt == nil and endedAt == nil)
+  goneAt, endedAt = core.unitSettle({ session = beta.session, result = "merged" }, true, 1000 + G)
+  check("settle: a unit with its result never settles as ended", goneAt == nil and endedAt == nil)
+  goneAt, endedAt = core.unitSettle({}, true, 1000)
+  check("settle: a unit with no session has nothing to settle", goneAt == nil and endedAt == nil)
+
+  -- the outcome, the grouping and the batch's end
+  eq("outcome: a unit settled as ended -> ended", core.batchUnitOutcome(beta), "ended")
+  eq("outcome: a real result beats ended",
+     core.batchUnitOutcome({ session = beta.session, result = "merged", endedAt = 5 }), "merged")
+  local o = core.batchOutcomes(eb, live)
+  check("outcomes: an ended bucket  (" .. list(o.ended) .. ")", list(o.ended) == "beta" and list(o.merged) == "alpha"
+        and #o.working == 0 and #o.unopened == 0)
+  local fin, why = core.batchFinished(eb, eg, live, false)
+  check("finished: merged + ended finishes the batch  (" .. tostring(why) .. ")", fin == true and why == "1 merged, 1 ended")
+  local allEnded = { units = { alpha = { session = { id = "sa" }, endedAt = 9 }, beta = { session = { id = "sb" }, endedAt = 9 } } }
+  check("finished: every unit ended -> it says so, with no '0 merged'",
+        select(2, core.batchFinished(eb, eg, allEnded, false)) == "2 ended")
+  check("summary: one line for the ended units",
+        table.concat(core.batchOutcomeLines(o), " / "):find("1 ended — beta", 1, true) ~= nil)
+
+  -- the batch view says so
+  local v = core.batchView(eb, eg, live)
+  local bu = v.units[2]
+  check("view: the unit's row says ended, and why  (" .. tostring(bu and bu.note) .. ")",
+        bu and bu.outcome == "ended" and tostring(bu.note):find("ended", 1, true) ~= nil
+        and tostring(bu.note):find("no merge or blocked result", 1, true) ~= nil)
+  local waiting = core.batchView(eb, eg, { units = { beta = { session = { id = "sb" }, goneAt = 1000 } } })
+  check("view: a unit whose session is gone inside the grace says it will settle  (" .. tostring(waiting.units[2].note) .. ")",
+        waiting.units[2].outcome == "working" and tostring(waiting.units[2].note):find("gone", 1, true) ~= nil)
+
+  -- the driver's events say so: "ended", once, after session_ended
+  local known = {}
+  for _, n in ipairs(core.UNIT_EVENTS or {}) do known[n] = true end
+  check("UNIT_EVENTS: ended is one the relay documents", known.ended == true)
+  local evs, seen = core.unitEvent(nil, beta, nil, true)
+  local names = {}
+  for _, e in ipairs(evs) do names[#names + 1] = e.event end
+  eq("unitEvent: a settled unit -> session_ended, then ended", table.concat(names, ","), "tab_opened,session_ended,ended")
+  check("unitEvent: ...saying no merge or blocked result came  (" .. tostring(evs[3] and evs[3].text) .. ")",
+        evs[3] and evs[3].text:find("no merge or blocked result", 1, true) ~= nil)
+  eq("unitEvent: ...once", #core.unitEvent(seen, beta, nil, true), 0)
+  eq("unitEvent: a gone unit inside the grace is not ended yet",
+     #core.unitEvent({ ["tab:sb"] = true, ["ended:sb"] = true }, { session = beta.session, goneAt = 1000 }, nil, true), 0)
+
+  -- blockedBy: a unit behind an ended one can never start, so it is blocked and the batch finishes
+  local cb = core.parseBatch(core.json.encode({
+    v = 1, id = "b1761", nonce = "n2", driver = { session_id = "drv", pid = "4242", name = "repo-drv" },
+    repo = "/r/main", commonDir = "/r/main/.git", title = "In order", mergeWhenGreen = true,
+    units = { unit("feat", "one"), unit("feat", "two", { blockedBy = { "one" } }) }, at = 100, phase = "approved" }))
+  local endedOne = { units = { one = { session = { id = "s1" }, endedAt = 9 } } }
+  local ok, vwhy, w = core.fleetTabVerdict(cb, eg, endedOne, { session_id = "drv", slug = "two" })
+  check("tab: a unit whose blocker ended is refused, not told to wait  (" .. tostring(vwhy) .. ")",
+        ok == false and w == nil and tostring(vwhy):find("one", 1, true) ~= nil and tostring(vwhy):find("ended", 1, true) ~= nil)
+  local co = core.batchOutcomes(cb, endedOne)
+  check("outcomes: the unit behind an ended one is blocked", list(co.ended) == "one" and list(co.blocked) == "two")
+  local cv = core.batchView(cb, eg, endedOne)
+  eq("view: ...saying it's an ended unit that blocks it", cv.units[2].note, "blocked by an ended unit (one)")
+  check("finished: so that batch finishes too  (" .. tostring(select(2, core.batchFinished(cb, eg, endedOne, false))) .. ")",
+        select(2, core.batchFinished(cb, eg, endedOne, false)) == "1 blocked, 1 ended")
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

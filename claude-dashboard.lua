@@ -5899,7 +5899,27 @@ function FX.relayFleet(list)
   for _, w in ipairs(work) do
     local memo = FX.fleetRelayMemo(w.id)
     -- gone = no tile links AND ps says its process is gone (unknown is never gone)
-    local evs, seen = core.unitEvent(memo.seen[w.slug], w.us, w.it, w.pid ~= nil and alive[w.pid] == false)
+    local gone = w.pid ~= nil and alive[w.pid] == false
+    -- 2026-10-15: a unit gone for core.BATCH_UNIT_END_GRACE with no result settles as ended, so its
+    -- batch can finish. Seen alive = a card links it or ps says its process lives (a /clear, a
+    -- respawn): the clock clears. Neither = unknown, and nothing moves.
+    local liveness
+    if gone then liveness = true
+    elseif w.it ~= nil or (w.pid ~= nil and alive[w.pid] == true) then liveness = false end
+    local goneAt, endedAt = core.unitSettle(w.us, liveness, now)
+    if goneAt ~= tonumber(w.us.goneAt) or endedAt ~= tonumber(w.us.endedAt) then
+      if endedAt and not tonumber(w.us.endedAt) then
+        print("[cc-dashboard] ⏏ unit " .. w.slug .. " of batch " .. w.id .. " ended: its session is gone, with no merge or blocked result")
+      elseif goneAt and not tonumber(w.us.goneAt) then
+        print("[cc-dashboard] 🔍 unit " .. w.slug .. " of batch " .. w.id .. ": its session is gone -- it settles as ended unless it is back within "
+          .. math.floor(core.BATCH_UNIT_END_GRACE / 60) .. " min")
+      elseif not goneAt then
+        print("[cc-dashboard] ✅ unit " .. w.slug .. " of batch " .. w.id .. ": its session is back")
+      end
+      w.us.goneAt, w.us.endedAt = goneAt, endedAt
+      FX.saveFleetState(w.id)
+    end
+    local evs, seen = core.unitEvent(memo.seen[w.slug], w.us, w.it, gone)
     if #evs > 0 then
       local p = pending[w.id]
       if not p then p = { lines = {}, seq = memo.seq, seen = {} }; pending[w.id] = p; ids[#ids + 1] = w.id end

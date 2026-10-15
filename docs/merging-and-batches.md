@@ -486,15 +486,20 @@ approval from you per batch**:
    permission, units wait for your Merge.
    Tabs close after their merges as usual.
 5. **Stop batch** (on the driver's card) or `cc-fleet.sh stop --batch <id>` ends it at once: no more tabs, no
-   more merges on its grant. A batch also **ends itself** once every unit has merged or blocked (or
-   its repo is gone). Shepherd records each unit's outcome from its merge request, says
-   *batch finished: … (2 merged)* once, and the panel leaves the driver's card.
+   more merges on its grant. A batch also **ends itself** once every unit has merged, blocked or
+   ended (or its repo is gone). Shepherd records each unit's outcome from its merge request, says
+   *batch finished: … (2 merged)* once, and the panel leaves the driver's card. A unit whose
+   session is gone (no card, and its process has exited) with no merge or blocked result
+   **ends** once it has stayed gone for 10 minutes (`core.BATCH_UNIT_END_GRACE`), so a `/clear` or
+   a respawn that comes back in time isn't counted. A unit that does come back, even later, is
+   working again; a unit waiting on an ended one is blocked (*blocked by an ended unit*).
 6. While it runs, the batch review groups the units **by outcome**: *✅ 2 merged — alpha, delta*,
-   *⛔ 1 blocked — beta*, *⏳ 1 working — gamma*, *· 1 not opened — eps*. Each unit's row leads with
-   its result. `cc-fleet.sh status --batch <id>` prints the same grouping as JSON: `counts`,
-   `outcomes` (the slugs in each bucket), a per-unit `units` list (branch, outcome, result,
-   session) and your `grant` as Shepherd recorded it. A unit with its session and no result is
-   *working*; one with no session yet is *unopened*; *merged-dirty* counts as merged.
+   *⛔ 1 blocked — beta*, *⏏ 1 ended — zeta*, *⏳ 1 working — gamma*, *· 1 not opened — eps*. Each
+   unit's row leads with its result. `cc-fleet.sh status --batch <id>` prints the same grouping as
+   JSON: `counts`, `outcomes` (the slugs in each bucket), a per-unit `units` list (branch, outcome,
+   result, session) and your `grant` as Shepherd recorded it. A unit with its session and no result
+   is *working* (its note says when its session is gone and it may still end); one with no session
+   yet is *unopened*; *merged-dirty* counts as merged.
 7. The driver follows its units with **`cc-fleet.sh wait --batch <id>`**, run in the background, and
    re-runs it after each wake (see [The batch relay](#the-batch-relay-what-the-driver-hears)).
 
@@ -634,6 +639,7 @@ which cards need you, it turns each unit's live state into **events**, each told
 | `checker_fail` | [the checker](#the-checker-a-read-only-review-of-every-merge-request) failed it |
 | `merged` / `blocked` | Shepherd recorded its outcome (a blocked unit's note comes with it) |
 | `session_ended` | its session is gone: no card, and its process has exited |
+| `ended` | its session has stayed gone 10 minutes with no merge or blocked result: the batch counts it as ended |
 
 They're appended, numbered, to `~/.claude/cc-fleet/<id>.events.jsonl`. A unit is followed by its
 session id, or by its process when a `/clear` gave it a new one. The file is Shepherd's memory, so a

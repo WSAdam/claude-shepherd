@@ -31,7 +31,8 @@
 #   cc-fleet.sh status --batch <id>     Shepherd's view of the units, grouped by outcome (JSON)
 #   cc-fleet.sh wait --batch <id> [--after N] [--wait-max S]
 #       The units' events Shepherd relayed after #N (tab opened, asked a question, turn finished,
-#       merge requested, gate red, checker fail, merged, blocked, session ended), one line each,
+#       merge requested, gate red, checker fail, merged, blocked, session ended, and ended: gone
+#       10 minutes with no merge or blocked result, so the batch can finish), one line each,
 #       then how to wait for the next ones. Driver only. Run it in the BACKGROUND and end the
 #       turn; it wakes the driver. Exit 0 events printed, 4 none within --wait-max, 5 the batch
 #       stopped (after printing any left), 6 Shepherd isn't running, 2 refused.
@@ -504,8 +505,9 @@ cmd_status() {
   local bf; bf="$(batch_file "$id")"
   [ -f "$bf" ] || refuse "no batch $id"
   # Grouped by outcome, the way core.batchOutcomes groups them (merged-dirty counts as merged; a
-  # session and no result = working; no session = unopened). Shepherd's state file is the source;
-  # a missing or torn one reads as empty, so every unit is unopened.
+  # session Shepherd settled as ended, with no result = ended; a session and no result = working;
+  # no session = unopened). Shepherd's state file is the source; a missing or torn one reads as
+  # empty, so every unit is unopened.
   local state
   state="$(jq -c 'if type == "object" then . else {} end' "$FLEET_DIR/$id.state.json" 2>/dev/null)" || state=""
   [ -n "$state" ] || state='{}'
@@ -513,18 +515,20 @@ cmd_status() {
     def outcome($us):
       if ($us.result == "merged" or $us.result == "merged-dirty") then "merged"
       elif $us.result == "blocked" then "blocked"
+      # 2026-10-15: gone for core.BATCH_UNIT_END_GRACE with no result (core.unitSettle stamps endedAt)
+      elif (($us.session | type) == "object") and (($us.endedAt | type) == "number") then "ended"
       elif (($us.session | type) == "object") then "working"
       else "unopened" end;
     ($s.units | if type == "object" then . else {} end) as $su
     # 2026-09-29: blockedBy, the way core.batchUnitOutcomeIn reads it -- a unit with no tab behind
     # a blocked one (directly or down a chain) is blocked too, so the batch can finish; one
-    # behind a unit that has not merged yet waits.
+    # behind a unit that has not merged yet waits. 2026-10-15: an ended unit never merges either.
     | ($b[0].units | map({ key: .slug, value: (.blockedBy // []) }) | from_entries) as $g
     | def raw($x): outcome(($su[$x] | if type == "object" then . else {} end));
       def via($x; $seen):
         if ($seen | any(. == $x)) then null
         else (first(($g[$x] // [])[] as $bl | raw($bl) as $o
-                    | if $o == "blocked" then $bl elif $o != "merged" then (via($bl; $seen + [$x]) // empty) else empty end)
+                    | if ($o == "blocked" or $o == "ended") then $bl elif $o != "merged" then (via($bl; $seen + [$x]) // empty) else empty end)
               // null) end;
     [ $b[0].units[] | . as $u | ($su[$u.slug] | if type == "object" then . else {} end) as $us
         | outcome($us) as $o
@@ -532,9 +536,12 @@ cmd_status() {
         | [ ($u.blockedBy // [])[] | select(raw(.) != "merged") ] as $w
         | { slug: $u.slug, branch: $u.branch, outcome: (if $v then "blocked" else $o end),
             result: ($us.result // null), session: ($us.session.name? // null),
-            note: (if $o != "unopened" then null elif $v then "blocked by a blocked unit (\($v))"
+            note: (if $o == "ended" then "ended: its session is gone, with no merge or blocked result"
+                   elif $o == "working" and (($us.goneAt | type) == "number") then "its session is gone: it settles as ended unless it comes back"
+                   elif $o != "unopened" then null
+                   elif $v then "blocked by \(if raw($v) == "ended" then "an ended" else "a blocked" end) unit (\($v))"
                    elif ($w | length) > 0 then "waits for \($w | join(", "))" else null end) } ] as $units
-    | ([ "merged", "blocked", "working", "unopened" ]
+    | ([ "merged", "blocked", "ended", "working", "unopened" ]
        | map(. as $k | { key: $k, value: [ $units[] | select(.outcome == $k) | .slug ] }) | from_entries) as $o
     | { batch: $b[0].id, title: $b[0].title, phase: $b[0].phase, repo: $b[0].repo,
         grant: ($s.grant // null), counts: ($o | map_values(length)), outcomes: $o, units: $units }'

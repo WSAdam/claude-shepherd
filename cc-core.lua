@@ -5358,15 +5358,16 @@ function M.fleetTabVerdict(batch, grant, state, req)
   if type(us) == "table" and us.session then return false, "that unit already has its tab" end
   -- 2026-09-29: blockedBy -- not until every blocker has merged. The third value lists them, so
   -- cc-fleet.sh can say "waits" (ask again later) apart from a refusal.
-  local waits, via = M.batchUnitWaits(batch, state, req.slug)
-  if via then return false, "blocked by a blocked unit: " .. via .. " is blocked, so " .. req.slug .. " can't start" end
+  local waits, via, how = M.batchUnitWaits(batch, state, req.slug)
+  if via then return false, M.batchBlockedVia(via, how, req.slug, "start") end
   if #waits > 0 then return false, "waits for " .. table.concat(waits, ", ") .. " to merge first", waits end
   return true
 end
 
 -- Where one unit stands against its blockers (2026-09-29): the blockers that haven't merged yet,
 -- in blockedBy order, and -- when one of them, or one of theirs, ended blocked -- that unit. It
--- will never merge, so this one can never start: "blocked by a blocked unit".
+-- will never merge, so this one can never start: "blocked by a blocked unit". 2026-10-15: a unit
+-- that ended (M.unitSettle) will never merge either; the third value says which it was.
 function M.batchUnitWaits(batch, state, slug)
   local by = {}
   for _, u in ipairs(type(batch) == "table" and type(batch.units) == "table" and batch.units or {}) do by[u.slug] = u end
@@ -5383,15 +5384,24 @@ function M.batchUnitWaits(batch, state, slug)
     seen[s] = true
     for _, b in ipairs(by[s] and by[s].blockedBy or {}) do
       local o = outcome(b)
-      if o == "blocked" then return b end
+      if o == "blocked" or o == "ended" then return b, o end
       if o ~= "merged" then
-        local deeper = via(b)
-        if deeper then return deeper end
+        local deeper, how = via(b)
+        if deeper then return deeper, how end
       end
     end
     return nil
   end
   return waits, via(slug)
+end
+
+-- Why a unit behind a blocked or ended one can't go on (2026-10-15): the words for the refusal.
+-- On M, not a chunk local: cc-core's main chunk is near Lua's 200-local cap.
+function M.batchBlockedVia(via, how, slug, verb)
+  if how == "ended" then
+    return "blocked by an ended unit: " .. via .. " ended with no merge or blocked result, so " .. slug .. " can't " .. verb
+  end
+  return "blocked by a blocked unit: " .. via .. " is blocked, so " .. slug .. " can't " .. verb
 end
 
 -- May this merge request go ahead as far as its batch's order goes? The problem that holds it
@@ -5402,8 +5412,8 @@ function M.fleetMergeWaits(batch, grant, state, req)
   if not grant.approved or grant.stopped then return nil end
   for _, u in ipairs(batch.units or {}) do
     if u.branch == req.branch then
-      local waits, via = M.batchUnitWaits(batch, state, u.slug)
-      if via then return "blocked by a blocked unit: " .. via .. " is blocked, so " .. u.slug .. " can't merge" end
+      local waits, via, how = M.batchUnitWaits(batch, state, u.slug)
+      if via then return M.batchBlockedVia(via, how, u.slug, "merge") end
       if #waits > 0 then return "waits for " .. table.concat(waits, ", ") .. " to merge first (the batch's blockedBy)" end
     end
   end
@@ -5486,31 +5496,61 @@ function M.fleetUnitOfRequest(batch, state, req)
 end
 
 -- Which bucket one unit is in (2026-09-18), from Shepherd's own state for it: merged (merged-dirty
--- counts), blocked, working (it has its session and no result yet) or unopened (no session -- a
--- tab that is still opening hasn't produced one).
+-- counts), blocked, ended (2026-10-15: its session is gone and left neither -- M.unitSettle),
+-- working (it has its session and no result yet) or unopened (no session -- a tab that is still
+-- opening hasn't produced one).
 function M.batchUnitOutcome(us)
   us = type(us) == "table" and us or {}
   if us.result == "merged" or us.result == "merged-dirty" then return "merged" end
   if us.result == "blocked" then return "blocked" end
+  if type(us.session) == "table" and tonumber(us.endedAt) then return "ended" end
   return type(us.session) == "table" and "working" or "unopened"
 end
 
--- A batch's units grouped by outcome: four slug lists, each in the batch's own unit order.
+-- ---- a unit whose session ended settles (2026-10-15) ----
+-- A unit whose session ended with no merge or blocked result stayed "working" for good, so its batch
+-- never finished and the driver's card read Driving until Adam stopped it by hand. Once its session
+-- has been gone (no card links it and ps says its process exited -- FX.relayFleet's liveness) for
+-- BATCH_UNIT_END_GRACE, it settles as ended. The grace lets a /clear or a respawn come back first.
+M.BATCH_UNIT_END_GRACE = 600
+-- The unit's new goneAt and endedAt. gone: true = gone, false = seen alive (both clocks clear --
+-- a unit that comes back, even after it settled, is working again), nil = unknown (no change).
+function M.unitSettle(us, gone, now)
+  if type(us) ~= "table" or type(us.session) ~= "table" then return nil, nil end
+  if us.result == "merged" or us.result == "merged-dirty" or us.result == "blocked" then return nil, nil end
+  local goneAt, endedAt = tonumber(us.goneAt), tonumber(us.endedAt)
+  if gone == false then return nil, nil end
+  if gone ~= true then return goneAt, endedAt end
+  now = tonumber(now) or 0
+  goneAt = goneAt or now
+  if not endedAt and now - goneAt >= M.BATCH_UNIT_END_GRACE then endedAt = now end
+  return goneAt, endedAt
+end
+
+-- A batch's units grouped by outcome: five slug lists (ended since 2026-10-15), each in the batch's own unit order.
 -- 2026-09-29: ...within its batch. A unit with no tab whose blocker (or one of theirs) ended
 -- blocked is blocked too -- "blocked by a blocked unit" -- or the batch could never finish. The
 -- second value is the card's note: that, or which blockers an unopened unit still waits for.
+-- 2026-10-15: an ended unit's note says why, and so does a working one whose session is gone and
+-- may still come back inside the grace.
+M.BATCH_UNIT_ENDED_NOTE = "ended: its session is gone, with no merge or blocked result"
 function M.batchUnitOutcomeIn(batch, state, slug)
   local us = type(state) == "table" and type(state.units) == "table" and state.units[slug] or nil
   local o = M.batchUnitOutcome(us)
+  if o == "ended" then return o, M.BATCH_UNIT_ENDED_NOTE end
+  if o == "working" and tonumber(us.goneAt) then
+    return o, "its session is gone: it settles as ended unless it is back within "
+      .. math.floor(M.BATCH_UNIT_END_GRACE / 60) .. " min"
+  end
   if o ~= "unopened" then return o, nil end
-  local waits, via = M.batchUnitWaits(batch, state, slug)
-  if via then return "blocked", "blocked by a blocked unit (" .. via .. ")" end
+  local waits, via, how = M.batchUnitWaits(batch, state, slug)
+  if via then return "blocked", "blocked by " .. ((how == "ended") and "an ended" or "a blocked") .. " unit (" .. via .. ")" end
   if #waits > 0 then return o, "waits for " .. table.concat(waits, ", ") end
   return o, nil
 end
 
 function M.batchOutcomes(batch, state)
-  local o = { merged = {}, blocked = {}, working = {}, unopened = {} }
+  local o = { merged = {}, blocked = {}, ended = {}, working = {}, unopened = {} }
   for _, u in ipairs(type(batch) == "table" and type(batch.units) == "table" and batch.units or {}) do
     local bucket = o[(M.batchUnitOutcomeIn(batch, state, u.slug))]
     bucket[#bucket + 1] = u.slug
@@ -5521,7 +5561,7 @@ end
 -- The grouping as lines for the review and the log: one per non-empty bucket, count then slugs.
 function M.batchOutcomeLines(o)
   local lines = {}
-  for _, row in ipairs({ { "merged", "✅", "merged" }, { "blocked", "⛔", "blocked" },
+  for _, row in ipairs({ { "merged", "✅", "merged" }, { "blocked", "⛔", "blocked" }, { "ended", "⏏", "ended" },
                          { "working", "⏳", "working" }, { "unopened", "·", "not opened" } }) do
     local slugs = type(o) == "table" and o[row[1]] or nil
     if type(slugs) == "table" and #slugs > 0 then
@@ -5532,18 +5572,21 @@ function M.batchOutcomeLines(o)
 end
 
 -- Has an approved batch run its course? (2026-09-11: a driver that never ran stop left "driving
--- 2 units" on its card for hours.) Every unit has an outcome -- merged (merged-dirty counts) or
--- blocked -- or its repo is gone. Returns true + the reason the card shows.
+-- 2 units" on its card for hours.) Every unit has an outcome -- merged (merged-dirty counts),
+-- blocked or ended (2026-10-15) -- or its repo is gone. Returns true + the reason the card shows.
 function M.batchFinished(batch, grant, state, repoGone)
   if type(batch) ~= "table" or type(grant) ~= "table" or not grant.approved or grant.stopped then return false end
   if repoGone then return true, "its repo is gone" end
   local o = M.batchOutcomes(batch, state)
-  local merged, blocked = #o.merged, #o.blocked
-  if #o.working + #o.unopened > 0 or merged + blocked == 0 then return false end
+  local merged, blocked, ended = #o.merged, #o.blocked, #o.ended
+  if #o.working + #o.unopened > 0 or merged + blocked + ended == 0 then return false end
   -- 2026-09-29: a batch that merged nothing (its first unit blocked, the rest behind it) says so
-  -- without a "0 merged" in front
-  if merged == 0 then return true, blocked .. " blocked" end
-  return true, merged .. " merged" .. (blocked > 0 and (", " .. blocked .. " blocked") or "")
+  -- without a "0 merged" in front; an empty bucket is never counted out loud
+  local parts = {}
+  if merged > 0 then parts[#parts + 1] = merged .. " merged" end
+  if blocked > 0 then parts[#parts + 1] = blocked .. " blocked" end
+  if ended > 0 then parts[#parts + 1] = ended .. " ended" end
+  return true, table.concat(parts, ", ")
 end
 
 -- What the driver's card and the review get.
@@ -5605,7 +5648,7 @@ end
 -- memo is rebuilt from the file itself after a reload (M.parseUnitEvents), so a restart never
 -- re-tells anything.
 M.UNIT_EVENTS = { "tab_opened", "asked", "turn_finished", "merge_requested", "gate_red",
-                  "checker_fail", "merged", "blocked", "session_ended" }
+                  "checker_fail", "merged", "blocked", "session_ended", "ended" }
 M.UNIT_EVENT_TEXT_CHARS = 300
 
 -- One line of text: control characters (newlines included) become spaces, then capped.
@@ -5729,6 +5772,13 @@ function M.unitEvent(seen, us, it, gone)
     emit("blocked", "result:blocked", "blocked" .. (note and (": " .. note) or ""))
   end
   if gone then emit("session_ended", "ended:" .. sid, "its session " .. name .. " has ended") end
+  -- 2026-10-15: gone for the whole grace with no result (M.unitSettle): the batch counts it as ended.
+  -- Keyed by when it settled, so a unit that came back and went again is told again.
+  if M.batchUnitOutcome(us) == "ended" then
+    emit("ended", "result:ended:" .. tostring(us.endedAt),
+         "ended: its session " .. name .. " has been gone " .. math.floor(M.BATCH_UNIT_END_GRACE / 60)
+           .. " min with no merge or blocked result, so the batch counts it as ended")
+  end
   if #out == 0 and not answered then return out, seen end
   local nxt = {}
   for k in pairs(seen) do
