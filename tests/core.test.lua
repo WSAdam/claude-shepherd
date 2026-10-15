@@ -16384,5 +16384,19 @@ do
         select(2, core.batchFinished(cb, eg, endedOne, false)) == "1 blocked, 1 ended")
 end
 
+-- ---- elicitation_url_dialog / agent_needs_input stay Needs you on both surfaces (2026-10-15) ----
+-- cc-status.sh writes these two Notification types (Claude Code 2.1.296) as status approval with
+-- pending {tool = "", summary, message, prompt = true} -- the elicitation_dialog shape (tests/status.test.sh).
+-- The panel's stale-approval heal must keep that card Needs you whether the transcript shows a dangling
+-- tool_use (terminal CLI writes it first) or nothing new at all (VS Code buffers the assistant message).
+do
+  local function card() return { key = "el", status = "approval", since = 100, updated = 100,
+    pending = { tool = "", summary = "An agent needs your input", message = "An agent needs your input", prompt = true } } end
+  eq("elicitation: terminal (dangling tool_use, transcript moved) -> not healed", core.approvalHealable(card(), true, true), false)
+  eq("elicitation: VS Code (buffered, transcript frozen) -> not healed", core.approvalHealable(card(), false, false), false)
+  eq("elicitation: VS Code even once a sibling line lands after the arm -> not healed", core.approvalHealable(card(), false, true), false)
+  eq("elicitation: the card needs Adam", (core.needsYouKind(card(), 200)), "needs")
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

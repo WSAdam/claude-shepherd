@@ -203,7 +203,9 @@ case "$EVENT" in
     [ -n "$NTYPE" ] || NTYPE="$(cc_get "$INPUT" '.type')"
     PENDING_MSG="$(cc_get "$INPUT" '.message')"
     case "$NTYPE" in
-      *permission*|*elicitation_dialog*)
+      *permission*|*elicitation_dialog*|*elicitation_url_dialog*|*agent_needs_input*)
+        # 2026-10-15: Claude Code 2.1.296 added elicitation_url_dialog and agent_needs_input --
+        # both wait on Adam exactly like elicitation_dialog; unmatched, the card stayed Working.
         # Generic fallback: only sets pending if PermissionRequest hasn't
         # already recorded the precise command (PENDING_IF_ABSENT). A Notification
         # means Claude Code is GENUINELY prompting (the "Allow this bash command?"

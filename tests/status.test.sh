@@ -161,6 +161,42 @@ ev sessionstart "{\"session_id\":\"$G\",\"cwd\":\"$GCWD\"}"
 ev notification "{\"session_id\":\"$G\",\"cwd\":\"$GCWD\",\"notification_type\":\"permission_prompt\",\"message\":\"Allow something\"}"
 assert_json "generic notification sets pending when absent" "$GF" '.pending.summary' "Allow something"
 
+# ---- elicitation_url_dialog / agent_needs_input read as Needs you (2026-10-15) ----
+# 2026-10-15: Claude Code 2.1.296 sends Notification types elicitation_url_dialog and agent_needs_input; neither matched the `*permission*|*elicitation_dialog*` arm, so the card stayed Working while the session waited on Adam.
+# elicitation_dialog is the reference: each new type, fired mid-turn, must land on the same status and pending shape.
+EL="el0"; ELCWD="/srv/el"; ELF="$TMP/$EL.json"
+ev userpromptsubmit "{\"session_id\":\"$EL\",\"cwd\":\"$ELCWD\",\"prompt_text\":\"sync the tickets\"}"
+ev pretooluse "{\"session_id\":\"$EL\",\"cwd\":\"$ELCWD\",\"tool_name\":\"mcp__linear__create_issue\",\"tool_input\":{}}"
+ev notification '{"session_id":"el0","transcript_path":"/Users/x/.claude/projects/-srv-el/el0.jsonl","cwd":"/srv/el","hook_event_name":"Notification","message":"MCP server \"linear\" is requesting your input","notification_type":"elicitation_dialog"}'
+assert_json "elicitation_dialog -> approval (the reference)" "$ELF" '.status' "approval"
+assert_json "elicitation_dialog -> pending.prompt=true (the reference)" "$ELF" '.pending.prompt' "true"
+EL_SHAPE="$(jq -c '{status, pending: (.pending | keys)}' "$ELF")"
+
+EU="el1"; EUCWD="/srv/el"; EUF="$TMP/$EU.json"
+ev userpromptsubmit "{\"session_id\":\"$EU\",\"cwd\":\"$EUCWD\",\"prompt_text\":\"connect the drive\"}"
+ev pretooluse "{\"session_id\":\"$EU\",\"cwd\":\"$EUCWD\",\"tool_name\":\"mcp__drive__list_files\",\"tool_input\":{}}"
+ev notification '{"session_id":"el1","transcript_path":"/Users/x/.claude/projects/-srv-el/el1.jsonl","cwd":"/srv/el","hook_event_name":"Notification","message":"MCP server \"drive\" wants you to open a URL to continue","notification_type":"elicitation_url_dialog"}'
+assert_json "an elicitation_url_dialog notification -> approval, not working" "$EUF" '.status' "approval"
+assert_json "...its message is the pending summary" "$EUF" '.pending.summary' "MCP server \"drive\" wants you to open a URL to continue"
+assert_json "...and marks pending.prompt=true (a live dialog)" "$EUF" '.pending.prompt' "true"
+assert_eq "...the same status and pending shape as elicitation_dialog" "$EL_SHAPE" "$(jq -c '{status, pending: (.pending // {} | keys)}' "$EUF")"
+
+EA="el2"; EACWD="/srv/el"; EAF="$TMP/$EA.json"
+ev userpromptsubmit "{\"session_id\":\"$EA\",\"cwd\":\"$EACWD\",\"prompt_text\":\"run the agents\"}"
+ev pretooluse "{\"session_id\":\"$EA\",\"cwd\":\"$EACWD\",\"tool_name\":\"Agent\",\"tool_input\":{\"description\":\"survey\"}}"
+ev notification '{"session_id":"el2","transcript_path":"/Users/x/.claude/projects/-srv-el/el2.jsonl","cwd":"/srv/el","hook_event_name":"Notification","message":"An agent needs your input","notification_type":"agent_needs_input"}'
+assert_json "an agent_needs_input notification -> approval, not working" "$EAF" '.status' "approval"
+assert_json "...its message is the pending summary" "$EAF" '.pending.summary' "An agent needs your input"
+assert_json "...and marks pending.prompt=true (a live dialog)" "$EAF" '.pending.prompt' "true"
+assert_eq "...the same status and pending shape as elicitation_dialog" "$EL_SHAPE" "$(jq -c '{status, pending: (.pending // {} | keys)}' "$EAF")"
+
+# A PermissionRequest's precise pending survives either new type, which still marks it as a live dialog.
+EP="el3"; EPCWD="/srv/el"; EPF="$TMP/$EP.json"
+ev permissionrequest "{\"session_id\":\"$EP\",\"cwd\":\"$EPCWD\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"gh pr list\"}}"
+ev notification '{"session_id":"el3","transcript_path":"/Users/x/.claude/projects/-srv-el/el3.jsonl","cwd":"/srv/el","hook_event_name":"Notification","message":"An agent needs your input","notification_type":"agent_needs_input"}'
+assert_json "agent_needs_input keeps a PermissionRequest's precise pending" "$EPF" '.pending.summary' "gh pr list"
+assert_json "...and marks it pending.prompt=true" "$EPF" '.pending.prompt' "true"
+
 # --- Phase 3: transcript_path captured (for live activity peek) ---
 T="t3"; TCWD="/srv/app"; TF="$TMP/$T.json"
 ev userpromptsubmit "{\"session_id\":\"$T\",\"cwd\":\"$TCWD\",\"transcript_path\":\"/U/x/.claude/projects/app/s.jsonl\",\"prompt_text\":\"hi\"}"
