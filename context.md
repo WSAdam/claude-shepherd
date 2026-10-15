@@ -295,6 +295,17 @@ git history of `todos.md` and `docs/feature-mining/*`.
   per-project $ + budget-alert rules; DR6 an LLM classify pass + fleet-wide opt-in once trusted; DR7 worktree
   cleanup of an abandoned (never-kept) cohort (`git worktree prune`).
 
+## State (2026-10-15) — Logged bugs fixed
+
+- **Batch b179206729127338** (8 units, all merged on Adam's click): red-first proof reads a red run
+  red (`core.mergeGateOutcome`: a refusal token counts only at a line start), always-ask sees through
+  quote-split words, talk mode's ls-remote/grep -O holes and control files, `.worktree-check` grades
+  as CI, two new Notification types read Needs you, an ended batch unit settles (`core.unitSettle`),
+  the panel's git runs as `core.GIT` (no optional locks), and a profile's policy bundle reaches the
+  session it spawns (`core.pendingPolicy`). Follow-ups on main: a bundle's `alwaysAsk` in
+  `core.policyFileFor`, `$'...'`/`$"..."` in always-ask (`_cc_sc_ansic`), and `FX.mainGreenJudge`
+  (a main-green verdict is judged before a new firing replaces its run).
+
 ## State (2026-10-14) — Crossings
 
 - **Crossings** (D-27): nothing one project's session writes for another reaches it without Adam.

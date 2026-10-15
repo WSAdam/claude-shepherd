@@ -4,6 +4,38 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-10-15 — Logged bugs fixed
+
+Eight units, run as one batch with every merge on Adam's click, then four follow-ups on main.
+
+- Fixed: **red-first proof on this repo**. Every red-first run here read "couldn't run (exit 1)" and
+  was retried every 90s, because core.test.lua prints the gate lines it builds, refusal token and
+  all, and `core.mergeGateOutcome` took the token anywhere in the log as a refusal. A refusal now
+  counts only when its token starts a line, in a log with no failing test.
+- Fixed: **always-ask through quoting**. `git p"ush"`, `r'm' -rf`, `pu\sh` and a line-continued
+  `pu\<newline>sh` are joined by bash into the held word, but both cheap keyword looks read the raw
+  text, so those commands ran without a click. Then the same for `$'...'` and `$"..."`: `r$'m' -rf`,
+  `r$"m" -rf`, and an escape like `git $'p\x75sh'` (the parser now decodes `$'...'` the way bash
+  does, `_cc_sc_ansic`; a word that decodes to a control or non-ASCII character stays an expansion).
+- Fixed: **talk mode's holes**. `git ls-remote --upload-pack` (and `--exec`, `-u` and any
+  abbreviation) and `git grep -O`/`--op=` in any spelling run a program, and no longer count as
+  read-only. A talk-mode session can't edit Shepherd's own control files: everything `~/.claude/cc-*`
+  plus `settings.json` / `settings.local.json`. Memory, plans, projects and notes stay writable.
+- Fixed: **a grant merge that changes the repo's `.worktree-check`** (the gate `merge.repoGate` runs)
+  waits for Adam's click like a CI change.
+- Fixed: **Notification types `elicitation_url_dialog` and `agent_needs_input`** (Claude Code
+  2.1.296) read as Needs you, not Working.
+- Fixed: **a batch unit whose session ended** with no merge or blocked result settles as "ended"
+  after 10 minutes (`core.BATCH_UNIT_END_GRACE`), so the batch can finish; the driver hears it once.
+- Fixed: **the panel's own git takes no optional locks** in a checkout (`core.GIT`), so its status
+  and diff reads can't leave a unit's rebase failing on `index.lock`.
+- Fixed: **an agent profile's policy bundle reaches the session it spawns** (`core.pendingPolicy`,
+  taken at SessionStart by `cc_take_pending_policy`). And a bundle's own `alwaysAsk` commands now
+  reach the gate: the resolved-policy file (`core.policyFileFor`) left them out.
+- Fixed: **a main-green check's verdict** was lost when the routine fired again, or Adam clicked Run,
+  before the tick judged the finished run: `FX.mainGreenFire` dropped it unjudged. It is judged first
+  now (`FX.mainGreenJudge`). This was the 6-failure flake in maingreen.test.lua under load.
+
 ## 2026-10-14 — Crossings: Adam approves what one project sends another
 
 - Added: **Crossings**. Adam: "projects should not be able to utilize having shepherd to talk to each
