@@ -5639,5 +5639,61 @@ do
         poll:find('p.op == "close-unclaimed" and ok', 1, true) ~= nil)
 end
 
+-- ---- The panel's own git takes no optional locks in a checkout (2026-10-15) ----
+-- 2026-10-15: the Changes tab's status/diff, the merge diff and the worktree list ran plain git in
+-- units' checkouts, and a read-only `git status` can take .git/index.lock to refresh the index --
+-- a unit's own rebase then failed with "index.lock exists". core's builders are pinned in
+-- core.test.lua; this holds every git the dashboard's Lua writes itself to core.GIT.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  -- the Lua outside the webview's HTML long string (its help text quotes git commands as prose)
+  local hs1 = src:find("\nlocal HTML = [[\n", 1, true)
+  local he = hs1 and src:find("\n]]\n", hs1, true)
+  local lua = hs1 and he and (src:sub(1, hs1) .. src:sub(he + 4)) or src
+  check("git-locks pin: found the HTML long string to skip", hs1 ~= nil and he ~= nil)
+  local SUB = {}
+  for w in ([[rev-parse status diff log show worktree for-each-ref ls-files ls-tree merge-base symbolic-ref
+    cat-file branch remote config reflog rev-list merge-tree commit add rm checkout fetch stash push pull
+    reset clean rebase merge tag grep blame describe switch restore prune update-ref notes shortlog]]):gmatch("%S+") do
+    SUB[w] = true
+  end
+  local bare, runs = {}, 0
+  for line in (lua .. "\n"):gmatch("([^\n]*)\n") do
+    if not line:match("^%s*%-%-") then
+      local s = " " .. line
+      -- a git at command position: right after a quote, a shell separator or a space, then an
+      -- option or a subcommand ("git exited 1" is a message)
+      for at, word in s:gmatch("[%s;|&({\"']()git%s+([%-%w]+)") do
+        local before = s:sub(1, at - 1)
+        -- prose ("isn't in a git checkout") has a word before it; a command starts a string or follows a separator
+        if before:match("[\"';|&({]%s*$") and (word:sub(1, 1) == "-" or SUB[word]) then
+          runs = runs + 1
+          if s:sub(at - 21, at - 1) ~= "GIT_OPTIONAL_LOCKS=0 " then bare[#bare + 1] = line:match("^%s*(.-)%s*$") end
+        end
+      end
+    end
+  end
+  check("git-locks pin: the dashboard writes no bare git for a checkout  (" .. runs .. " runs, " .. #bare .. " bare: "
+        .. table.concat(bare, " | "):sub(1, 600) .. ")", #bare == 0)
+  local uses = select(2, lua:gsub("core%.GIT %.%. ", ""))
+  check("git-locks pin: the Changes tab, merge diff, worktree list, branch list and remote go through core.GIT  ("
+        .. uses .. " uses)", uses >= 9)
+  for _, fn in ipairs({ "FX.gitRoot", "FX.gitStatus", "FX.gitDiff", "FX.mergeDiff", "FX.repoWorktrees" }) do
+    local body = src:match("function " .. fn:gsub("%.", "%%.") .. "%(.-\nend\n") or ""
+    check("git-locks pin: " .. fn .. " runs git through core.GIT",
+          body:find("core.GIT .. ", 1, true) ~= nil and not body:find('hs.execute("git', 1, true))
+  end
+  -- cc-commits.sh (the commit stats) runs git log over every repo a session worked in
+  local g = io.open(ROOT .. "cc-commits.sh", "r")
+  local sh = g and g:read("*a") or ""
+  if g then g:close() end
+  local at = sh:find("\nexport GIT_OPTIONAL_LOCKS=0\n", 1, true)
+  local first = sh:find('\n[^#\n]*git %-C "%$')
+  check("git-locks pin: cc-commits.sh exports GIT_OPTIONAL_LOCKS=0 before its first git",
+        at ~= nil and first ~= nil and at < first)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

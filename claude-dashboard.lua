@@ -4465,7 +4465,7 @@ function FX.gitRoot(cwd)
   local root = ""
   pcall(function()
     local q = "'" .. tostring(cwd):gsub("'", "'\\''") .. "'"
-    local out = hs.execute("git -C " .. q .. " rev-parse --show-toplevel 2>/dev/null")
+    local out = hs.execute(core.GIT .. " -C " .. q .. " rev-parse --show-toplevel 2>/dev/null")
     if out then root = out:gsub("%s+$", "") end
   end)
   gitRootByCwd[cwd] = root
@@ -4484,8 +4484,9 @@ function FX.gitStatus(root)
     -- -z already emits paths verbatim (no C-quoting); core.quotepath=false makes
     -- that explicit/future-proof. head -c caps a pathological repo (tens of
     -- thousands of changes) so it can't flood the bridge -- a partial trailing
-    -- record is dropped safely by core.parseGitStatus.
-    out = hs.execute("git -C " .. q .. " -c core.quotepath=false status --porcelain=v1 -z 2>/dev/null | head -c 1000000")
+    -- record is dropped safely by core.parseGitStatus. core.GIT: a status in a unit's worktree
+    -- must never take the index.lock its own rebase needs (2026-10-15).
+    out = hs.execute(core.GIT .. " -C " .. q .. " -c core.quotepath=false status --porcelain=v1 -z 2>/dev/null | head -c 1000000")
   end)
   return out
 end
@@ -4505,17 +4506,17 @@ function FX.gitDiff(root, file, orig)
     if orig and orig ~= "" then
       -- rename-aware: diff both pathspecs vs HEAD with -M so git pairs old->new.
       local o = "'" .. tostring(orig):gsub("'", "'\\''") .. "'"
-      out = hs.execute("git -C " .. q .. " -c core.quotepath=false diff HEAD -M --no-color --no-ext-diff -- "
+      out = hs.execute(core.GIT .. " -C " .. q .. " -c core.quotepath=false diff HEAD -M --no-color --no-ext-diff -- "
                        .. o .. " " .. f .. " 2>/dev/null | head -c 200000")
     end
     if not out or out == "" then
       -- tracked file modified in place (its blob lives at the path itself, no -M
       -- needed) -- also the fallback when the rename attempt came back empty.
-      out = hs.execute("git -C " .. q .. " -c core.quotepath=false diff HEAD --no-color --no-ext-diff -- " .. f
+      out = hs.execute(core.GIT .. " -C " .. q .. " -c core.quotepath=false diff HEAD --no-color --no-ext-diff -- " .. f
                        .. " 2>/dev/null | head -c 200000")
     end
     if not out or out == "" then        -- untracked / brand-new file: synth an all-additions diff
-      out = hs.execute("git -C " .. q .. " -c core.quotepath=false diff --no-color --no-ext-diff --no-index -- /dev/null " .. f
+      out = hs.execute(core.GIT .. " -C " .. q .. " -c core.quotepath=false diff --no-color --no-ext-diff --no-index -- /dev/null " .. f
                        .. " 2>/dev/null | head -c 200000")
     end
   end)
@@ -4933,7 +4934,7 @@ function FX.runImprove(item)
   local lbUrl = creds and creds.url or ""
   local token = creds and creds.token or ""
   -- git is on PATH (/usr/bin/git); plain exec keeps each click fast (no rc reload).
-  local remote = hs.execute("git -C " .. dq(cwd) .. " remote get-url origin 2>/dev/null", false) or ""
+  local remote = hs.execute(core.GIT .. " -C " .. dq(cwd) .. " remote get-url origin 2>/dev/null", false) or ""
   local repo = core.repoFromRemote(remote)
   if lbUrl == "" or token == "" then
     FX.alert("Improve: leaderboard not configured — source ~/.zshrc and reload Hammerspoon")
@@ -7246,7 +7247,7 @@ function FX.mergeDiff(key)
   local text
   pcall(function()
     local q = "'" .. r.commonDir:gsub("'", "'\\''") .. "'"
-    text = hs.execute("git --git-dir=" .. q .. " diff --no-color --no-ext-diff " .. r.base .. "..." .. r.branch
+    text = hs.execute(core.GIT .. " --git-dir=" .. q .. " diff --no-color --no-ext-diff " .. r.base .. "..." .. r.branch
       .. " 2>/dev/null | head -c 200000")
   end)
   local js = hs.json.encode({ key = key, text = text or "" })
@@ -12388,7 +12389,7 @@ function FX.repoWorktrees(commonDir)
   local out, err
   local ok = pcall(function()
     local q = "'" .. tostring(commonDir or ""):gsub("'", "'\\''") .. "'"
-    local raw = hs.execute("git --git-dir=" .. q .. " worktree list --porcelain 2>/dev/null")
+    local raw = hs.execute(core.GIT .. " --git-dir=" .. q .. " worktree list --porcelain 2>/dev/null")
     if type(raw) == "string" and raw ~= "" then out = core.parseWorktreePorcelain(raw) end
   end)
   if not ok or not out then err = "couldn't list this repo's worktrees" end
@@ -13170,7 +13171,7 @@ function FX.newWorktreeTab(stackKey, specJson)
   local branches
   pcall(function()
     local q = "'" .. tostring(any.repoKey):gsub("'", "'\\''") .. "'"
-    branches = core.parseBranchList(hs.execute("git --git-dir=" .. q
+    branches = core.parseBranchList(hs.execute(core.GIT .. " --git-dir=" .. q
       .. " for-each-ref --format='%(refname:short)' refs/heads 2>/dev/null"))
   end)
   local req, why = core.newWorktreeTabRequest(spec, {

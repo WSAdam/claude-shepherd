@@ -1540,7 +1540,10 @@ local hs = {
   execute = function(cmd)
     cmd = tostring(cmd or "")
     -- like the real hs.execute: output, then whether it exited 0, then "exit" and the code
-    if cmd:match("^git ") or cmd:match("^cd ") then local out, code = sh(cmd); return out, code == 0, "exit", code end
+    -- the panel's git runs as core.GIT (GIT_OPTIONAL_LOCKS=0 git, 2026-10-15)
+    if cmd:match("^git ") or cmd:match("^GIT_OPTIONAL_LOCKS=0 git ") or cmd:match("^cd ") then
+      local out, code = sh(cmd); return out, code == 0, "exit", code
+    end
     return "", true, "exit", 0
   end,
   hotkey = { bind = function() return mkstub() end },

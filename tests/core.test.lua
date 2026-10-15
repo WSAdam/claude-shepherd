@@ -7995,15 +7995,16 @@ do
   check("abCohortPlan: rejects a variant with no task at all",
         core.abCohortPlan({ cohort = "c", repoRoot = "/p", variants = { { label = "a" }, { label = "b" } } }).ok == false)
 
-  -- git command builders (quoted; run via /bin/sh by the dashboard)
+  -- git command builders (quoted; run via /bin/sh by the dashboard). 2026-10-15: every git the
+  -- panel runs carries GIT_OPTIONAL_LOCKS=0 (core.GIT), so the shape now starts with it.
   check("gitWorktreeAddCmd: shape",
         core.gitWorktreeAddCmd("/p/repo", "/p/.cc-ab/repo-c1-a", "ab/c1/a", "HEAD")
-        == "git -C /p/repo worktree add -b ab/c1/a /p/.cc-ab/repo-c1-a HEAD")
+        == "GIT_OPTIONAL_LOCKS=0 git -C /p/repo worktree add -b ab/c1/a /p/.cc-ab/repo-c1-a HEAD")
   check("gitWorktreeRemoveCmd: shape",
         core.gitWorktreeRemoveCmd("/p/repo", "/p/.cc-ab/repo-c1-a")
-        == "git -C /p/repo worktree remove --force /p/.cc-ab/repo-c1-a")
+        == "GIT_OPTIONAL_LOCKS=0 git -C /p/repo worktree remove --force /p/.cc-ab/repo-c1-a")
   check("gitBranchDeleteCmd: shape",
-        core.gitBranchDeleteCmd("/p/repo", "ab/c1/a") == "git -C /p/repo branch -D ab/c1/a")
+        core.gitBranchDeleteCmd("/p/repo", "ab/c1/a") == "GIT_OPTIONAL_LOCKS=0 git -C /p/repo branch -D ab/c1/a")
   check("gitWorktreeAddCmd: quotes a spacey path",
         core.gitWorktreeAddCmd("/p/my repo", "/p/wt a", "ab/c/a", "HEAD"):find("'/p/my repo'", 1, true) ~= nil)
 
@@ -12407,14 +12408,15 @@ do
   -- after: the verify command gathers the new facts with Shepherd's own git
   local mg = core.parseMergeRequest(reqJson({ phase = "merged", sha = "abc1234def", stash_count = 1 }))
   local vcmd = core.mergeVerifyCmd(mg)
-  check("verify: reads main's checked-out branch", vcmd:find("echo @@mainhead; git --git-dir='/r/main/.git' symbolic-ref --quiet --short HEAD", 1, true) ~= nil)
+  -- 2026-10-15: every git here carries GIT_OPTIONAL_LOCKS=0 (core.GIT)
+  check("verify: reads main's checked-out branch", vcmd:find("echo @@mainhead; GIT_OPTIONAL_LOCKS=0 git --git-dir='/r/main/.git' symbolic-ref --quiet --short HEAD", 1, true) ~= nil)
   check("verify: ...main's TRACKED changes only (TODO.md and scratch files never count)",
         vcmd:find("git -C '/r/main' status --porcelain --untracked-files=no", 1, true) ~= nil)
   check("verify: ...the markers the merge brought in: main's reflog entry before the merged commit, diffed to it",
         vcmd:find("reflog show --format=%H refs/heads/main", 1, true) ~= nil
         and vcmd:find("awk -v s=abc1234def", 1, true) ~= nil and vcmd:find('-U0 --src-prefix=a/ --dst-prefix=b/ "$from" abc1234def', 1, true) ~= nil)
-  check("verify: ...and the stash count", vcmd:find("echo @@stash; { git --git-dir='/r/main/.git' rev-list --walk-reflogs --count refs/stash", 1, true) ~= nil)
-  local listLast = "echo @@list; git --git-dir='/r/main/.git' worktree list --porcelain 2>/dev/null"
+  check("verify: ...and the stash count", vcmd:find("echo @@stash; { GIT_OPTIONAL_LOCKS=0 git --git-dir='/r/main/.git' rev-list --walk-reflogs --count refs/stash", 1, true) ~= nil)
+  local listLast = "echo @@list; GIT_OPTIONAL_LOCKS=0 git --git-dir='/r/main/.git' worktree list --porcelain 2>/dev/null"
   check("verify: ...with the worktree list still last", vcmd:sub(-#listLast) == listLast)
   check("verify: ...and the merge found by the branch's own reflog entry first",
         vcmd:find([[awk -v b=fix/demo: 'f{print $1;exit} $2=="merge"&&($3==b||$3=="refs/heads/" b){f=1}']], 1, true) ~= nil)
@@ -16396,6 +16398,72 @@ do
   eq("elicitation: VS Code (buffered, transcript frozen) -> not healed", core.approvalHealable(card(), false, false), false)
   eq("elicitation: VS Code even once a sibling line lands after the arm -> not healed", core.approvalHealable(card(), false, true), false)
   eq("elicitation: the card needs Adam", (core.needsYouKind(card(), 200)), "needs")
+end
+
+-- ---- The panel's own git takes no optional locks in a checkout (2026-10-15) ----
+-- 2026-10-15: Shepherd's read-only git (status/diff for the merge facts, the main-dirty check, the
+-- radar...) can take .git/index.lock to refresh the index, so a unit's own `git rebase`/`commit`
+-- failed with "index.lock exists" mid-rebase. Every git the panel builds runs GIT_OPTIONAL_LOCKS=0.
+do
+  -- every git the line runs (a command word: after a quote, a separator or a space) carries it
+  local function unlocked(cmd)
+    local s, runs, bare = " " .. tostring(cmd or ""), 0, 0
+    for at in s:gmatch("[%s;|&({\"']()git%s") do
+      runs = runs + 1
+      if s:sub(at - 21, at - 1) ~= "GIT_OPTIONAL_LOCKS=0 " then bare = bare + 1 end
+    end
+    return runs > 0 and bare == 0, runs, bare
+  end
+  local function each(name, cmd)
+    local ok, runs, bare = unlocked(cmd)
+    check(name .. " runs every git with GIT_OPTIONAL_LOCKS=0  (" .. runs .. " runs, " .. bare .. " bare)", ok)
+  end
+  -- a /bin/sh program: the export comes before the first git it runs
+  local function exported(name, script)
+    local at = tostring(script or ""):find("export GIT_OPTIONAL_LOCKS=0\n", 1, true)
+    local first = tostring(script or ""):find("git ", 1, true)
+    check(name .. " exports GIT_OPTIONAL_LOCKS=0 before its first git", at ~= nil and first ~= nil and at < first)
+  end
+  eq("git-locks: core.GIT is git with optional locks off", core.GIT, "GIT_OPTIONAL_LOCKS=0 git")
+  local sha = "0123456789abcdef0123456789abcdef01234567"
+  local req = { commonDir = "/r/A/.git", worktree = "/r/A/.claude/worktrees/a1", base = "main", branch = "fix/a1", sha = sha }
+  each("git-locks: gitIdentityCmd", core.gitIdentityCmd("/r/A"))
+  each("git-locks: mergeFactsCmd", core.mergeFactsCmd(req))
+  each("git-locks: repoGateReadCmd", core.repoGateReadCmd("/r/A/.git", "main"))
+  local vcmd = core.mergeVerifyCmd(req)
+  check("git-locks: mergeVerifyCmd carries the main-dirty check", (vcmd or ""):find("@@maindirty", 1, true) ~= nil)
+  each("git-locks: mergeVerifyCmd (main-dirty check included)", vcmd)
+  each("git-locks: redFirstPlanCmd", core.redFirstPlanCmd(req, sha))
+  each("git-locks: redFirstAtBaseCmd", core.redFirstAtBaseCmd("/r/A/.git", sha, { "tests/a.test.lua" }))
+  each("git-locks: redFirstCleanupCmd with the repo", core.redFirstCleanupCmd("/r/A/.git", "/tmp/redfirst-x1"))
+  each("git-locks: redFirstCleanupCmd for a leftover (asks the scratch for its repo)", core.redFirstCleanupCmd(nil, "/tmp/redfirst-x1"))
+  local rcmd = core.redFirstRunCmd({ commonDir = "/r/A/.git", scratch = "/tmp/redfirst-x1", at = sha, applyFrom = sha,
+                                     apply = { "tests/a.test.lua" }, command = "make test" })
+  each("git-locks: redFirstRunCmd", rcmd)
+  check("git-locks: ...the gate's own command never inherits it (no export)",
+        rcmd ~= nil and not rcmd:find("export GIT_OPTIONAL_LOCKS", 1, true) and rcmd:find("&& make test)", 1, true) ~= nil)
+  each("git-locks: gateBlamePlanCmd", core.gateBlamePlanCmd(req, sha))
+  each("git-locks: verifyTargetCmd", core.verifyTargetCmd("/r/A"))
+  each("git-locks: checkerDiffCmd for a merge range", core.checkerDiffCmd({ range = "main..." .. sha, commonDir = "/r/A/.git" }))
+  each("git-locks: checkerDiffCmd for a working tree", core.checkerDiffCmd({ dir = "/r/A", from = sha }))
+  each("git-locks: coachShowCmd", core.coachShowCmd("/r/A", sha, true))
+  each("git-locks: coachDirtyCmd", core.coachDirtyCmd("/r/A"))
+  each("git-locks: coachCommitCmd", core.coachCommitCmd("/r/A", "CLAUDE.md: x", "why", false))
+  each("git-locks: coachCommitCmd for a new file", core.coachCommitCmd("/r/A", "CLAUDE.md: x", "why", true))
+  local mg = core.mainGreenRun("make test", "main")
+  each("git-locks: mainGreenRun", mg)
+  check("git-locks: ...the gate's own command never inherits it (no export)",
+        mg ~= nil and not mg:find("export GIT_OPTIONAL_LOCKS", 1, true) and mg:sub(-#"; make test") == "; make test")
+  each("git-locks: gitWorktreeAddCmd", core.gitWorktreeAddCmd("/r/A", "/r/A-v1", "ab/v1", "main"))
+  each("git-locks: gitWorktreeRemoveCmd", core.gitWorktreeRemoveCmd("/r/A", "/r/A-v1"))
+  each("git-locks: gitBranchDeleteCmd", core.gitBranchDeleteCmd("/r/A", "ab/v1"))
+  exported("git-locks: RADAR_SH (the overlap radar)", core.RADAR_SH)
+  exported("git-locks: SCHED_LOCK_SH", core.SCHED_LOCK_SH)
+  exported("git-locks: PACKET_READ_SH", core.PACKET_READ_SH)
+  -- the matcher itself: a bare git is caught, prose and --git-dir are not runs
+  check("git-locks: the matcher catches a bare git", not unlocked("echo @@x; git -C '/r' status"))
+  check("git-locks: the matcher catches a bare git after the first", not unlocked("GIT_OPTIONAL_LOCKS=0 git log; { git status; }"))
+  check("git-locks: the matcher needs a run to pass", not unlocked("echo nothing here --git-dir"))
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

@@ -181,7 +181,8 @@ local hs = {
   settings = { get = function() return nil end, set = function() end },
   screen = { mainScreen = function() return { frame = function() return frame end, fullFrame = function() return frame end } end },
   execute = function(cmd)
-    if tostring(cmd):match("^git ") then return sh(cmd) end
+    -- the panel's git runs as core.GIT (GIT_OPTIONAL_LOCKS=0 git, 2026-10-15)
+    if tostring(cmd):match("^git ") or tostring(cmd):match("^GIT_OPTIONAL_LOCKS=0 git ") then return sh(cmd) end
     return ""
   end,
   hotkey = { bind = function() return mkstub() end },

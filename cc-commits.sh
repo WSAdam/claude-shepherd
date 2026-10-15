@@ -33,6 +33,8 @@
 # past ~64KB). Exit 2 on a bad argument.
 set -u
 export PATH="/opt/homebrew/bin:/usr/local/bin:${PATH:-/usr/bin:/bin}"
+# 2026-10-15: no git here may take an optional lock (index.lock) in a checkout a session is rebasing.
+export GIT_OPTIONAL_LOCKS=0
 
 since=""
 lookback=14

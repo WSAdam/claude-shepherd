@@ -1450,10 +1450,17 @@ function M.worktreeRootCandidates(launchDir, cwd, home)
   return out
 end
 
+-- Every git Shepherd runs in a checkout, as a shell command word. 2026-10-15: a read-only
+-- `git status`/`git diff` can take .git/index.lock to refresh the index, so the panel's own probes
+-- made a unit's `git rebase`/`commit` fail with "index.lock exists" mid-rebase. GIT_OPTIONAL_LOCKS=0
+-- skips only the optional locks: a write (commit, worktree add) still takes the ones it needs.
+-- An env prefix per run, never an export, so a gate's own test command never inherits it.
+M.GIT = "GIT_OPTIONAL_LOCKS=0 git"
+
 -- The one git probe per launch folder (FX caches it): top-level, common dir, git dir.
 function M.gitIdentityCmd(dir)
   local q = "'" .. tostring(dir or ""):gsub("'", "'\\''") .. "'"
-  return "git -C " .. q .. " rev-parse --path-format=absolute --show-toplevel --git-common-dir --git-dir 2>/dev/null"
+  return M.GIT .. " -C " .. q .. " rev-parse --path-format=absolute --show-toplevel --git-common-dir --git-dir 2>/dev/null"
 end
 
 -- Exactly three absolute lines, or nil (not a repo; a bare repo errors on --show-toplevel).
@@ -2397,8 +2404,8 @@ end
 -- @@sections. Paths are quoted; refs were validated by parseMergeRequest.
 function M.mergeFactsCmd(req)
   local function sq(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
-  local G = "git --git-dir=" .. sq(req.commonDir)
-  local W = "git -C " .. sq(req.worktree)
+  local G = M.GIT .. " --git-dir=" .. sq(req.commonDir)
+  local W = M.GIT .. " -C " .. sq(req.worktree)
   local range, dots = req.base .. ".." .. req.branch, req.base .. "..." .. req.branch
   return table.concat({
     "echo @@listed", G .. " worktree list --porcelain 2>/dev/null",
@@ -2518,7 +2525,7 @@ M.REPO_GATE_SHELLS = { sh = true, bash = true, zsh = true, dash = true, ksh = tr
 function M.repoGateReadCmd(commonDir, base)
   if type(commonDir) ~= "string" or commonDir == "" or type(base) ~= "string" or base == "" then return nil end
   local function sq(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
-  local G, ref = "git --git-dir=" .. sq(commonDir), "refs/heads/" .. base
+  local G, ref = M.GIT .. " --git-dir=" .. sq(commonDir), "refs/heads/" .. base
   return "if " .. G .. " rev-parse --verify -q " .. sq(ref .. "^{commit}") .. " >/dev/null 2>&1; then echo @@entry; "
     .. G .. " ls-tree " .. sq(ref) .. " -- " .. sq(M.REPO_GATE_FILE) .. " 2>/dev/null; echo @@script; "
     .. G .. " cat-file blob " .. sq(ref .. ":" .. M.REPO_GATE_FILE) .. " 2>/dev/null | head -c " .. (M.REPO_GATE_MAX_BYTES + 1)
@@ -2886,7 +2893,7 @@ end
 -- leftover markers clears them and one that doesn't touch them can't hide them.
 function M.mergeVerifyCmd(req)
   local function sq(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
-  local G = "git --git-dir=" .. sq(req.commonDir)
+  local G = M.GIT .. " --git-dir=" .. sq(req.commonDir)
   local sha, base = tostring(req.sha), req.base
   local log = G .. " reflog show --format='%H %gs' refs/heads/" .. base .. " -n 500 2>/dev/null"
   local parts = {
@@ -2896,7 +2903,7 @@ function M.mergeVerifyCmd(req)
   local root = M.mergeMainRoot(req)
   if root then
     parts[#parts + 1] = "echo @@maindirty"
-    parts[#parts + 1] = "{ git -C " .. sq(root) .. " status --porcelain --untracked-files=no 2>/dev/null || echo '?'; } | head -n 20"
+    parts[#parts + 1] = "{ " .. M.GIT .. " -C " .. sq(root) .. " status --porcelain --untracked-files=no 2>/dev/null || echo '?'; } | head -n 20"
   end
   parts[#parts + 1] = "echo @@markers"
   parts[#parts + 1] = "from=$(" .. log .. " | awk -v b=" .. tostring(req.branch)
@@ -3599,7 +3606,7 @@ do
   function M.redFirstPlanCmd(req, sha)
     if type(req) ~= "table" or type(req.commonDir) ~= "string" or req.commonDir == "" then return nil end
     if type(req.base) ~= "string" or req.base == "" or not hex(sha) then return nil end
-    local G, ref = "git --git-dir=" .. sq(req.commonDir), "refs/heads/" .. req.base
+    local G, ref = M.GIT .. " --git-dir=" .. sq(req.commonDir), "refs/heads/" .. req.base
     return table.concat({
       "echo @@mergebase", G .. " merge-base " .. sq(ref) .. " " .. sha .. " 2>/dev/null",
       "echo @@basetip", G .. " rev-parse --verify -q " .. sq(ref .. "^{commit}") .. " 2>/dev/null",
@@ -3634,7 +3641,7 @@ do
     if type(commonDir) ~= "string" or commonDir == "" or not hex(tip) or type(files) ~= "table" or #files == 0 then return nil end
     local q = {}
     for i, f in ipairs(files) do q[i] = sq(f) end
-    return "git --git-dir=" .. sq(commonDir) .. " --literal-pathspecs -c core.quotePath=false ls-tree -r --name-only "
+    return M.GIT .. " --git-dir=" .. sq(commonDir) .. " --literal-pathspecs -c core.quotePath=false ls-tree -r --name-only "
       .. tip .. " -- " .. table.concat(q, " ") .. " 2>/dev/null"
   end
   function M.redFirstAtBase(out, files)
@@ -3671,12 +3678,12 @@ do
     if not M.isRedFirstScratch(scratch) then return nil end
     local S = sq(scratch)
     if type(commonDir) == "string" and commonDir ~= "" then
-      local G = "git --git-dir=" .. sq(commonDir)
+      local G = M.GIT .. " --git-dir=" .. sq(commonDir)
       return G .. " worktree remove --force " .. S .. " >/dev/null 2>&1 || { rm -rf " .. S .. "; " .. G .. " worktree prune >/dev/null 2>&1; }"
     end
-    return "c=$(git -C " .. S .. " rev-parse --path-format=absolute --git-common-dir 2>/dev/null); "
-      .. "if [ -n \"$c\" ]; then git --git-dir=\"$c\" worktree remove --force " .. S .. " >/dev/null 2>&1 || { rm -rf " .. S
-      .. "; git --git-dir=\"$c\" worktree prune >/dev/null 2>&1; }; else rm -rf " .. S .. "; fi"
+    return "c=$(" .. M.GIT .. " -C " .. S .. " rev-parse --path-format=absolute --git-common-dir 2>/dev/null); "
+      .. "if [ -n \"$c\" ]; then " .. M.GIT .. " --git-dir=\"$c\" worktree remove --force " .. S .. " >/dev/null 2>&1 || { rm -rf " .. S
+      .. "; " .. M.GIT .. " --git-dir=\"$c\" worktree prune >/dev/null 2>&1; }; else rm -rf " .. S .. "; fi"
   end
 
   -- The run itself, for the gate lane (M.mergeGateCmd wraps it in `cd <main> ... > log 2>&1`):
@@ -3687,14 +3694,14 @@ do
     if type(spec) ~= "table" or type(spec.commonDir) ~= "string" or spec.commonDir == "" then return nil end
     if not M.isRedFirstScratch(spec.scratch) or not hex(spec.at) then return nil end
     if type(spec.command) ~= "string" or spec.command == "" then return nil end
-    local G, S = "git -c core.hooksPath=/dev/null --git-dir=" .. sq(spec.commonDir), sq(spec.scratch)
+    local G, S = M.GIT .. " -c core.hooksPath=/dev/null --git-dir=" .. sq(spec.commonDir), sq(spec.scratch)
     local setup = G .. " worktree add --detach " .. S .. " " .. spec.at .. " >/dev/null"
     local apply = type(spec.apply) == "table" and spec.apply or {}
     if #apply > 0 then
       if not hex(spec.applyFrom) then return nil end
       local q = {}
       for i, f in ipairs(apply) do q[i] = sq(f) end
-      setup = setup .. " && GIT_LITERAL_PATHSPECS=1 git -c core.hooksPath=/dev/null -C " .. S .. " checkout "
+      setup = setup .. " && GIT_LITERAL_PATHSPECS=1 " .. M.GIT .. " -c core.hooksPath=/dev/null -C " .. S .. " checkout "
         .. spec.applyFrom .. " -- " .. table.concat(q, " ") .. " >/dev/null"
     end
     local cleanup = M.redFirstCleanupCmd(spec.commonDir, spec.scratch)
@@ -3856,7 +3863,7 @@ do
   function M.gateBlamePlanCmd(req, sha)
     if type(req) ~= "table" or type(req.commonDir) ~= "string" or req.commonDir == "" then return nil end
     if type(req.base) ~= "string" or req.base == "" or not hex(sha) then return nil end
-    return "echo @@mergebase; git --git-dir=" .. sq(req.commonDir) .. " merge-base " .. sq("refs/heads/" .. req.base)
+    return "echo @@mergebase; " .. M.GIT .. " --git-dir=" .. sq(req.commonDir) .. " merge-base " .. sq("refs/heads/" .. req.base)
       .. " " .. sha .. " 2>/dev/null"
   end
   function M.gateBlamePlan(out)
@@ -4689,7 +4696,7 @@ end
 -- HEAD left main (or master) -- the diff is the working tree against that, uncommitted work
 -- included; untracked files are listed for the model to read.
 function M.verifyTargetCmd(dir)
-  local W = "git -C '" .. tostring(dir or ""):gsub("'", "'\\''") .. "'"
+  local W = M.GIT .. " -C '" .. tostring(dir or ""):gsub("'", "'\\''") .. "'"
   return table.concat({
     "echo @@root", W .. " rev-parse --show-toplevel 2>/dev/null",
     "echo @@common", W .. " rev-parse --path-format=absolute --git-common-dir 2>/dev/null",
@@ -4734,10 +4741,10 @@ function M.checkerDiffCmd(t)
   if t.range ~= nil then
     local base = tostring(t.range):match("^(.-)%.%.%.%x+$")
     if not base or not mergeRefOk(base) or type(t.commonDir) ~= "string" then return nil end
-    return "git --git-dir=" .. sq(t.commonDir) .. D .. t.range .. cut
+    return M.GIT .. " --git-dir=" .. sq(t.commonDir) .. D .. t.range .. cut
   end
   if type(t.dir) ~= "string" or type(t.from) ~= "string" or not t.from:match("^%x+$") then return nil end
-  return "git -C " .. sq(t.dir) .. D .. t.from .. cut
+  return M.GIT .. " -C " .. sq(t.dir) .. D .. t.from .. cut
 end
 
 -- The checker's prompt. The session's summary and test line are quoted as DATA: the reviewer is
@@ -5881,6 +5888,7 @@ M.RADAR_SHOW_FILES = 3       -- names a detail line lists before "and N more"
 -- no pairs) -- the main-moved notice reads them, and the last sibling left once a unit merges and
 -- its worktree goes would otherwise never hear that main moved.
 M.RADAR_SH = [=[
+export GIT_OPTIONAL_LOCKS=0
 cd "$1" 2>/dev/null || exit 3
 bh=$(git rev-parse -q --verify HEAD 2>/dev/null) || exit 4
 printf '@@base\t%s\t%s\n' "$(git symbolic-ref -q --short HEAD 2>/dev/null)" "$bh"
@@ -6242,6 +6250,7 @@ end
 -- and locale: procStart was written that way, and any other reads every live lock as a reused pid.
 -- A folder's section is numbered, so a path never has to survive the output.
 M.SCHED_LOCK_SH = [=[
+export GIT_OPTIONAL_LOCKS=0
 if [ -n "$1" ]; then echo @@ps; LC_ALL=C TZ=UTC ps -o pid=,lstart= -p "$1" 2>/dev/null; fi
 shift
 i=0
@@ -11364,6 +11373,7 @@ M.PACKET_RETRY_SECONDS = 30     -- a read that failed is tried again after this
 -- `/bin/sh -c SCRIPT sh <root> <path> <from> <to> ...`: every value is its own argv word, so
 -- nothing is quoted. The ranges are integers core.parseCite checked; a path follows `<sha>:`.
 M.PACKET_READ_SH = [[
+export GIT_OPTIONAL_LOCKS=0
 root=$1; shift
 cd "$root" 2>/dev/null || { echo "no folder $root" >&2; exit 3; }
 sha=$(git rev-parse --verify -q HEAD) || { echo "not a git checkout with a commit" >&2; exit 4; }
@@ -21140,7 +21150,7 @@ do
   -- CLAUDE.md as it was right before a commit (parent = true) or in it. Fails when the commit, or
   -- the file at that point, isn't there.
   function M.coachShowCmd(root, sha, parent)
-    return "git -C " .. sq(root) .. " show " .. sq((histSha(sha) or "0000000") .. (parent and "^" or "") .. ":" .. M.COACH_FILE)
+    return M.GIT .. " -C " .. sq(root) .. " show " .. sq((histSha(sha) or "0000000") .. (parent and "^" or "") .. ":" .. M.COACH_FILE)
   end
   local function splitLines(text)
     local lines = {}
@@ -21505,7 +21515,7 @@ do
   end
 
   -- git status of CLAUDE.md alone: any output = uncommitted edits (untracked included).
-  function M.coachDirtyCmd(root) return "git -C " .. sq(root) .. " status --porcelain -- " .. M.COACH_FILE .. " 2>/dev/null" end
+  function M.coachDirtyCmd(root) return M.GIT .. " -C " .. sq(root) .. " status --porcelain -- " .. M.COACH_FILE .. " 2>/dev/null" end
   function M.coachDirty(out) return type(out) == "string" and out:match("%S") ~= nil end
 
   -- The commit's message: plain, Adam's own -- the section and the why, nothing about who wrote it.
@@ -21528,12 +21538,12 @@ do
   -- if the commit is refused (a hook). Prints the new commit's sha.
   function M.coachCommitCmd(root, subject, body, isNew)
     local msg = "-m " .. sq(subject or "CLAUDE.md: update") .. ((type(body) == "string" and body ~= "") and (" -m " .. sq(body)) or "")
-    local cd = "cd " .. sq(root) .. " || exit 1; "
+    local cd, G = "cd " .. sq(root) .. " || exit 1; ", M.GIT
     if isNew then
-      return cd .. "git add -- " .. M.COACH_FILE .. " && { git commit -q " .. msg .. " -- " .. M.COACH_FILE
-        .. " || { git rm -q --cached -- " .. M.COACH_FILE .. " >/dev/null 2>&1; exit 1; }; } && git rev-parse HEAD"
+      return cd .. G .. " add -- " .. M.COACH_FILE .. " && { " .. G .. " commit -q " .. msg .. " -- " .. M.COACH_FILE
+        .. " || { " .. G .. " rm -q --cached -- " .. M.COACH_FILE .. " >/dev/null 2>&1; exit 1; }; } && " .. G .. " rev-parse HEAD"
     end
-    return cd .. "git commit -q " .. msg .. " -- " .. M.COACH_FILE .. " && git rev-parse HEAD"
+    return cd .. G .. " commit -q " .. msg .. " -- " .. M.COACH_FILE .. " && " .. G .. " rev-parse HEAD"
   end
 
   -- coach.day -> os.date's wday (1 = Sunday): mon..sun or their full names, or cron's 0-7.
@@ -23131,13 +23141,13 @@ end
 function M.mainGreenRun(run, branch)
   if type(run) ~= "string" or run == "" then return nil end
   if not mergeRefOk(branch) then branch = "main" end
-  local no, code = M.GATE_NORUN_TOKEN, M.TEST_LOCK_EXIT
-  return 'b=$(git symbolic-ref --short -q HEAD); '
+  local no, code, G = M.GATE_NORUN_TOKEN, M.TEST_LOCK_EXIT, M.GIT
+  return 'b=$(' .. G .. ' symbolic-ref --short -q HEAD); '
     .. '[ "$b" = "' .. branch .. '" ] || { echo "' .. no .. ': the main checkout is on ${b:-a detached HEAD}, not '
     .. branch .. '"; exit ' .. code .. '; }; '
-    .. '[ -z "$(git status --porcelain --untracked-files=no 2>/dev/null)" ] || { echo "' .. no
+    .. '[ -z "$(' .. G .. ' status --porcelain --untracked-files=no 2>/dev/null)" ] || { echo "' .. no
     .. ': the main checkout has uncommitted changes, so it is not ' .. branch .. '\'s commit under test"; exit ' .. code .. '; }; '
-    .. 'echo "' .. M.MAIN_GREEN_SHA_TAG .. ' $(git rev-parse HEAD)"; ' .. run
+    .. 'echo "' .. M.MAIN_GREEN_SHA_TAG .. ' $(' .. G .. ' rev-parse HEAD)"; ' .. run
 end
 
 -- The sha the run said it tested, or nil.
@@ -25111,16 +25121,16 @@ end
 -- folderScanShellCommand). `add` creates the variant's worktree+branch off `base`;
 -- `remove --force` drops a loser's worktree (its branch is left for you to delete/merge).
 function M.gitWorktreeAddCmd(repoRoot, worktreePath, branch, base)
-  return "git -C " .. shArg(repoRoot) .. " worktree add -b " .. shArg(branch)
+  return M.GIT .. " -C " .. shArg(repoRoot) .. " worktree add -b " .. shArg(branch)
     .. " " .. shArg(worktreePath) .. " " .. shArg(base or "HEAD")
 end
 function M.gitWorktreeRemoveCmd(repoRoot, worktreePath)
-  return "git -C " .. shArg(repoRoot) .. " worktree remove --force " .. shArg(worktreePath)
+  return M.GIT .. " -C " .. shArg(repoRoot) .. " worktree remove --force " .. shArg(worktreePath)
 end
 -- Delete a variant's branch (after its worktree is removed, which frees the branch).
 -- Used to leave NO trace on a rolled-back launch + to fully discard a loser on keep.
 function M.gitBranchDeleteCmd(repoRoot, branch)
-  return "git -C " .. shArg(repoRoot) .. " branch -D " .. shArg(branch)
+  return M.GIT .. " -C " .. shArg(repoRoot) .. " branch -D " .. shArg(branch)
 end
 
 -- Side-by-side comparison: rank the variants by DR4 run score (scored variants first,
