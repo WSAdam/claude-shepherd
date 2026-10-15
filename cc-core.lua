@@ -4465,8 +4465,9 @@ M.GRANT_WAIT_LABELS = {
   checkerHigh = "the checker reported a high-severity finding",
 }
 M.GRANT_HOOK_FILES = { ["settings-hooks.json"] = true, ["install.sh"] = true, ["uninstall.sh"] = true, SHIPPED = true }
+-- 2026-10-15: the repo's own .worktree-check is CI too -- it is the gate merge.repoGate runs.
 M.GRANT_CI_FILES = { [".gitlab-ci.yml"] = true, [".travis.yml"] = true, ["azure-pipelines.yml"] = true,
-                     Jenkinsfile = true, ["bitbucket-pipelines.yml"] = true }
+                     Jenkinsfile = true, ["bitbucket-pipelines.yml"] = true, [M.REPO_GATE_FILE] = true }
 M.GRANT_LOCKFILES = { ["deno.lock"] = true, ["package-lock.json"] = true, ["npm-shrinkwrap.json"] = true,
   ["yarn.lock"] = true, ["pnpm-lock.yaml"] = true, ["bun.lock"] = true, ["bun.lockb"] = true,
   ["Cargo.lock"] = true, ["Gemfile.lock"] = true, ["poetry.lock"] = true, ["Pipfile.lock"] = true,

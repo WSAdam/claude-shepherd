@@ -509,7 +509,8 @@ Merge click** when its diff:
 - **deletes** a tracked file (a rename doesn't count; renaming a risky file does);
 - touches **session instructions** (any `CLAUDE.md`, or `methodology/`), the **decision log**
   (`DECISIONS.md`) or the **shipped defaults** (`defaults/`);
-- touches **CI config** (`.github/`, `.gitlab-ci.yml`, `.circleci/` and the like), **migrations**
+- touches **CI config** (`.github/`, `.gitlab-ci.yml`, `.circleci/` and the like, and the repo's own
+  [`.worktree-check`](#a-repo-can-declare-its-own-gate)), **migrations**
   (a `migrations/`, `migration/` or `migrate/` folder at any depth), **lockfiles** (`deno.lock`, `package-lock.json`,
   `Cargo.lock` and the like) or **Claude settings** (`.claude/settings*`);
 - or the checker reported a **high-severity finding**, even on a pass.

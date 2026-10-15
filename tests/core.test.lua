@@ -15592,6 +15592,10 @@ do
   check("grant: defaults/ waits", says(risk({ F("M", "defaults/cc-config.json") }), "touches the shipped defaults: defaults/cc-config.json"))
   check("grant: CI config waits", says(risk({ F("A", ".github/workflows/ci.yml") }), "touches CI config: .github/workflows/ci.yml"))
   check("grant: ...other CI files too", says(risk({ F("M", ".gitlab-ci.yml") }), "touches CI config"))
+  -- 2026-10-15: pathCats had no entry for .worktree-check, so a unit could rewrite the gate merge.repoGate runs and merge on the grant unclicked
+  check("grant: a change to the repo's .worktree-check waits like a CI change",
+        says(risk({ F("M", ".worktree-check") }), "touches CI config: .worktree-check"))
+  check("grant: ...a nested .worktree-check is not the repo's gate", risk({ F("M", "demo/.worktree-check") }) == nil)
   check("grant: migrations wait", says(risk({ F("A", "db/migrations/0002_add.sql") }), "touches migrations: db/migrations/0002_add.sql"))
   check("grant: lockfiles wait", says(risk({ F("M", "deno.lock") }), "touches lockfiles: deno.lock"))
   check("grant: ...a nested lockfile too", says(risk({ F("M", "ui/package-lock.json") }), "ui/package-lock.json"))
