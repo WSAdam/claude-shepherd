@@ -163,7 +163,8 @@ ledger_decision() {
 # ---- Talk mode (build program unit 6, 2026-09-28) -------------------------
 # Before everything else, gate armed or not: a session in talk mode (the panel's toggle, the
 # flag file CC_TALK_DIR/<key>) can read and talk but not change anything. An Edit-family call
-# outside ~/.claude/ and the scratchpads (cc_talk_path_ok), or a Bash command that isn't
+# outside ~/.claude/ and the scratchpads or to Shepherd's control files there (cc_talk_path_ok,
+# 2026-10-15: cc-*, settings.json), or a Bash command that isn't
 # read-only (cc_cmd_readonly), is denied. Talk mode only ever denies: what it lets through goes
 # on to the always-ask layer and the gate below, so an always-ask command it lets through is
 # still held, and one it refuses is denied rather than held (deny wins). The first look is pure
@@ -177,7 +178,7 @@ if cc_talk_candidate "$INPUT"; then
   load_summary
   TALK_DENY=""
   case "$TOOL" in
-    Edit|Write|MultiEdit|NotebookEdit) cc_talk_path_ok "$SUMMARY" || TALK_DENY="an edit outside ~/.claude/ and the scratchpads" ;;
+    Edit|Write|MultiEdit|NotebookEdit) cc_talk_path_ok "$SUMMARY" || TALK_DENY="an edit outside ~/.claude/ and the scratchpads, or to Shepherd's control files" ;;
     Bash) cc_cmd_readonly "$SUMMARY" || TALK_DENY="a command that isn't read-only" ;;
   esac
   if [ -n "$TALK_DENY" ]; then

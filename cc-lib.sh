@@ -1559,14 +1559,29 @@ cc_talk_candidate() {
 }
 
 # May the Edit family write path $1 in talk mode? Only under ~/.claude/ (memory, plans) or in a
-# session's scratchpad (/private/tmp/claude-*/, also spelt /tmp/claude-*/), never through "..".
+# session's scratchpad (/private/tmp/claude-*/, also spelt /tmp/claude-*/), never through "..",
+# and never one of Shepherd's own control files there (_cc_talk_control, 2026-10-15).
 cc_talk_path_ok() {
   case "/$1/" in */../*) return 1 ;; esac
+  case "$1/" in *//*|*/./*) return 1 ;; esac           # ~/.claude//x and ~/.claude/./x are ~/.claude/x
   case "$1" in
-    "$HOME"/.claude/?*) return 0 ;;
+    "$HOME"/.claude/?*) _cc_talk_control "${1#"$HOME"/.claude/}" && return 1; return 0 ;;
     /private/tmp/claude-*/?*|/tmp/claude-*/?*) return 0 ;;
   esac
   return 1
+}
+
+# Is ~/.claude/$1 a file that sets a session's restrictions? Shepherd's whole cc-* namespace (its
+# config, cc-talk/, cc-policy/, cc-gate.enabled, the hook scripts and their state) and Claude Code's
+# settings.json / settings.local.json, which wire the hooks. Matched ignoring case: APFS does, so
+# Settings.JSON is settings.json.
+_cc_talk_control() {
+  local nc=0 r=1
+  shopt -q nocasematch && nc=1
+  shopt -s nocasematch
+  case "$1" in cc-*|settings.json|settings.local.json) r=0 ;; esac
+  [ "$nc" = 1 ] || shopt -u nocasematch
+  return "$r"
 }
 
 # Is this Bash command read-only? $1 = the command. The same parse as cc_always_ask_match
@@ -1827,8 +1842,9 @@ _cc_ro_upto() {   # move i past the next unescaped $1 in s; 1 when there is none
 }
 
 # git that only reads: status, log, diff, show and friends, and the listing forms of branch,
-# tag, stash, worktree, remote, reflog and config. -c (core.pager, diff.external) and
-# --output=<file> are not.
+# tag, stash, worktree, remote, reflog and config. -c (core.pager, diff.external),
+# --output=<file>, and an option that names a program to run (ls-remote --upload-pack, grep -O)
+# are not.
 _cc_ro_git() {
   local j=$((k + 1)) sub
   while [ "$j" -lt "$n" ]; do                        # git's own options come first
@@ -1844,11 +1860,15 @@ _cc_ro_git() {
   sub="${w[j]}"; j=$((j + 1))
   _cc_ro_no '--output --output=*' "$j" || return 1
   case "$sub" in
-    status|log|diff|show|blame|annotate|shortlog|describe|rev-parse|rev-list|ls-files|ls-tree|ls-remote|\
+    status|log|diff|show|blame|annotate|shortlog|describe|rev-parse|rev-list|ls-files|ls-tree|\
     cat-file|show-ref|for-each-ref|merge-base|name-rev|count-objects|check-ignore|check-attr|whatchanged|\
     diff-tree|diff-files|diff-index|range-diff|cherry|var|version|help|show-branch)
       return 0 ;;
-    grep) _cc_ro_no '-O* --open-files-in-pager*' "$j"; return $? ;;   # -O runs a pager command
+    # Programs these run (2026-10-15). git takes any unique abbreviation of a long option, and a
+    # short one anywhere in a cluster. ls-remote: --upload-pack, its hidden alias --exec, and -u
+    # in older gits (--u= and --exe= run it on 2.51). grep: -O / --open-files-in-pager (--op=).
+    ls-remote) _cc_ro_no '--u* --exe*' "$j" && _cc_ro_gitshort u o "$j"; return $? ;;
+    grep) _cc_ro_no '--op*' "$j" && _cc_ro_gitshort O ABCefm "$j"; return $? ;;
     branch) _cc_ro_listing "$j" dDmMcCuft l \
               '--delete* --move* --copy* --set-upstream* --unset-upstream --edit-description --force --track* --no-track --create-reflog --recurse-submodules'
             return $? ;;
@@ -1862,6 +1882,29 @@ _cc_ro_git() {
     config) _cc_ro_gitconfig "$j"; return $? ;;
   esac
   return 1
+}
+
+# git short options, read as git's parse-options does: 1 when a letter in $1 is set in any word
+# from w[$3] on. A letter in $2 takes a value (the rest of the word, else the next word), so
+# `git grep -eOops` searches for "Oops" and sets no -O.
+_cc_ro_gitshort() {
+  local j="$3" x i c
+  while [ "$j" -lt "$n" ]; do
+    x="${w[j]}"
+    case "$x" in
+      --*|-) ;;
+      -?*)
+        i=1
+        while [ "$i" -lt "${#x}" ]; do
+          c="${x:i:1}"
+          case "$1" in *"$c"*) return 1 ;; esac
+          case "$2" in *"$c"*) [ $((i + 1)) -lt "${#x}" ] || j=$((j + 1)); break ;; esac
+          i=$((i + 1))
+        done ;;
+    esac
+    j=$((j + 1))
+  done
+  return 0
 }
 
 # git branch / tag: only the listing forms. $1 its first word, $2 the short options that

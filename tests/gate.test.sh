@@ -1412,6 +1412,56 @@ touch "$TALK/tk4"
 ( CC_TALK_DIR="$TALK"; . "$ROOT/cc-lib.sh"; cc_remove tk4 ) >/dev/null 2>&1
 assert_absent "talk: cc_remove drops the talk-mode flag" "$TALK/tk4"
 
+# ---- talk mode: git options that run a command (2026-10-15) ---------------------------------
+# 2026-10-15: _cc_ro_git passed every `git ls-remote`, and --upload-pack runs the command it names
+# (so do its hidden alias --exec and any unique abbreviation, --u= or --exe=, checked on git 2.51);
+# grep's -O was caught only first in a cluster (-nO<cmd>) and only spelt in full (--op=<cmd> runs).
+rw 'git ls-remote --upload-pack="touch x" origin'
+rw "git ls-remote --upload-pack 'touch x' origin"
+rw "git ls-remote -u 'touch x' origin"
+rw "git ls-remote -qu'touch x' origin"
+rw 'git ls-remote --upload=x origin'
+rw 'git ls-remote --u=x origin'
+rw 'git ls-remote --exec=x origin'
+rw 'git ls-remote --exe x origin'
+rw 'git ls-remote -o v --upload-pack=x origin'
+rw 'git -C ../x ls-remote --upload-pack=x'
+rw "git ls-remote origin && git ls-remote --upload-pack='touch x' origin"
+rw "git grep -nO'touch x' foo"
+rw 'git grep -e foo -iOvim'
+rw 'git grep --op=vim foo'
+rw 'git grep --open=vim foo'
+ro 'git ls-remote origin'
+ro 'git ls-remote --tags --refs -q origin'
+ro 'git ls-remote --exit-code --symref origin main'
+ro 'git ls-remote -o v origin'
+ro 'git grep -eOops'
+ro 'git grep -e -Oops'
+ro 'git grep -n -C3 -e foo -- docs/'
+
+# ---- talk mode: Shepherd's own control files under ~/.claude/ (2026-10-15) ------------------
+# 2026-10-15: cc_talk_path_ok let a talk-mode session edit anything under ~/.claude/, so it could
+# Write cc-config.json, the gate flag, settings.json's hooks, or cc-lib.sh itself and switch its
+# own restrictions off. Shepherd's cc-* namespace and the two settings files are denied; the rest
+# of ~/.claude/ (memory, plans, projects, notes) stays writable. APFS ignores case, so Settings.JSON
+# is settings.json, and ~/.claude//x and ~/.claude/./x name ~/.claude/x.
+for f in cc-config.json cc-talk/tk1 cc-policy/bundle.json cc-gate.enabled settings.json \
+         settings.local.json cc-approve.sh cc-lib.sh cc-status/tk1.json; do
+  out="$(talk tk1 Write "{\"file_path\":\"$TH/.claude/$f\",\"content\":\"x\"}")"
+  assert_eq "talk: a Write to ~/.claude/$f is denied (Shepherd's control file)" "deny" "$(decision "$out")"
+done
+out="$(talk tk1 Edit "{\"file_path\":\"$TH/.claude/cc-config.json\",\"old_string\":\"a\",\"new_string\":\"b\"}")"
+assert_eq "talk: an Edit to ~/.claude/cc-config.json is denied" "deny" "$(decision "$out")"
+assert_eq "talk: ...with the talk-mode reason" "Talk mode: discussion only" "$(reason "$out")"
+for f in CC-Config.json Settings.JSON ./cc-config.json /settings.json cc-talk; do
+  out="$(talk tk1 Write "{\"file_path\":\"$TH/.claude/$f\",\"content\":\"x\"}")"
+  assert_eq "talk: another spelling, ~/.claude/$f, is denied too" "deny" "$(decision "$out")"
+done
+for f in plans/plan.md projects/p/memory/cc-notes.md projects/p/settings.json notes.md; do
+  out="$(talk tk1 Write "{\"file_path\":\"$TH/.claude/$f\",\"content\":\"x\"}")"
+  assert_eq "talk: a Write to ~/.claude/$f still goes on" "" "$out"
+done
+
 # ---- worktree fence (build program unit 7, 2026-09-28) ---------------------------------------
 # With gate.fence on, a session can't change a sibling worktree of its own repo: one with the same
 # git common dir and a different toplevel. The main checkout is a sibling of a linked worktree, but

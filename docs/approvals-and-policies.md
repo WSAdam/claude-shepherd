@@ -165,8 +165,11 @@ and it goes away when the session ends. A remote (SSH bridge) tile can't use it.
 While it is on, whether or not the gate is armed:
 
 - **Edits are denied** (Edit, Write, MultiEdit, NotebookEdit) unless the file is under `~/.claude/`
-  (memory, plans) or in a session scratchpad (`/private/tmp/claude-*/`). A path that climbs out with
-  `..` is denied.
+  (memory, plans, projects, notes) or in a session scratchpad (`/private/tmp/claude-*/`). A path
+  that climbs out with `..` is denied. So are the files under `~/.claude/` that set a session's
+  restrictions: Shepherd's whole `cc-*` namespace (`cc-config.json`, `cc-talk/`, `cc-policy/`,
+  `cc-gate.enabled`, the hook scripts and their state) and `settings.json` /
+  `settings.local.json`, in any case (`Settings.JSON`) or spelling (`~/.claude/./x`, `~/.claude//x`).
 - **Shell commands that aren't read-only are denied.** Every command in the line has to be a reader:
   `ls`, `cat`, `head`, `tail`, `wc`, `grep`, `rg`, `find` (without `-exec` or `-delete`), `sed -n`
   (without `-i` or a `w` / `e` command), `jq`, `sort` and `uniq` (not writing a file), `diff`, `stat`,
@@ -177,8 +180,10 @@ While it is on, whether or not the gate is armed:
   `find … | xargs grep …`, `bash -c "…"` and `$(…)` are judged by what runs in them.
 - **Not read-only:** a redirection to a file (`> notes.txt`, `2> err.log`, `&> out`; `/dev/null` and
   `2>&1` are fine), anything unknown (`make`, `npm test`, `./script.sh`, `$EDITOR`, `eval`, `sudo`),
-  `git -c …` and `--output=<file>`, and a variable that makes a reader run something
-  (`GIT_EXTERNAL_DIFF=…`, `PAGER=…`).
+  `git -c …` and `--output=<file>`, a git option that names a program to run (`git ls-remote
+  --upload-pack=…`, its alias `--exec`, `-u`; `git grep -O…` / `--open-files-in-pager`, in any
+  abbreviation or short-option cluster git accepts), and a variable that makes a reader run
+  something (`GIT_EXTERNAL_DIFF=…`, `PAGER=…`).
 - The denial reads **"Talk mode: discussion only"**, and the audit ledger records it as
   `outcome: "deny"`, `by: "talk"`. Turning talk mode on or off is a `talk_toggle` event.
 
