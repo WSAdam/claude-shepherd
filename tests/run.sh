@@ -334,6 +334,9 @@ echo ""
 echo "== lua: handoff notes -- written on the done edge, left for a respawn, pruned after 14 days (behavioral, stubbed hs + git) =="
 HOME="$(mktemp -d)" lua "$DIR/handoff.test.lua" || fail=1
 echo ""
+echo "== lua: an agent profile's policy bundle -- left by its spawn, taken by the session at SessionStart into the files the card's Policy dropdown writes (behavioral, stubbed hs + the real hook) =="
+HOME="$(mktemp -d)" lua "$DIR/profile-policy.test.lua" || fail=1
+echo ""
 echo "== bash: the session mailbox -- a message handed over at the turn end or the next start, once (cc-status.sh) =="
 bash "$DIR/mailbox.test.sh" || fail=1
 echo ""

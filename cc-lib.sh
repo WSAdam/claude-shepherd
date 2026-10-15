@@ -2094,6 +2094,55 @@ _cc_handoff_pending() { # $1 key, $2 cwd
   done
 }
 
+# 2026-10-15: a spawn from an agent profile naming a policy bundle leaves {bundle, policy} beside a
+# respawn's note, under the same id (FX.writePendingPolicy, core.pendingPolicy). The session that
+# starts there takes it once and gets the bundle as if Adam had picked it from its card: the choice
+# (CC_POLICY_OVERRIDE_DIR/<key>, which the panel re-resolves every tick) and the rules the gate reads
+# (CC_POLICY_DIR/<key>) from its first tool call. Shorter-lived than a note: a session starts within
+# a minute of its spawn, so one left longer belongs to a launch that never came -- and a bundle (an
+# autopilot one, say) must not land on a session Adam started there himself. Prints nothing: stdout
+# is the session's context.
+CC_PENDING_POLICY_MAX_AGE=600
+cc_take_pending_policy() { # $1 key, $2 cwd
+  [ -z "${CC_SHEPHERD_INTERNAL:-}" ] || return 0   # Shepherd's own runs take nothing
+  local key="$1" cwd="$2" lin id f claim m now name rules
+  [ -n "$key" ] && cc_have_jq || return 0
+  lin="$(cc_read_field "$key" '.budget_lineage')"
+  set -- "cwd-$(cc_hash "$cwd")"
+  [ -z "$lin" ] || set -- "lineage-$(cc_hash "$lin")" "$@"
+  now="$(cc_now)"
+  for id in "$@"; do
+    f="$CC_NOTES_DIR/pending/$id.policy.json"
+    [ -f "$f" ] || continue
+    claim="$f.claim.$$"
+    mv "$f" "$claim" 2>/dev/null || continue   # another session took it first
+    m="$(cc_mtime "$claim")"
+    case "$m" in ''|*[!0-9]*) m=0 ;; esac
+    if [ $(( now - m )) -gt "$CC_PENDING_POLICY_MAX_AGE" ]; then
+      rm -f "$claim"
+      echo "[cc-lib] ⚠️ dropped a stale policy bundle ($id): no session started within 10 minutes of its spawn" >&2
+      continue
+    fi
+    name="$(jq -r '.bundle // empty | strings' "$claim" 2>/dev/null)"
+    rules="$(jq -c '.policy // empty | objects' "$claim" 2>/dev/null)"
+    rm -f "$claim"
+    if [ -z "$name" ] || [ -z "$rules" ]; then
+      echo "[cc-lib] ❌ dropped an unreadable policy bundle ($id)" >&2
+      return 0
+    fi
+    mkdir -p "$CC_POLICY_OVERRIDE_DIR" "$CC_POLICY_DIR" 2>/dev/null
+    # the choice first, so a tick that sees the rules also sees why they're there (atomic, like the panel)
+    printf '%s' "$name" > "$CC_POLICY_OVERRIDE_DIR/$key.tmp.$$" \
+      && mv -f "$CC_POLICY_OVERRIDE_DIR/$key.tmp.$$" "$CC_POLICY_OVERRIDE_DIR/$key" \
+      && printf '%s' "$rules" > "$CC_POLICY_DIR/$key.tmp.$$" \
+      && mv -f "$CC_POLICY_DIR/$key.tmp.$$" "$CC_POLICY_DIR/$key" \
+      || { rm -f "$CC_POLICY_OVERRIDE_DIR/$key.tmp.$$" "$CC_POLICY_DIR/$key.tmp.$$"
+           echo "[cc-lib] ❌ couldn't apply policy bundle '$name' to $key" >&2; return 0; }
+    echo "[cc-lib] ✅ applied policy bundle '$name' to the session its profile spawned ($key, $id)" >&2
+    return 0
+  done
+}
+
 # ---- The session mailbox (build program unit 11a, 2026-09-29) -------------------------------
 # Shepherd hands a session a message without typing into its window: FX.mailboxSend leaves it in
 # CC_INBOX_DIR/<key>/ as <epoch>-<seq>-<nonce>.msg, a JSON body {"nonce","text",...} written

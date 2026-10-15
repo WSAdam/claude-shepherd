@@ -1699,6 +1699,25 @@ function FX.writePendingHandoff(deadKey, editor, lineage, project)
   print("[cc-dashboard] ✅ handoff note left for the respawn of " .. deadKey .. ": " .. path)
   return path
 end
+-- 2026-10-15: a spawn from an agent profile naming a policy bundle leaves it beside the note, under
+-- the same id: core.pendingPolicy (the choice + the rules the card would write). The session that
+-- starts there takes it once at SessionStart (cc_take_pending_policy) and gets the bundle as if it
+-- were picked from its card. Returns the pending file's path, or nil when there is no bundle.
+function FX.writePendingPolicy(cfg, editor, lineage, project, name)
+  local pend = core.pendingPolicy(cfg, name)
+  if not pend then return nil end
+  if not core.policyBundle(cfg, pend.bundle) then
+    print("[cc-dashboard] ⚠️ policy bundle '" .. pend.bundle .. "' isn't in the config -- the session gets the fleet's rules under that name")
+  end
+  pcall(function() hs.fs.mkdir(FX.NOTES_DIR) end)
+  local path = FX.NOTES_DIR .. "/pending/" .. core.pendingNoteId(editor, lineage, project) .. ".policy.json"
+  if not FX.writeFileAtomic(path, core.json.encode(pend)) then
+    print("[cc-dashboard] ❌ couldn't leave policy bundle '" .. pend.bundle .. "' for the session spawning in " .. tostring(project))
+    return nil
+  end
+  print("[cc-dashboard] ✅ policy bundle '" .. pend.bundle .. "' left for the session spawning in " .. tostring(project) .. ": " .. path)
+  return path
+end
 -- Notes and pending notes older than 14 days (core.notesToPrune). At startup, then hourly.
 function FX.pruneNotes(now)
   FX._notesPrunedAt = now or FX.now()
@@ -12201,11 +12220,24 @@ function FX.spawnSession(editor, project, task, permissionMode, providerId, agen
     local okh, p = pcall(FX.writePendingHandoff, agentOpts.except, editor, lineage, project)
     handoff = okh and p or nil
   end
+  -- 2026-10-15: a profile's policy bundle (agentOpts.policyBundle) goes the same way: left before
+  -- the launch for the new session's SessionStart, whose key isn't known until then.
+  -- An ssh spawn's hook runs on its own host and the panel never resolves a remote session's
+  -- policy, so nothing is left here for it.
+  local pendPolicy = nil
+  local wantPolicy = type(agentOpts) == "table" and tostring(agentOpts.policyBundle or ""):match("%S") ~= nil
+  if wantPolicy and isSshProfile then
+    print("[cc-orch] ⚠️ policy bundle '" .. tostring(agentOpts.policyBundle) .. "' not applied: a session on an ssh host reads its own host's policy")
+  elseif wantPolicy then
+    local okp, p = pcall(FX.writePendingPolicy, cfg, editor, lineage, project, agentOpts.policyBundle)
+    pendPolicy = okp and p or nil
+  end
   if spec.kind == "kitty" then
     -- R3-02: a nil argv means spawnSpec fail-closed (e.g. invalid ssh dest). Abort
     -- and log instead of crashing on table.concat / indexing a nil argv.
     if not spec.argv then
       if handoff then os.remove(handoff) end
+      if pendPolicy then os.remove(pendPolicy) end
       print("[cc-orch] kitty spawn aborted: " .. tostring(spec.error))
       pcall(function() FX.alert("Claude Shepherd: kitty spawn aborted (" .. tostring(spec.error) .. ")") end)
       return false
@@ -14772,8 +14804,10 @@ local function handleBridgeMsg(msg)
           for _, s in ipairs(profile.skills) do cmds[#cmds + 1] = core.skillCommand(s) or s end
           persona = (persona and (persona .. "\n") or "") .. "Skills available to you: " .. table.concat(cmds, ", ")
         end
+        -- 2026-10-15: and its policy bundle, which FX.spawnSession leaves for the session it starts
         agentOpts = { appendSystemPrompt = persona, mcpConfigPath = mcpPath, strictMcp = false,
-                      agentName = res.agentName, addDirs = res.addDirs, pluginDirs = res.pluginDirs }
+                      agentName = res.agentName, addDirs = res.addDirs, pluginDirs = res.pluginDirs,
+                      policyBundle = res.policyBundle }
         if (not task or task == "") and res.seedPrompt then task = res.seedPrompt end
         FX.appendLedger({ type = "spawn_agent", name = profile.name, cwd = dir, by = "agent" })
         -- record lastSpawnedAt for the registry's "last used" sort
@@ -15294,10 +15328,8 @@ local function handleBridgeMsg(msg)
         local resolved = core.resolvePolicy(cfg,
           { project = it and it.projectKey, projectKey = it and it.projectKey,
             group = it and it.group, providerId = prov and prov.id or nil, key = key }, name)
-        if resolved.source ~= "fleet" then
-          local t = { autoAllow = resolved.autoAllow,
-            autoDeny = resolved.autoDeny, bundle = resolved.bundle }
-          if resolved.autopilot then t.autopilot = true end  -- bundle auto-approve (cc-approve reads .autopilot)
+        local t = core.policyFileFor(resolved)
+        if t then
           local enc = core.json.encode(t)
           FX.writeResolvedPolicy(key, enc); policyCache[key] = enc
         else
@@ -30584,10 +30616,8 @@ function FX._refreshBody()
             (ovr and ovr ~= "") and ovr or nil)
           it.policy_override = ovr
           it.policy_bundle = resolved.bundle
-          if resolved.source ~= "fleet" then
-            local t = { autoAllow = resolved.autoAllow,
-              autoDeny = resolved.autoDeny, bundle = resolved.bundle }
-            if resolved.autopilot then t.autopilot = true end  -- bundle auto-approve (cc-approve reads .autopilot)
+          local t = core.policyFileFor(resolved)
+          if t then
             local enc = core.json.encode(t)
             if policyCache[it.key] ~= enc then
               FX.writeResolvedPolicy(it.key, enc); policyCache[it.key] = enc

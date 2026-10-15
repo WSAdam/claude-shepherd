@@ -181,7 +181,7 @@ Everything lives under `~/.claude/`:
 | `cc-pins/` | [Pinned links](controls.md#pinned-links), one file per worktree |
 | `cc-talk/` | One flag file per session in [talk mode](approvals-and-policies.md#talk-mode) |
 | `cc-resume/` | [Resumes waiting for a usage limit's reset](automation.md#resume-at-the-limit-reset): the hook's arm, Shepherd's plan, a Cancel |
-| `cc-notes/` | [Handoff notes](automation.md#handoff-notes), and [auto-compact](automation.md#auto-compact-with-notes)'s due-ats and each session's own notes |
+| `cc-notes/` | [Handoff notes](automation.md#handoff-notes), and [auto-compact](automation.md#auto-compact-with-notes)'s due-ats and each session's own notes; `pending/` also holds an [agent profile](providers-and-integrations.md#agent-profiles)'s policy bundle until the session it spawned takes it |
 | `cc-bridge/` | The tab bridge's per-window tab lists and command folders |
 | `cc-lease/` | [Worktree leases](fleet.md#worktree-leases): each repo's leased ports and database paths, and (by default) the databases in `db/` |
 | `cc-restart.json` | The [restart snapshot](fleet.md#restart-the-fleet-in-place): every session Shepherd could reopen, and the ones it already did (Shepherd is its only writer) |

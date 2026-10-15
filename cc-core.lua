@@ -22398,6 +22398,26 @@ function M.resolvePolicy(cfg, session, override)
   }
 end
 
+-- The per-session file the gate reads (~/.claude/cc-policy/<key>) for a resolvePolicy result, or
+-- nil when the fleet's own rules apply (no file: the gate reads the config). One shape for every
+-- writer: the card's Policy dropdown, the tick, and a spawn from a profile (pendingPolicy). Pure.
+function M.policyFileFor(resolved)
+  if type(resolved) ~= "table" or resolved.source == "fleet" then return nil end
+  local t = { autoAllow = resolved.autoAllow, autoDeny = resolved.autoDeny, bundle = resolved.bundle }
+  if resolved.autopilot then t.autopilot = true end  -- bundle auto-approve (cc-approve reads .autopilot)
+  return t
+end
+
+-- 2026-10-15: what a spawn from an agent profile naming a bundle leaves for the session it starts
+-- (FX.writePendingPolicy -> cc-notes/pending/<pendingNoteId>.policy.json, taken at SessionStart by
+-- cc_take_pending_policy): the choice, as the card's dropdown saves it, and the rules resolved for it
+-- -- a chosen bundle wins over attachments, so they need no session context. nil when no bundle. Pure.
+function M.pendingPolicy(cfg, name)
+  name = agTrim(name)
+  if name == "" then return nil end
+  return { bundle = name, policy = M.policyFileFor(M.resolvePolicy(cfg, {}, name)) }
+end
+
 -- The always-ask commands built into cc_always_ask_match (cc-lib.sh), in Adam's order: the
 -- rule label the matcher reports, and a command it holds under that label. Settings lists the
 -- labels read-only; tests/gate.test.sh runs every example through the matcher, so the two

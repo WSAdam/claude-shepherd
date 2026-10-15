@@ -16466,5 +16466,41 @@ do
   check("git-locks: the matcher needs a run to pass", not unlocked("echo nothing here --git-dir"))
 end
 
+-- ---- An agent profile's policyBundle is applied at spawn (2026-10-15) ----
+-- 2026-10-15: core.resolveAgent resolved profile.policyBundle, but nothing used it: a session spawned
+-- from a profile naming a bundle started with none. The spawn now leaves core.pendingPolicy for the
+-- session that starts (tests/profile-policy.test.lua); its rules are core.policyFileFor, the same
+-- file the card's Policy dropdown and the tick write.
+do
+  local cfg = core.json.decode([[{
+    "policies": {
+      "patterns": { "autoAllow": ["Read"], "autoDeny": ["Bash(rm*)"] },
+      "bundles": { "trusted": { "autoDeny": ["Write"], "autopilot": true }, "plain": { "autoAllow": ["Grep"] } },
+      "attachments": [ { "match": { "project": "*" }, "bundle": "plain" } ]
+    }
+  }]])
+  eq("policyFileFor: the fleet's own rules write no file", core.policyFileFor(core.resolvePolicy({}, {}, nil)), nil)
+  local file = core.policyFileFor(core.resolvePolicy(cfg, { project = "x" }, "trusted"))
+  eq("policyFileFor: names the bundle", file and file.bundle, "trusted")
+  eq("policyFileFor: its deny rules first, then the fleet's", file and table.concat(file.autoDeny, "|"), "Write|Bash(rm*)")
+  eq("policyFileFor: the fleet's allow rules", file and table.concat(file.autoAllow, "|"), "Read")
+  eq("policyFileFor: autopilot when the bundle has it", file and file.autopilot, true)
+  local att = core.policyFileFor(core.resolvePolicy(cfg, { project = "x" }, nil))
+  eq("policyFileFor: an attachment's bundle writes a file too", att and att.bundle, "plain")
+  eq("policyFileFor: no autopilot key when the bundle hasn't one", att and att.autopilot, nil)
+  eq("policyFileFor: nothing resolved, nothing written", core.policyFileFor(nil), nil)
+
+  local pend = core.pendingPolicy(cfg, "trusted")
+  eq("pendingPolicy: carries the choice", pend and pend.bundle, "trusted")
+  check("pendingPolicy: and the rules the card would write for it",
+        pend and core.json.encode(pend.policy) == core.json.encode(core.policyFileFor(core.resolvePolicy(cfg, {}, "trusted"))))
+  eq("pendingPolicy: the choice wins over an attachment", pend and pend.policy.bundle, "trusted")
+  eq("pendingPolicy: trims the name", (core.pendingPolicy(cfg, "  trusted ") or {}).bundle, "trusted")
+  eq("pendingPolicy: no bundle named, nothing pending", core.pendingPolicy(cfg, nil), nil)
+  eq("pendingPolicy: a blank name is no bundle", core.pendingPolicy(cfg, "  "), nil)
+  eq("pendingPolicy: a bundle the config lacks is still the choice, as on a card",
+     (core.pendingPolicy(cfg, "gone") or {}).bundle, "gone")
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

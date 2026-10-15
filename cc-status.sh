@@ -630,6 +630,8 @@ fi
 # stdout. Printed once, last, after the status file is written: the parts read this session's
 # identity (claude pid, kitty lineage) from it.
 if [ "$EVENT" = "sessionstart" ]; then
+  # 2026-10-15: a fresh session takes the policy bundle its agent profile's spawn left for it (silent)
+  [ "$(cc_get "$INPUT" '.source')" != startup ] || cc_take_pending_policy "$KEY" "$CWD"
   cc_session_context "$(cc_get "$INPUT" '.source')" "$KEY" "$CWD"
 fi
 

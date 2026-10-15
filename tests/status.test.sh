@@ -540,6 +540,38 @@ assert_eq "an internal run is told nothing" "" "$got"
 assert_eq "...and leaves the note" "yes" "$([ -f "$NOTES/pending/cwd-$H.md" ] && echo yes || echo no)"
 rm -f "$NOTES/pending/cwd-$H.md"
 
+# ---- an agent profile's policy bundle, taken at SessionStart (2026-10-15) ----
+# 2026-10-15: a session spawned from a profile naming a bundle started with none (the spawn never
+# used it). The spawn leaves {bundle, policy} under the note's id; the session that starts takes it
+# into the two files the card's Policy dropdown writes (tests/profile-policy.test.lua runs the spawn).
+POLO="$TMP/cc-policy-override"; POLR="$TMP/cc-policy"
+evpol() { printf '%s' "$2" | CC_POLICY_DIR="$POLR" CC_POLICY_OVERRIDE_DIR="$POLO" CLAUDE_CODE_ENTRYPOINT=claude-vscode bash "$CC" "$1" 2>/dev/null; }
+PEND='{"bundle":"no-bash","policy":{"autoAllow":[],"autoDeny":["Bash"],"bundle":"no-bash"}}'
+printf '%s' "$PEND" > "$NOTES/pending/cwd-$H.policy.json"
+got="$(CC_SHEPHERD_INTERNAL=1 evpol sessionstart "{\"session_id\":\"intpol\",\"cwd\":\"$PCWD\",\"source\":\"startup\"}")"
+assert_absent "an internal run takes no spawn's policy bundle" "$POLO/intpol"
+got="$(evpol sessionstart "{\"session_id\":\"pol1\",\"cwd\":\"$PCWD\",\"source\":\"startup\"}")"
+assert_eq "a fresh session takes the bundle its spawn left: the choice" "no-bash" "$(cat "$POLO/pol1" 2>/dev/null)"
+assert_json "...and the rules the gate reads" "$POLR/pol1" '.autoDeny[0]' "Bash"
+assert_eq "...printing nothing into its context" "" "$got"
+assert_absent "...and the bundle is taken" "$NOTES/pending/cwd-$H.policy.json"
+assert_eq "...leaving no temp or claim file" "pol1|pol1" "$(ls "$POLO" | tr '\n' '|')$(ls "$POLR" | tr -d '\n')"
+# a kitty spawn's is found by its lineage, before its folder's
+printf '%s' "$PEND" > "$NOTES/pending/lineage-$(hash_of "$LIN").policy.json"
+seed kpol "{\"session_id\":\"kpol\",\"budget_lineage\":\"$LIN\"}"
+evpol sessionstart "{\"session_id\":\"kpol\",\"cwd\":\"/elsewhere\",\"source\":\"startup\"}" >/dev/null
+assert_eq "a kitty session takes the bundle left under its lineage" "no-bash" "$(cat "$POLO/kpol" 2>/dev/null)"
+# an unreadable one is dropped, never half-applied
+printf 'not json' > "$NOTES/pending/cwd-$H.policy.json"
+evpol sessionstart "{\"session_id\":\"badpol\",\"cwd\":\"$PCWD\",\"source\":\"startup\"}" >/dev/null
+assert_absent "an unreadable bundle applies no choice" "$POLO/badpol"
+assert_absent "...and no rules" "$POLR/badpol"
+assert_absent "...and is dropped" "$NOTES/pending/cwd-$H.policy.json"
+# SessionEnd reaps the session's two files, as for a bundle picked on its card
+evpol sessionend "{\"session_id\":\"pol1\",\"cwd\":\"$PCWD\"}" >/dev/null
+assert_absent "SessionEnd reaps the taken choice" "$POLO/pol1"
+assert_absent "...and its rules" "$POLR/pol1"
+
 # the cap: the context is labelled per part and never longer than CC_CONTEXT_MAX
 awk 'BEGIN { for (i = 0; i < 400; i++) print "line " i " of a very long handoff note, padded out to fifty chars" }' > "$NOTES/pending/cwd-$H.md"
 got="$(evout sessionstart "{\"session_id\":\"big1\",\"cwd\":\"$PCWD\",\"source\":\"startup\"}")"

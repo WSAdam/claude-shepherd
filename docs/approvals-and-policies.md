@@ -304,7 +304,9 @@ When a bundle is attached, its rules apply **even if `patterns.enabled` is false
 opt-in). The bundle's lists are added to the fleet patterns, or *replace* them if the bundle sets
 `"disableGlobal": true`. The panel resolves each session (precedence: the per-session **Policy**
 dropdown, then an attachment, then the fleet), writes the result to `~/.claude/cc-policy/<key>`, and
-the gate reads it. Removing an attachment tears its enforcement down within a tick. The starter
+the gate reads it. A session spawned from an [agent profile](providers-and-integrations.md#agent-profiles)
+that names a bundle starts with that bundle chosen in its dropdown. Removing an attachment tears its
+enforcement down within a tick. The starter
 bundles are **read-only**, **no-bash** and **no-network**. They are `autoDeny` rules, not an
 allow-list, and like every policy they only act on the tools in `gate.tools`.
 
