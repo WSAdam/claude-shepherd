@@ -937,7 +937,9 @@ cc_ledger_append() {
 # that mentions rm -rf are left alone, while `cd x && git push`, `git -C dir push`,
 # `sh -c "..."`, the sudo/env/time/nohup/command/exec/xargs/find -exec/trap wrappers and
 # `rm -r -f` are held. A held word behind eval, $VAR, $(...) or a heredoc that never ends is
-# held as "hidden command". KEEP THE RULE LABELS IN SYNC with core.ALWAYS_ASK_BUILTINS
+# held as "hidden command". A held word spelled through quoting (`git p"ush"`, `r'm' -rf`,
+# `pu\sh`) is one word to bash, so it is one to every look here too (2026-10-15).
+# KEEP THE RULE LABELS IN SYNC with core.ALWAYS_ASK_BUILTINS
 # (Settings lists them; tests/gate.test.sh runs each example through here).
 # Runs under macOS /bin/bash 3.2 with set -u: every array expansion is guarded.
 CC_AA_WORDS='push|rm|reset|clean|branch|worktree|checkout|publish|release|merge'
@@ -952,6 +954,43 @@ _CC_SC_OUT=""   # output redirections that write a file (talk mode reads it), on
 _CC_SC_OUTAT=() # ...and for each, the index in _CC_SC_CMD of the command it belongs to (the fence)
 _CC_AA_KWRE=""; _CC_AA_ASSIGNS=""
 
+# Quote-split held words (2026-10-15): bash joins p"ush", r'm', pu\sh and pu\<newline>sh into one
+# word, so the keyword looks also try each held word with quotes, backslashes and line
+# continuations allowed between its letters. A second regex, never a ${s//...} rewrite: bash 3.2
+# took over two minutes to strip the quotes from a 56KB command, and this runs on every tool call.
+_CC_AA_QSEP=$'(["\'\\\\]|\\\\\n)*'         # between letters in shell text: " ' \ or \<newline>
+_CC_AA_QSEP_JSON='(["'"'"'\\]|\\n)*'      # ...in the hook's JSON: \" ' \\ and \\\n
+_CC_AA_QCH='["'"'"'\\]'                   # a text with none of these can't spell one that way
+_CC_AA_KWREQ=""; _CC_AA_QWORDS=""; _CC_AA_QLOOSE=""; _CC_AA_QOUT=""
+
+# Words joined by | (a dot escaped as \.) -> the same alternation with $2 between the letters of
+# each word, in _CC_AA_QOUT.
+_cc_aa_qre() {
+  local in="$1" sep="$2" out="" c i=0 n=${#1}
+  while [ "$i" -lt "$n" ]; do
+    c="${in:i:1}"
+    if [ "$c" = '\' ]; then i=$((i + 1)); c="$c${in:i:1}"; fi
+    out="$out$c"; i=$((i + 1))
+    [ "$c" = '|' ] && continue
+    case "${in:i:1}" in ''|'|') ;; *) out="$out$sep" ;; esac
+  done
+  _CC_AA_QOUT="$out"
+}
+
+# Does a held word show in $1, plainly or spelled through quoting? (cc_always_ask_match sets the
+# words; the quote-split regex is built the first time a text needs it.)
+_cc_aa_kw() {
+  [[ $1 =~ $_CC_AA_KWRE ]] && return 0
+  [[ $1 =~ $_CC_AA_QCH ]] || return 1
+  if [ -z "$_CC_AA_KWREQ" ]; then
+    local w
+    _cc_aa_qre "$_CC_AA_QWORDS" "$_CC_AA_QSEP"; w="$_CC_AA_QOUT"
+    _cc_aa_qre "$_CC_AA_QLOOSE" "$_CC_AA_QSEP"
+    _CC_AA_KWREQ="(^|[^[:alnum:]_])($w)([^[:alnum:]_]|\$)$_CC_AA_QOUT"
+  fi
+  [[ $1 =~ $_CC_AA_KWREQ ]]
+}
+
 # The pure-bash first look (this hook runs for every tool call): 0 when the always-ask layer
 # must read the request. Only a Bash call qualifies, and only when its JSON carries a held
 # word or a config / session policy file may name extra patterns. $1 = the hook's JSON.
@@ -960,6 +999,11 @@ cc_always_ask_candidate() {
   [[ $1 =~ $re ]] || return 1
   re="(^|[^[:alnum:]_]|\\\\[nrt])($CC_AA_WORDS)([^[:alnum:]_]|\$)"   # \n \t: JSON escapes
   [[ $1 =~ $re ]] && return 0
+  if [[ $1 =~ $_CC_AA_QCH ]]; then                                     # `git p\"ush\"`, `r'm' -rf`
+    _cc_aa_qre "$CC_AA_WORDS" "$_CC_AA_QSEP_JSON"
+    re="(^|[^[:alnum:]_]|\\\\[nrt])($_CC_AA_QOUT)([^[:alnum:]_]|\$)"
+    [[ $1 =~ $re ]] && return 0
+  fi
   cc_always_ask_names_extras "$CC_CONFIG_FILE" && return 0
   re='"session_id"[[:space:]]*:[[:space:]]*"([^"]*)"'
   if [[ $1 =~ $re ]] && [ -n "${BASH_REMATCH[1]}" ]; then
@@ -1010,7 +1054,8 @@ cc_always_ask_match() {
   # a hidden command is held only when one shows in its own words or an assignment.
   _CC_AA_KWRE="(^|[^[:alnum:]_])($words)([^[:alnum:]_]|\$)$loose"
   [ "$all" = 1 ] && _CC_AA_KWRE='.'
-  [[ $cmd =~ $_CC_AA_KWRE ]] || return 1
+  _CC_AA_KWREQ=""; _CC_AA_QWORDS="$words"; _CC_AA_QLOOSE="$loose"
+  _cc_aa_kw "$cmd" || return 1
   _CC_AA_ASSIGNS=""
   _cc_aa_text "$cmd" 0
 }
@@ -1246,7 +1291,7 @@ _cc_aa_text() {
     w=("${_CC_AA_W[@]}")
     _cc_aa_cmd "$depth" "${ins[k]}" "${w[@]}" && return 0
   done
-  if [ -n "$bad" ] && [[ $bad =~ $_CC_AA_KWRE ]]; then CC_AA_RULE="hidden command"; return 0; fi
+  if [ -n "$bad" ] && _cc_aa_kw "$bad"; then CC_AA_RULE="hidden command"; return 0; fi
   return 1
 }
 
@@ -1375,7 +1420,7 @@ _cc_aa_cmd() {
 }
 
 _cc_aa_hidden() {   # $1 = where a hidden held word would show
-  [[ $1 =~ $_CC_AA_KWRE ]] || return 1
+  _cc_aa_kw "$1" || return 1
   CC_AA_RULE="hidden command"
 }
 

@@ -1040,6 +1040,35 @@ free "$(printf 'cat <<EOF > notes.md\ngit push\nrm -rf /\nEOF')"
 free "$(printf 'git commit -m "$(cat <<'"'"'EOF'"'"'\nDon'"'"'t push: merge branch, then reset --hard later (rm -rf tmp)\nEOF\n)"')"
 free 'terraform plan' 'terraform apply'
 
+# ---- quote-split spellings (2026-10-15) ----
+# 2026-10-15: the cheap keyword look read the raw text, so p"ush" and r"m" -- which bash joins
+# into push and rm -- never reached the parser, and `git p"ush"` ran without a click.
+held 'git p"ush" origin main' 'git push'
+held 'r"m" -rf build' 'rm -rf'
+held "r'm' -rf build" 'rm -rf'
+held 'git pu\sh' 'git push'
+held "git p'u'\"sh\"" 'git push'
+held "$(printf 'git pu\\\nsh')" 'git push'
+held 'cd x && git p"ush"' 'git push'
+held 'git re"set" --hard' 'git reset --hard'
+held 'n"pm" pub"lish"' 'publish'
+held 'gh pr mer"ge" 12' 'gh pr merge'
+held 'git $(echo p"ush")' 'hidden command'
+held 'CMD="git p\"ush\""; eval "$CMD"' 'hidden command'
+held "$(printf 'cat <<EOF\ngit p"ush"')" 'hidden command'
+held 'terraform app"ly" -auto-approve' 'terraform apply' 'terraform apply'
+# near misses: quoting that bash joins into another word, or a held word that is only text
+free 'echo git p"ush"'
+free 'git commit -m "p\"ush\" later"'
+free "git commit -m 'r\"m\" -rf build'"
+free 'git p"ush"-hooks'
+free 'git "pu"shy'
+free 'git p"ull"'
+free 'r"m" -r dir'
+free "r'm'dir old"
+free "printf '%s' p\"ush\""
+free 'terraform pl"an"' 'terraform apply'
+
 # the rules Settings lists (core.ALWAYS_ASK_BUILTINS) are the ones the matcher holds, by label
 lua - "$ROOT/cc-core.lua" > "$TMP/aa-builtins.txt" 2>/dev/null <<'LUA'
 local core = dofile(arg[1])
@@ -1189,6 +1218,25 @@ base="$(spycount "$TMP/aa-base.json")"
 assert_eq "always-ask: an empty extras list spawns no extra jq" "$base" "$(spycount "$TMP/aa-emptyx.json")"
 assert_eq "always-ask: ...while a real one is read (control)" "yes" \
   "$([ "$(spycount "$TMP/aa-somex.json")" -gt "$base" ] && echo yes || echo no)"
+
+# 2026-10-15: the hook's first look read the JSON for a plain held word, so a quote-split one
+# (`git p"ush"`, `r"m" -rf`) never reached the matcher -- it has to see through the quoting too
+rm -f "$HB"
+out="$(aa_req aaq1 'git p\"ush\" origin main' | CC_GATE_FLAG="$AA_NOFLAG" bash "$APP" 2>/dev/null)"
+assert_eq "always-ask: a quote-split git push gives ask (gate unarmed)" "ask" "$(decision "$out")"
+out="$(aa_req aaq2 'r\"m\" -rf build' | CC_GATE_FLAG="$AA_NOFLAG" bash "$APP" 2>/dev/null)"
+assert_eq "always-ask: a quote-split rm -rf gives ask (gate unarmed)" "ask" "$(decision "$out")"
+out="$(aa_req aaq3 "r'm' -rf build" | CC_GATE_FLAG="$AA_NOFLAG" bash "$APP" 2>/dev/null)"
+assert_eq "always-ask: a single-quote-split rm -rf gives ask (gate unarmed)" "ask" "$(decision "$out")"
+out="$(aa_req aaq4 'git pu\\sh' | CC_GATE_FLAG="$AA_NOFLAG" bash "$APP" 2>/dev/null)"
+assert_eq "always-ask: a backslash-split git push gives ask (gate unarmed)" "ask" "$(decision "$out")"
+out="$(aa_req aaq5 'git add .\ngit pu\\\nsh' | CC_GATE_FLAG="$AA_NOFLAG" bash "$APP" 2>/dev/null)"
+assert_eq "always-ask: a line-continued git push gives ask (gate unarmed)" "ask" "$(decision "$out")"
+out="$(aa_req aaq6 'echo \"git p\\\"ush\\\"\"' | CC_GATE_FLAG="$AA_NOFLAG" bash "$APP" 2>/dev/null)"
+assert_eq "always-ask: a quote-split held word that is only text stays untouched" "" "$out"
+rm -f "$SPY/calls"
+aa_req aaq7 'ls \"a b\" '"'c'"' d\\ e' | PATH="$SPY:$PATH" CC_GATE_FLAG="$AA_NOFLAG" CC_CONFIG_FILE="$TMP/none.json" bash "$APP" >/dev/null 2>&1
+assert_eq "always-ask: a quoted Bash command with no held word spawns no jq" "0" "$(grep -c . "$SPY/calls" 2>/dev/null || echo 0)"
 
 # ---- talk mode (build program unit 6, 2026-09-28) ------------------------------------------
 # A session in talk mode (~/.claude/cc-talk/<key>, the panel's toggle) can read and talk but not

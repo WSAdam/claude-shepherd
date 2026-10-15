@@ -250,7 +250,8 @@ esac
 # ---- Always ask (build program unit 5, 2026-09-28) ------------------------
 # Before the gate-flag exit: an always-ask command is held whether or not the gate is armed.
 # This hook runs for every tool call, so cc_always_ask_candidate looks first in pure bash:
-# only a Bash call whose JSON carries a held word (or with extras configured) reads further.
+# only a Bash call whose JSON carries a held word, plain or quote-split (`git p"ush"`), or with
+# extras configured, reads further.
 # Extras: the fleet's policies.alwaysAsk.patterns plus the session's bundle alwaysAsk (the
 # resolved policy file). A bundle can add to the list, never take from it.
 ALWAYS_ASK=""
