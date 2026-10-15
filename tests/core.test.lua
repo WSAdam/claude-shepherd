@@ -16502,5 +16502,21 @@ do
      (core.pendingPolicy(cfg, "gone") or {}).bundle, "gone")
 end
 
+-- ---- A policy bundle's own alwaysAsk reaches the gate (2026-10-15) ----
+do
+  -- 2026-10-15: policyFileFor wrote autoAllow/autoDeny/bundle/autopilot but dropped resolvePolicy's
+  -- alwaysAsk, and cc-approve.sh reads the bundle's extra always-ask commands only from that file.
+  local cfg = core.json.decode([[{
+    "policies": { "bundles": { "k8s": { "alwaysAsk": ["kubectl delete", "terraform apply"] }, "plain": { "autoAllow": ["Grep"] } } }
+  }]])
+  local file = core.policyFileFor(core.resolvePolicy(cfg, {}, "k8s"))
+  eq("a bundle's alwaysAsk commands are in the file the gate reads",
+     file and type(file.alwaysAsk) == "table" and table.concat(file.alwaysAsk, "|") or nil, "kubectl delete|terraform apply")
+  eq("...and in what a spawn from a profile naming it leaves",
+     table.concat((((core.pendingPolicy(cfg, "k8s") or {}).policy or {}).alwaysAsk) or {}, "|"), "kubectl delete|terraform apply")
+  local plain = core.policyFileFor(core.resolvePolicy(cfg, {}, "plain"))
+  eq("a bundle with no alwaysAsk writes no alwaysAsk key", plain and plain.alwaysAsk, nil)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

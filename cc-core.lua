@@ -22405,6 +22405,8 @@ function M.policyFileFor(resolved)
   if type(resolved) ~= "table" or resolved.source == "fleet" then return nil end
   local t = { autoAllow = resolved.autoAllow, autoDeny = resolved.autoDeny, bundle = resolved.bundle }
   if resolved.autopilot then t.autopilot = true end  -- bundle auto-approve (cc-approve reads .autopilot)
+  -- the bundle's extra always-ask commands: cc-approve.sh reads .alwaysAsk from this file only
+  if type(resolved.alwaysAsk) == "table" and #resolved.alwaysAsk > 0 then t.alwaysAsk = resolved.alwaysAsk end
   return t
 end
 
