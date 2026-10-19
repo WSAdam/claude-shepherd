@@ -1286,6 +1286,31 @@ done
 assert_eq "always-ask: the hook never segfaults on a quote-split command (400 fresh runs)" "0" "$crashes"
 assert_eq "always-ask: ...and answers ask every time" "0" "$noanswer"
 
+# ---- the gate's wait ends by the clock (2026-10-19) ----
+# 2026-10-19: the wait counted GATE_TIMEOUT*4 polls of `sleep 0.25`, and each poll costs more than a
+# quarter second (sleep is a process, every 4th poll a jq), so 120s ran past Claude Code's 130s hook
+# timeout. The killed hook never disarmed and the card kept a dead Approve. A slowed sleep (1s a
+# poll) makes the overrun plain: GATE_TIMEOUT=2 used to wait 8 polls = 8s+.
+SLOW="$TMP/slowsleep"; mkdir -p "$SLOW"
+printf '#!/bin/sh\n/bin/sleep 1\n' > "$SLOW/sleep"; chmod +x "$SLOW/sleep"
+had_flag=0; [ -f "$FLAG" ] && had_flag=1          # the sections after this one rely on both as they were
+had_hb=0; [ -f "$HB" ] && { had_hb=1; cp -p "$HB" "$TMP/hb.saved"; }
+date +%s > "$HB"; touch "$FLAG"
+t0=$SECONDS
+out="$(printf '%s' "$GATED" | PATH="$SLOW:$PATH" CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=2 \
+  bash "$APP" 2>/dev/null)"
+el=$(( SECONDS - t0 ))
+assert_eq "gate: a slow poll can't stretch the wait past its timeout (GATE_TIMEOUT=2 took ${el}s)" "yes" \
+  "$([ "$el" -le 5 ] && echo yes || echo no)"
+assert_eq "gate: ...and it still disarms (no gate left waiting)" "none" "$(jq -r '.gate // "none"' "$TMP/g1.json" 2>/dev/null)"
+[ "$had_flag" = 1 ] || rm -f "$FLAG"
+if [ "$had_hb" = 1 ]; then mv "$TMP/hb.saved" "$HB"; else rm -f "$HB"; fi
+# the hook's timeout in the shipped wiring leaves room for the wait plus start-up and teardown
+HT="$(jq -r '.hooks.PreToolUse[] | .hooks[] | select(.command | test("cc-approve.sh")) | .timeout' "$ROOT/settings-hooks.json" 2>/dev/null | head -1)"
+GT="$(sed -n 's/^GATE_TIMEOUT="\${CC_GATE_TIMEOUT:-\([0-9]*\)}"$/\1/p' "$APP")"
+assert_eq "gate: Claude Code's hook timeout ($HT s) outlasts the wait ($GT s + 1) by 8s or more" "yes" \
+  "$([ -n "$HT" ] && [ -n "$GT" ] && [ "$HT" -ge $(( GT + 1 + 8 )) ] && echo yes || echo no)"
+
 # ---- talk mode (build program unit 6, 2026-09-28) ------------------------------------------
 # A session in talk mode (~/.claude/cc-talk/<key>, the panel's toggle) can read and talk but not
 # change anything: the Edit family is denied outside ~/.claude/ and the scratchpads

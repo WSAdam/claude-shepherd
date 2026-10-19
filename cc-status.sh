@@ -474,6 +474,20 @@ GATE_GUARDED=""
 case "$EVENT" in
   pretooluse|posttooluse|posttoolusefailure|userpromptsubmit|stop|stopfailure|permissionrequest) GATE_GUARDED="1" ;;
 esac
+# A gate whose waiter is gone shields nothing (2026-10-19). cc-approve.sh's nonce is "<its pid>.<start>",
+# and only that process tears the gate down. When Claude Code killed it at the hook timeout, every later
+# event kept the shield: the tile sat on a dead "Wants: ... Approve" through the tool's end, the turn's
+# Stop and Adam's next prompt. The clear happens INSIDE the merge pass below, and only while the file
+# still carries that same nonce, so a fresh arming by a live waiter is never touched. Unknown nonce
+# shapes stay guarded.
+DEAD_GATE=""
+if [ -n "$GATE_GUARDED" ]; then
+  DG_NONCE="$(cc_read_field "$KEY" '.gate_nonce')"
+  if [[ $DG_NONCE =~ ^([0-9]+)\.[0-9]+$ ]] && ! kill -0 "${BASH_REMATCH[1]}" 2>/dev/null \
+     && ! ps -p "${BASH_REMATCH[1]}" >/dev/null 2>&1; then
+    DEAD_GATE="$DG_NONCE"
+  fi
+fi
 
 # The NATIVE permission prompt (gate not armed -- the default install) needs the
 # same shielding: once permissionrequest publishes {status:approval, pending}, a
@@ -541,7 +555,11 @@ esac
 MF="$(cc_file "$KEY")"
 MTMP="${MF}.tmp.$$"
 MERGE_JQ='
-   (if ($gg != "" and .gate == "waiting")
+   (if $dead != "" and .gate_nonce == $dead then
+      del(.gate, .gate_nonce)
+      | (if (.pending | type) == "object" and .pending.nonce == $dead then del(.pending) | .status = "working" else . end)
+    else . end)
+   | (if ($gg != "" and .gate == "waiting")
       or ($ng != "" and .status == "approval" and (.pending | type) == "object") then
      # a live approval owns status/since/pending; only refresh the rest
      . * ($patch | del(.status, .since, .pending))
@@ -556,7 +574,7 @@ while :; do
   [ -n "$CUR" ] || CUR='{}'
   if printf '%s' "$CUR" | jq -c \
        --argjson patch "$PATCH" \
-       --arg gg "$GATE_GUARDED" --arg ng "$NATIVE_GUARDED" \
+       --arg gg "$GATE_GUARDED" --arg ng "$NATIVE_GUARDED" --arg dead "$DEAD_GATE" \
        --arg setp "$SET_PENDING" --arg clrp "$CLEAR_PENDING" --arg clre "$CLEAR_ERROR" \
        "$MERGE_JQ" > "$MTMP" 2>/dev/null; then
     :
@@ -570,7 +588,7 @@ while :; do
   # the file first, the next iteration merges into it instead of clobbering it.
   elif printf '{}' | jq -c \
        --argjson patch "$PATCH" \
-       --arg gg "$GATE_GUARDED" --arg ng "$NATIVE_GUARDED" \
+       --arg gg "$GATE_GUARDED" --arg ng "$NATIVE_GUARDED" --arg dead "$DEAD_GATE" \
        --arg setp "$SET_PENDING" --arg clrp "$CLEAR_PENDING" --arg clre "$CLEAR_ERROR" \
        "$MERGE_JQ" > "$MTMP" 2>/dev/null; then
     :

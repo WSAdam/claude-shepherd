@@ -700,4 +700,35 @@ assert_eq "a repo whose path holds a control character is never named" "" "$got"
 case " $CC_CONTEXT_PARTS " in *" onpurpose "*) r=yes ;; *) r="no: $CC_CONTEXT_PARTS" ;; esac
 assert_eq "onpurpose is one of the context's parts" "yes" "$r"
 
+# ---- a gate whose waiting hook is gone heals (2026-10-19) ----
+# 2026-10-19: cc-approve.sh's wait overran Claude Code's 130s hook timeout, the killed hook never
+# disarmed, and every later event -- the tool's end, the turn's Stop, Adam's next prompt -- kept the
+# gate=="waiting" shield, so the card sat on a dead "Wants: ... Approve" for 22 minutes. The gate's
+# nonce is "<waiter pid>.<start>": a gate whose waiter is gone no longer shields anything.
+bash -c 'exit 0' & DEADPID=$!; wait "$DEADPID" 2>/dev/null
+DK="gdead"; DF="$TMP/$DK.json"
+seed_dead() {
+  printf '{"session_id":"%s","name":"p","cwd":"/p","status":"approval","updated":1792442471,"since":1792442471,"gate":"waiting","gate_nonce":"%s.1792442471","pending":{"tool":"Bash","summary":"sleep 4; git push origin main","message":"sleep 4; git push origin main","nonce":"%s.1792442471","alwaysAsk":"git push"}}\n' \
+    "$DK" "$DEADPID" "$DEADPID" > "$DF"
+}
+seed_dead
+ev userpromptsubmit "{\"session_id\":\"$DK\",\"cwd\":\"/p\",\"prompt\":\"are you still working?\"}"
+assert_json "a dead waiter's gate: Adam's next prompt reads working" "$DF" '.status' "working"
+assert_json "...the dead gate is gone" "$DF" '.gate // "none"' "none"
+assert_json "...and its nonce" "$DF" '.gate_nonce // "none"' "none"
+assert_json "...and its Approve block" "$DF" '.pending // "none"' "none"
+seed_dead
+ev stop "{\"session_id\":\"$DK\",\"cwd\":\"/p\"}"
+assert_json "a dead waiter's gate: the turn's Stop reads done" "$DF" '.status' "done"
+assert_json "...and drops the gate" "$DF" '.gate // "none"' "none"
+seed_dead
+ev posttooluse "{\"session_id\":\"$DK\",\"cwd\":\"/p\",\"tool_name\":\"Read\",\"tool_input\":{}}"
+assert_json "a dead waiter's gate: a later tool's end lifts the approval" "$DF" '.status' "working"
+# a LIVE waiter (this shell) still owns the tile, as before
+printf '{"session_id":"%s","name":"p","cwd":"/p","status":"approval","updated":1,"since":1,"gate":"waiting","gate_nonce":"%s.1","pending":{"tool":"Bash","summary":"x","nonce":"%s.1"}}\n' \
+  "$DK" "$$" "$$" > "$DF"
+ev userpromptsubmit "{\"session_id\":\"$DK\",\"cwd\":\"/p\",\"prompt\":\"hi\"}"
+assert_json "a live waiter's gate still holds the approval" "$DF" '.status' "approval"
+assert_json "...and its gate" "$DF" '.gate' "waiting"
+
 finish

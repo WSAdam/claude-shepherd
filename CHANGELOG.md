@@ -25,6 +25,14 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
   nothing turned off WebKit's elastic overscroll, so a trackpad scroll past the top could leave the
   page pulled down while it re-rendered mid-bounce. The page no longer bounces past its edges
   (`overscroll-behavior:none`). Adam: "what's with this weird gap at the top?"
+- Fixed: **a card stuck on a dead "Wants: … Approve".** The gate's wait counted 480 polls of
+  `sleep 0.25` instead of the clock; each poll costs more than that (`sleep` is a process, every
+  fourth one runs `jq`), so the 120s wait plus start-up ran past Claude Code's 130s hook timeout.
+  The killed hook never disarmed, and `cc-status.sh` kept honouring its `gate:"waiting"` on every
+  later event: the tool's end, the turn's Stop, Adam's next prompt. His Approve 22 minutes later
+  answered nobody. Adam: "are you still working? i saw the wants me to click approve and i clicked
+  it but i don't see any forward progress". The wait now also ends by the clock (`GATE_TIMEOUT` + 1),
+  and a gate whose waiter process is gone (its nonce is `<pid>.<start>`) no longer shields the tile.
 
 ## 2026-10-15 — Logged bugs fixed
 

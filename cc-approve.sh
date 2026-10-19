@@ -494,10 +494,15 @@ take_note() {
 }
 
 ITERS=$(( GATE_TIMEOUT * 4 ))
+# 2026-10-19: the wall clock bounds the wait too. ITERS alone assumed a poll costs 0.25s, but `sleep`
+# is a process and every 4th poll runs jq, so 120s of polls ran past Claude Code's 130s hook timeout
+# (settings-hooks.json): the killed hook never reached the teardown below and the tile kept a dead
+# Approve. SECONDS is whole seconds, so +1 keeps a short wait from ending up to a second early.
+DEADLINE=$(( SECONDS + GATE_TIMEOUT + 1 ))
 DECISION=""
 PARKED=0
 i=0
-while [ "$i" -lt "$ITERS" ]; do
+while [ "$i" -lt "$ITERS" ] && [ "$SECONDS" -lt "$DEADLINE" ]; do
   if [ -f "$DECISION_FILE" ] && mv "$DECISION_FILE" "$CLAIM" 2>/dev/null; then
     VERB=""; RNONCE=""
     read -r VERB RNONCE _ < "$CLAIM" 2>/dev/null || true
