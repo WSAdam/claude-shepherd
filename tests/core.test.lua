@@ -5857,10 +5857,20 @@ do
   check("todo parse: duplicate ORs done ([ ] then [x])", p[1].done == true)
   p = core.parseTodoFile("- [x] dup\n- [ ] dup\n")
   check("todo parse: duplicate ORs done ([x] then [ ])", p[1].done == true)
-  -- caps: 500 entries, 500 chars of text
+  -- caps: core.TODO_MAX_ITEMS entries, 500 chars of text.
+  -- REQUIREMENT CHANGE 2026-10-19: the entry cap was 500 and kept the first 500 lines, but TODO.md is
+  -- append-only, so every line after a file's 500th never reached My List (tests/worklist-cap.test.lua).
   local big = {}
   for i = 1, 501 do big[i] = "- [ ] item " .. i end
-  eq("todo parse: entry cap 500", #core.parseTodoFile(table.concat(big, "\n")), 500)
+  local bp = core.parseTodoFile(table.concat(big, "\n"))
+  eq("todo parse: a 501-line file imports every line", #bp, 501)
+  eq("todo parse: ...the 501st included", bp[501] and bp[501].text, "item 501")
+  check("todo parse: the entry cap is far past any real TODO.md", (tonumber(core.TODO_MAX_ITEMS) or 0) >= 10000)
+  big = {}
+  for i = 1, core.TODO_MAX_ITEMS + 2 do big[i] = "- [ ] item " .. i end
+  bp = core.parseTodoFile(table.concat(big, "\n"))
+  eq("todo parse: past the cap the list stops at it", #bp, core.TODO_MAX_ITEMS)
+  eq("todo parse: ...and says how many lines it left out", bp.dropped, 2)
   p = core.parseTodoFile("- [ ] " .. string.rep("z", 600) .. "\n")
   eq("todo parse: text truncated to 500", #p[1].text, 500)
   eq("todo parse: nil -> empty", #core.parseTodoFile(nil), 0)

@@ -18863,7 +18863,11 @@ end
 -- Extract checkbox lines: `- [ ] text` / `- [x] text` (also * / + bullets,
 -- indent, [X], CRLF). Non-checkbox lines are ignored. Exact-duplicate texts
 -- collapse to the first occurrence with their done flags OR'd (any [x] copy
--- counts as the claim). Text capped at 500 chars, list at 500 entries. Pure.
+-- counts as the claim). Text capped at 500 chars, list at M.TODO_MAX_ITEMS entries
+-- (out.dropped counts the lines past it, for the importer's log). Pure.
+-- 2026-10-19: the list cap was 500, keeping the first 500. TODO.md is append-only (a line keeps its
+-- place forever), so each file that passed 500 items stopped feeding My List: every new line was
+-- dropped here, silently. The cap now only guards against a runaway file.
 -- Needs live run (build program unit 37, 2026-09-29): `- [~] text` is a third state -- only a
 -- live run can check it, so it is NEVER done -- and a `(needs live run)` / `(live check)` marker
 -- (any case) flags a `[ ]` or `[x]` line the same way. Either sets liveRun = true, OR'd across
@@ -18872,6 +18876,7 @@ end
 -- My List lanes (2026-10-13): the `[~]` box token alone also sets wait = true (the work is in and
 -- only the live run is left, so the item belongs in To verify). A marker on a `[ ]` line is still
 -- unfinished work and does not wait. OR'd across duplicates; nil when false, like liveRun.
+M.TODO_MAX_ITEMS = 10000
 function M.parseTodoFile(content)
   local out = {}
   if type(content) ~= "string" or content == "" then return out end
@@ -18892,10 +18897,12 @@ function M.parseTodoFile(content)
           e.done = e.done or done
           if live then e.liveRun = true end
           if wait then e.wait = true end
-        elseif #out < 500 then
+        elseif #out < M.TODO_MAX_ITEMS then
           e = { text = text, done = done, liveRun = live or nil, wait = wait or nil }
           out[#out + 1] = e
           byText[text] = e
+        else
+          out.dropped = (out.dropped or 0) + 1
         end
       end
     end

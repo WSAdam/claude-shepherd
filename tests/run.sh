@@ -266,6 +266,7 @@ HOME="$(mktemp -d)" lua "$DIR/worklist-review.test.lua" || fail=1
 echo ""
 echo "== lua: My List re-reads every enrolled TODO.md once when the parser learns a fact ([~] -> fileWait), never again (behavioral, stubbed hs) =="
 HOME="$(mktemp -d)" lua "$DIR/worklist-parserev.test.lua" || fail=1
+HOME="$(mktemp -d)" lua "$DIR/worklist-cap.test.lua" || fail=1
 echo ""
 echo "== lua: My List -- a check-off doesn't re-decode the whole store (behavioral, stubbed hs) =="
 HOME="$(mktemp -d)" lua "$DIR/worklist-perf.test.lua" || fail=1

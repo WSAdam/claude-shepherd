@@ -3441,6 +3441,14 @@ function FX.todoParsedAt(root)
   local fp = FX.auditFindingsPath(root)
   return core.parseTodoAndFindings(FX.readFile(root .. "/TODO.md"), fp and FX.readFile(fp) or nil)
 end
+-- A file past core.TODO_MAX_ITEMS is never silent again (2026-10-19: a cap of 500 hid 170 lines for
+-- a week). The import calls this on every root it parsed.
+function FX.todoWarnDropped(root, parsed)
+  if type(parsed) == "table" and parsed.dropped then
+    FX.log("[cc-dashboard] ⚠️ My List: " .. tostring(root) .. "/TODO.md has more than " .. core.TODO_MAX_ITEMS
+      .. " items; " .. parsed.dropped .. " line(s) past that were not imported")
+  end
+end
 -- Does a root have anything to import (the Import button's gate)?
 function FX.todoFileAt(root)
   for _, p in ipairs(FX.todoWatchPaths(root)) do if FX.fileExists(p) then return true end end
@@ -3544,6 +3552,7 @@ function FX.todoImportProjects(entries, stArg)
       for _, rt in ipairs(e.roots) do
         if rt.isMain then mainRoot = rt.root end
         local parsed = FX.todoParsedAt(rt.root)   -- TODO.md + the root's audit findings
+        FX.todoWarnDropped(rt.root, parsed)
         if parsed then
           sources[#sources + 1] = { root = rt.root, branch = rt.branch, isMain = rt.isMain, parsed = parsed }
         end
@@ -3572,6 +3581,7 @@ function FX.todoImportProjects(entries, stArg)
       local meta = (st.todoMeta or {})[key]
       local root = FX.todoRoot(e.cwd) or (type(meta) == "table" and meta.cwd or nil)
       local parsed = root and FX.todoParsedAt(root) or nil   -- TODO.md + the root's audit findings
+      FX.todoWarnDropped(root, parsed)
       if not parsed then
         r.skipped = r.skipped + 1
       else
@@ -3632,7 +3642,9 @@ end
 -- re-reads a file whose mtime moved, so an item imported by an older build would keep the old shape
 -- until its file next changed. Once per rev (hs.settings "ccTodoParseRev") every watched path is
 -- marked unseen, so the loop below re-imports each enrolled tab one time. The import is idempotent.
-FX.TODO_PARSE_REV = 1
+-- Rev 2 (2026-10-19): the parser reads past a file's 500th line (core.TODO_MAX_ITEMS), so the lines
+-- every TODO.md that had passed 500 dropped reach My List without the file having to change.
+FX.TODO_PARSE_REV = 2
 function FX.todoAutoSyncTick(list)
   if FX._todoWatch == nil then FX.todoRebuildWatch(FX.readWorklist()) end
   if (tonumber(hs.settings.get("ccTodoParseRev")) or 0) < FX.TODO_PARSE_REV then
