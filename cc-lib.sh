@@ -958,13 +958,18 @@ _CC_AA_KWRE=""; _CC_AA_ASSIGNS=""
 # word, so the keyword looks also try each held word with quotes, backslashes and line
 # continuations allowed between its letters. A second regex, never a ${s//...} rewrite: bash 3.2
 # took over two minutes to strip the quotes from a 56KB command, and this runs on every tool call.
-_CC_AA_QSEP=$'(["\'\\\\]|\\\\\n|\\$["\'])*'         # between letters in shell text: " ' \ \<newline> $' $"
-_CC_AA_QSEP_JSON='(["'"'"'\\]|\\n|\$\\?["'"'"'])*'  # ...in the hook's JSON: \" ' \\ \\\n $' $\"
+_CC_AA_QSEP=$'(["\'\\\\]|\\\\\n)*'         # between letters in shell text: " ' \ or \<newline>
+_CC_AA_QSEP_JSON='(["'"'"'\\]|\\n)*'      # ...in the hook's JSON: \" ' \\ and \\\n
 _CC_AA_QCH='["'"'"'\\]'                   # a text with none of these can't spell one that way
-# 2026-10-15: an escape inside $'...' can spell any letter (git $'p\x75sh' is git push), so no
-# keyword look on the raw text can rule it out: a text with one always goes to the parser, which
-# decodes it (_cc_sc_ansic). Matches the shell text and the hook's JSON alike.
-_CC_AA_ANSIC_RE=$'\\$\'[^\']*\\\\'
+# $'...' and $"..." (2026-10-15): an escape inside $'...' can spell any letter (git $'p\x75sh' is
+# git push) and either quote can split a word (r$'m', r$"m"), so no keyword look on the raw text can
+# rule them out: a text with either always goes to the parser, which decodes them (_cc_sc_ansic,
+# _cc_sc_dquote). Matches the shell text and the hook's JSON ($\") alike.
+# 2026-10-19: NOT by adding $' $" to the separators above. That regex is one alternation between every
+# letter of every held word, and the bigger one made macOS bash 3.2 segfault inside [[ =~ ]] in ~1.5%
+# of hook runs: the hook died, and the command ran with no always-ask hold and no gate. Keep the
+# separators exactly as they are (tests/gate.test.sh pins them and stress-runs the hook).
+_CC_AA_DOLQ_RE='\$\\?["'"'"']'
 _CC_AA_KWREQ=""; _CC_AA_QWORDS=""; _CC_AA_QLOOSE=""; _CC_AA_QOUT=""
 
 # Words joined by | (a dot escaped as \.) -> the same alternation with $2 between the letters of
@@ -1008,7 +1013,7 @@ cc_always_ask_candidate() {
     re="(^|[^[:alnum:]_]|\\\\[nrt])($_CC_AA_QOUT)([^[:alnum:]_]|\$)"
     [[ $1 =~ $re ]] && return 0
   fi
-  [[ $1 =~ $_CC_AA_ANSIC_RE ]] && return 0                            # `git $'p\x75sh'`
+  [[ $1 =~ $_CC_AA_DOLQ_RE ]] && return 0                             # `git $'p\x75sh'`, `r$"m"`
   cc_always_ask_names_extras "$CC_CONFIG_FILE" && return 0
   re='"session_id"[[:space:]]*:[[:space:]]*"([^"]*)"'
   if [[ $1 =~ $re ]] && [ -n "${BASH_REMATCH[1]}" ]; then
@@ -1060,7 +1065,7 @@ cc_always_ask_match() {
   _CC_AA_KWRE="(^|[^[:alnum:]_])($words)([^[:alnum:]_]|\$)$loose"
   [ "$all" = 1 ] && _CC_AA_KWRE='.'
   _CC_AA_KWREQ=""; _CC_AA_QWORDS="$words"; _CC_AA_QLOOSE="$loose"
-  _cc_aa_kw "$cmd" || [[ $cmd =~ $_CC_AA_ANSIC_RE ]] || return 1
+  _cc_aa_kw "$cmd" || [[ $cmd =~ $_CC_AA_DOLQ_RE ]] || return 1
   _CC_AA_ASSIGNS=""
   _cc_aa_text "$cmd" 0
 }

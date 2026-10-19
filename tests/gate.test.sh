@@ -1268,6 +1268,24 @@ assert_eq "always-ask: a hex-escaped git push gives ask (gate unarmed)" "ask" "$
 out="$(aa_req aaq11 "echo \$'git p\\\\x75sh'" | CC_GATE_FLAG="$AA_NOFLAG" bash "$APP" 2>/dev/null)"
 assert_eq "always-ask: an escaped held word that is only text stays untouched" "" "$out"
 
+# 2026-10-19: 310308a added $' and $" to the quote-split separators; the bigger regex made macOS bash
+# 3.2 segfault inside [[ =~ ]] in ~1.5% of hook runs (exit 139, no output), so the command ran with
+# no always-ask hold and no gate. The separators stay at their e60b13a size...
+assert_eq "always-ask: the shell-text separators stay small (bash 3.2 segfaults on a bigger regex)" \
+  "$(printf '%s' $'(["\'\\\\]|\\\\\n)*')" "$( (. "$ROOT/cc-lib.sh"; printf '%s' "$_CC_AA_QSEP") 2>/dev/null)"
+assert_eq "always-ask: ...and so do the JSON separators" \
+  '(["'"'"'\\]|\\n)*' "$( (. "$ROOT/cc-lib.sh"; printf '%s' "$_CC_AA_QSEP_JSON") 2>/dev/null)"
+# ...and the real hook, run fresh 400 times on a quote-split rm -rf, answers every time (the crash
+# needed a fresh process: at its rate, 400 runs miss it under 1% of the time).
+crashes=0; noanswer=0
+for i in $(seq 1 400); do
+  out="$(aa_req "aaz$i" 'r\"m\" -rf build' | CC_GATE_FLAG="$AA_NOFLAG" bash "$APP" 2>/dev/null)"; rc=$?
+  [ "$rc" = 139 ] && crashes=$((crashes + 1))
+  [ "$(decision "$out")" = ask ] || noanswer=$((noanswer + 1))
+done
+assert_eq "always-ask: the hook never segfaults on a quote-split command (400 fresh runs)" "0" "$crashes"
+assert_eq "always-ask: ...and answers ask every time" "0" "$noanswer"
+
 # ---- talk mode (build program unit 6, 2026-09-28) ------------------------------------------
 # A session in talk mode (~/.claude/cc-talk/<key>, the panel's toggle) can read and talk but not
 # change anything: the Edit family is denied outside ~/.claude/ and the scratchpads
