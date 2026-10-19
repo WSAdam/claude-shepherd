@@ -4,6 +4,24 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-10-19 — My List reads past a TODO.md's 500th line
+
+- Fixed: **My List stopped receiving new items** once a project's TODO.md passed 500 items.
+  `core.parseTodoFile` kept only the first 500 unique lines, and TODO.md is append-only, so every
+  later line was dropped before the import saw it, with nothing in any log. This repo crossed 500 on
+  2026-10-13 (55 lines never imported) and ChargebackSentinel did too (115). Adam: "my list is blank,
+  i've seen nothing to review or check off since we instituted that flow". The cap is now
+  `core.TODO_MAX_ITEMS` (10000), a file past it logs how many lines it left out, and parser rev 2
+  re-reads every enrolled TODO.md once after the upgrade, so the missing lines arrive without their
+  files changing (`tests/worklist-cap.test.lua`).
+- Fixed: **the approval hook could crash and let a command through.** The 2026-10-15 `$'...'` fix
+  (310308a) added `$'` and `$"` to the quote-split separators, one alternation between every letter
+  of every held word. The bigger regex made macOS bash 3.2 segfault inside `[[ =~ ]]` in about 1.5%
+  of `cc-approve.sh` runs (exit 139, no answer). Claude Code then ran the command with no always-ask
+  hold and no gate. The separators are back to their e60b13a size, and a text with `$'` or `$"` goes
+  straight to the parser instead (`_CC_AA_DOLQ_RE`), which already decodes both. `gate.test.sh` pins
+  the separators and runs the real hook 400 times fresh.
+
 ## 2026-10-15 — Logged bugs fixed
 
 Eight units, run as one batch with every merge on Adam's click, then four follow-ups on main.
