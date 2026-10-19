@@ -17219,8 +17219,10 @@ local HTML = [[
     --radius:8px; --radius-lg:12px; --shadow:0 1px 2px rgba(0,0,0,.25);
     --font:-apple-system,system-ui,sans-serif;
   }
+  /* overscroll-behavior (2026-10-19): no elastic bounce past the page's edges -- a stuck rubber-band
+     left an empty band between the title bar and the toolbar */
   html,body { margin:0; padding:0; background:var(--bg); color:var(--text);
-              font-family:var(--font); -webkit-user-select:none; }
+              font-family:var(--font); -webkit-user-select:none; overscroll-behavior:none; }
   /* global UI scale: WebKit `zoom` scales fonts + layout uniformly off one var */
   body { zoom:var(--ui-scale,1); }
   #cc-toasts { position:fixed; left:12px; right:12px; bottom:12px; z-index:9999; display:flex; flex-direction:column;

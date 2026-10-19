@@ -21,6 +21,10 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
   hold and no gate. The separators are back to their e60b13a size, and a text with `$'` or `$"` goes
   straight to the parser instead (`_CC_AA_DOLQ_RE`), which already decodes both. `gate.test.sh` pins
   the separators and runs the real hook 400 times fresh.
+- Fixed: **an empty band between the title bar and the toolbar.** The whole panel page scrolls, and
+  nothing turned off WebKit's elastic overscroll, so a trackpad scroll past the top could leave the
+  page pulled down while it re-rendered mid-bounce. The page no longer bounces past its edges
+  (`overscroll-behavior:none`). Adam: "what's with this weird gap at the top?"
 
 ## 2026-10-15 — Logged bugs fixed
 

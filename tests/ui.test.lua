@@ -5695,5 +5695,19 @@ do
         at ~= nil and first ~= nil and at < first)
 end
 
+-- ---- The panel page never bounces past its edges (2026-10-19) ----
+-- 2026-10-19: Adam saw an empty band between the title bar and the toolbar ("what's with this weird
+-- gap at the top?"). The DOM had nothing there and the live window measured right minutes later: the
+-- whole page scrolls (1018px in an 861px window) and nothing turned off WebKit's elastic overscroll, so
+-- a trackpad scroll past the top left the page pulled down while it re-rendered mid-bounce.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local rule = src:match("\n  html,body {(.-)}")
+  check("the page's html,body rule turns overscroll off (no rubber-band band above the toolbar)",
+        rule ~= nil and rule:find("overscroll-behavior:none;", 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)
