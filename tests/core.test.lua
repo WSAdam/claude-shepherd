@@ -11928,9 +11928,10 @@ end
 do
   local labels = {}
   for _, b in ipairs(core.ALWAYS_ASK_BUILTINS or {}) do labels[#labels + 1] = b.rule end
-  eq("always-ask: the ten built-in rules, in Adam's order", table.concat(labels, " | "),
+  -- REQUIREMENT CHANGE 2026-10-20: + wrangler deploy, npm run deploy (Cloudflare production deploys)
+  eq("always-ask: the twelve built-in rules, in Adam's order", table.concat(labels, " | "),
      "git push | rm -rf | git reset --hard | git clean -f | git branch -D | git worktree remove --force"
-     .. " | git checkout -- . | publish | gh release create | gh pr merge")
+     .. " | git checkout -- . | publish | gh release create | gh pr merge | wrangler deploy | npm run deploy")
   local exOk = true
   for _, b in ipairs(core.ALWAYS_ASK_BUILTINS or {}) do
     if type(b.example) ~= "string" or b.example == "" then exOk = false end

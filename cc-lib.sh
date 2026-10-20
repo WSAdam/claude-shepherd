@@ -942,7 +942,7 @@ cc_ledger_append() {
 # KEEP THE RULE LABELS IN SYNC with core.ALWAYS_ASK_BUILTINS
 # (Settings lists them; tests/gate.test.sh runs each example through here).
 # Runs under macOS /bin/bash 3.2 with set -u: every array expansion is guarded.
-CC_AA_WORDS='push|rm|reset|clean|branch|worktree|checkout|publish|release|merge'
+CC_AA_WORDS='push|rm|reset|clean|branch|worktree|checkout|publish|release|merge|deploy'
 CC_AA_RULE=""
 _CC_AA_US=$'\037'    # between a command's words
 _CC_AA_DYN=$'\035'   # leads a word built from an expansion ($VAR, $(...), `...`)
@@ -1413,6 +1413,22 @@ _cc_aa_cmd() {
           esac
         done ;;
       exec) k=$((k + 1)); _cc_aa_opts '-a' ;;
+      # 2026-10-20: package runners run the tool after them (npx wrangler deploy); a package manager
+      # does too through dlx/exec/x, and otherwise its own command is judged by the rules
+      npx|bunx) k=$((k + 1)); _cc_aa_opts '-p --package -c --call' ;;
+      npm|pnpm|yarn|bun)
+        j=$((k + 1))
+        while [ "$j" -lt "$n" ]; do
+          case "${w[j]}" in
+            --prefix|-C|--dir|--filter|-F|--cwd|--workspace) j=$((j + 2)) ;;
+            -*) j=$((j + 1)) ;;
+            *) break ;;
+          esac
+        done
+        case "${w[j]:-}" in
+          dlx|exec|x) k=$((j + 1)); _cc_aa_opts '-p --package -c --call' ;;
+          *) _cc_aa_rules; return $? ;;
+        esac ;;
       xargs)
         k=$((k + 1))
         _cc_aa_opts '-I -L -n -P -s -E -d -a --max-args --max-procs --max-lines --delimiter --arg-file --replace --eof' ;;
@@ -1483,6 +1499,18 @@ _cc_aa_opts() {   # skip the options at w[k]; $1 = the ones that take a separate
     case "${w[k]}" in
       --) k=$((k + 1)); return 0 ;;
       -?*) case " $1 " in *" ${w[k]} "*) k=$((k + 2)) ;; *) k=$((k + 1)) ;; esac ;;
+      *) return 0 ;;
+    esac
+  done
+}
+
+# Skip the options at w[j] (2026-10-20, the package-manager and wrangler rules): the ones that take a
+# separate value skip it too (--prefix x, --filter x, --env production, -c wrangler.toml).
+_cc_aa_skipv() {
+  while [ "$j" -lt "$n" ]; do
+    case "${w[j]}" in
+      --prefix|-C|--dir|--filter|-F|--cwd|--workspace|-c|--config|-e|--env) j=$((j + 2)) ;;
+      -*) j=$((j + 1)) ;;
       *) return 0 ;;
     esac
   done
@@ -1573,6 +1601,26 @@ _cc_aa_rules() {   # the built-in list, on the command at w[k]
       { _cc_aa_flag r --recursive $((k + 1)) || _cc_aa_flag R '' $((k + 1)); } \
         && _cc_aa_flag f --force $((k + 1)) && { CC_AA_RULE="rm -rf"; return 0; }
       return 1 ;;
+    # 2026-10-20: a Cloudflare production deploy -- wrangler deploy, pages/versions deploy, and the
+    # legacy publish -- whatever runs it (npx, bunx, pnpm dlx: _cc_aa_cmd looks through them)
+    wrangler|wrangler@*)
+      j=$((k + 1)); _cc_aa_skipv
+      case "${w[j]:-}" in
+        deploy|publish) CC_AA_RULE="wrangler deploy"; return 0 ;;
+        pages|versions)
+          j=$((j + 1)); _cc_aa_skipv
+          case "${w[j]:-}" in deploy|publish) CC_AA_RULE="wrangler deploy"; return 0 ;; esac ;;
+      esac
+      return 1 ;;
+    # ...and a package script named deploy (deploy:<env> too). pnpm's own `pnpm deploy` copies a
+    # workspace package and npm has none, so only `run` -- and yarn, which runs scripts by name --
+    # counts. Anything else falls through to the publish check below (npm publish).
+    npm|pnpm|yarn|bun)
+      j=$((k + 1)); _cc_aa_skipv
+      sub="${w[j]:-}"
+      if [ "$sub" = run ] || [ "$sub" = run-script ]; then j=$((j + 1)); _cc_aa_skipv; sub="${w[j]:-}"
+      elif [ "$base" != yarn ]; then sub=""; fi
+      case "$sub" in deploy|deploy:*) CC_AA_RULE="npm run deploy"; return 0 ;; esac ;;
     # print or search text, move around: a `publish` among their words is just a word
     echo|printf|cat|less|more|head|tail|grep|egrep|fgrep|rg|ag|ls|cd|pushd|mkdir|touch|wc|man|which|type|file|stat|test|'['|open|code|vi|vim|nvim|nano|emacs)
       return 1 ;;

@@ -1084,6 +1084,39 @@ free "echo \$'git p\\x75sh'"
 free "git \$'p\\x75ll'"
 free "git \$'p\\x75sh\\x2dhooks'"
 free "printf \$'a\\tb\\n'"
+# ---- Cloudflare deploys (2026-10-20) ----
+# 2026-10-20: Adam's projects move to Cloudflare. `npm publish` was held, but a production deploy ran
+# with no click: wrangler deploy (and pages/versions deploy, the legacy publish), through npx, bunx,
+# pnpm dlx/exec, yarn dlx or npm exec, and a package script named deploy (npm/pnpm/bun run deploy,
+# yarn deploy, deploy:<env>).
+held 'npx wrangler deploy' 'wrangler deploy'
+held 'wrangler deploy --env production' 'wrangler deploy'
+held 'wrangler pages deploy dist --project-name site' 'wrangler deploy'
+held 'npx wrangler versions deploy' 'wrangler deploy'
+held 'npx -y wrangler@latest deploy' 'wrangler deploy'
+held 'pnpm dlx wrangler deploy' 'wrangler deploy'
+held 'pnpm exec wrangler deploy' 'wrangler deploy'
+held 'yarn dlx wrangler deploy' 'wrangler deploy'
+held 'npm exec -- wrangler deploy' 'wrangler deploy'
+held 'bunx wrangler deploy' 'wrangler deploy'
+held 'wrangler publish' 'wrangler deploy'
+held 'cd apps/web && npx wrangler deploy' 'wrangler deploy'
+held "npx wrangler dep'loy'" 'wrangler deploy'
+held 'npm run deploy' 'npm run deploy'
+held 'npm --prefix apps/web run deploy' 'npm run deploy'
+held 'pnpm run deploy:prod' 'npm run deploy'
+held 'pnpm --filter web run deploy' 'npm run deploy'
+held 'yarn deploy' 'npm run deploy'
+held 'bun run deploy' 'npm run deploy'
+free 'make deploy'
+free 'npx wrangler dev'
+free 'wrangler pages dev dist'
+free 'npx wrangler deployments list'
+free 'pnpm deploy ./out'
+free 'npm run deploy-docs'
+free 'echo npm run deploy'
+free 'git commit -m "npx wrangler deploy"'
+
 # an escape that decodes to a control character keeps the word an expansion (as before decoding):
 # never a word split that could pose as the parser's own separators
 held "git \$'x\\x1fpush'" 'hidden command'
@@ -1094,7 +1127,8 @@ lua - "$ROOT/cc-core.lua" > "$TMP/aa-builtins.txt" 2>/dev/null <<'LUA'
 local core = dofile(arg[1])
 for _, b in ipairs(core.ALWAYS_ASK_BUILTINS or {}) do print(b.rule .. "\t" .. b.example) end
 LUA
-assert_eq "always-ask: core.ALWAYS_ASK_BUILTINS was read" "10" "$(grep -c . "$TMP/aa-builtins.txt")"
+# REQUIREMENT CHANGE 2026-10-20: 10 -> 12, wrangler deploy and npm run deploy (Cloudflare deploys)
+assert_eq "always-ask: core.ALWAYS_ASK_BUILTINS was read" "12" "$(grep -c . "$TMP/aa-builtins.txt")"
 while IFS=$'\t' read -r rule ex; do
   held "$ex" "$rule"
 done < "$TMP/aa-builtins.txt"
@@ -1267,6 +1301,13 @@ out="$(aa_req aaq10 "git \$'p\\\\x75sh' origin main" | CC_GATE_FLAG="$AA_NOFLAG"
 assert_eq "always-ask: a hex-escaped git push gives ask (gate unarmed)" "ask" "$(decision "$out")"
 out="$(aa_req aaq11 "echo \$'git p\\\\x75sh'" | CC_GATE_FLAG="$AA_NOFLAG" bash "$APP" 2>/dev/null)"
 assert_eq "always-ask: an escaped held word that is only text stays untouched" "" "$out"
+# 2026-10-20: a Cloudflare production deploy reaches the matcher through the hook's first look too
+out="$(aa_req aaq12 'npx wrangler deploy --env production' | CC_GATE_FLAG="$AA_NOFLAG" bash "$APP" 2>/dev/null)"
+assert_eq "always-ask: npx wrangler deploy gives ask (gate unarmed)" "ask" "$(decision "$out")"
+out="$(aa_req aaq13 'cd apps/web && npm run deploy' | CC_GATE_FLAG="$AA_NOFLAG" bash "$APP" 2>/dev/null)"
+assert_eq "always-ask: npm run deploy gives ask (gate unarmed)" "ask" "$(decision "$out")"
+out="$(aa_req aaq14 'make deploy' | CC_GATE_FLAG="$AA_NOFLAG" bash "$APP" 2>/dev/null)"
+assert_eq "always-ask: make deploy stays untouched" "" "$out"
 
 # 2026-10-19: 310308a added $' and $" to the quote-split separators; the bigger regex made macOS bash
 # 3.2 segfault inside [[ =~ ]] in ~1.5% of hook runs (exit 139, no output), so the command ran with

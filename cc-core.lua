@@ -22460,6 +22460,9 @@ M.ALWAYS_ASK_BUILTINS = {
   { rule = "publish", example = "npm publish" },
   { rule = "gh release create", example = "gh release create v1.0" },
   { rule = "gh pr merge", example = "gh pr merge 12" },
+  -- 2026-10-20: Cloudflare production deploys (Adam's projects move off Deno to Cloudflare + Astro)
+  { rule = "wrangler deploy", example = "npx wrangler deploy" },
+  { rule = "npm run deploy", example = "npm run deploy" },
 }
 
 -- Starter bundles the UI offers (the operator copies one into policies.bundles).
@@ -26542,7 +26545,7 @@ M.FEATURES = {
     what = "When a session wants a risky tool it pauses, and you approve or deny right from the panel; unanswered, it safely falls back.",
     why = "You stay in control without editor windows popping up — and it never silently auto-runs." },
   { key = "alwaysask", cat = "Control", new = true, title = "Always-ask commands",
-    what = "git push, rm -rf, history rewrites (reset --hard, clean -f, branch -D, worktree remove --force, checkout -- .), any publish, gh release create and gh pr merge wait for your click on the card, even with the gate off, and no autopilot, auto-allow, repeat approval or bundle can pass them. With Shepherd closed, Claude Code's own prompt asks instead. Add your own in Settings.",
+    what = "git push, rm -rf, history rewrites (reset --hard, clean -f, branch -D, worktree remove --force, checkout -- .), any publish, gh release create, gh pr merge and a Cloudflare production deploy (wrangler deploy, through npx or pnpm dlx too, and npm run deploy) wait for your click on the card, even with the gate off, and no autopilot, auto-allow, repeat approval or bundle can pass them. With Shepherd closed, Claude Code's own prompt asks instead. Add your own in Settings.",
     why = "The commands you can't take back never run on autopilot -- even inside cd x && ..., sh -c or sudo." },
   { key = "talk", cat = "Control", new = true, title = "Talk mode",
     what = "One click in a tile's menu or the detail panel puts a session in discussion-only mode: it can read, search and run read-only commands (ls, cat, grep, git log...), but edits outside ~/.claude/ and its scratchpad, and shell commands that change things, are denied. A TALK badge marks the tile.",

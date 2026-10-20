@@ -114,6 +114,11 @@ bundle says**:
   `git worktree remove --force`, `git checkout -- .`
 - any tool's `publish` (`npm`, `deno`, `cargo`, `yarn npm`, `npx jsr` …), `gh release create`,
   `gh pr merge`
+- a Cloudflare production deploy: `wrangler deploy`, `wrangler pages deploy`, `wrangler versions
+  deploy` (and the old `wrangler publish`), whether run directly or through `npx`, `bunx`,
+  `pnpm dlx`/`exec`, `yarn dlx` or `npm exec`; and a package script named `deploy` or `deploy:<env>`
+  (`npm run deploy`, `pnpm run deploy:prod`, `yarn deploy`, `bun run deploy`). `make deploy` and
+  pnpm's own `pnpm deploy` (which copies a workspace package) aren't held
 
 What happens to one:
 

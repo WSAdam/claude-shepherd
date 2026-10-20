@@ -30,6 +30,14 @@ itself never needed Deno (it is Lua and bash); only the worktree demo did.
   `*.test.ts` under Vitest or `node --test`, `npm run dev` / `astro dev` / `wrangler dev` as the dev
   servers that never count as a running job (pinned in core.test.lua). Deno stays where Shepherd still
   supports it: `deno publish` is held, `deno.lock` is graded, Deno's failure lines are read.
+- Added: **always-ask holds a Cloudflare production deploy.** `npm publish` waited for Adam's click,
+  but `wrangler deploy` ran without one. Two built-in rules now hold `wrangler deploy`,
+  `wrangler pages deploy`, `wrangler versions deploy` and the old `wrangler publish` (direct, or
+  through `npx`, `bunx`, `pnpm dlx`/`exec`, `yarn dlx` or `npm exec`, which the parser now looks
+  through), and a package script named `deploy` or `deploy:<env>` (`npm run deploy`,
+  `pnpm run deploy:prod`, `yarn deploy`, `bun run deploy`). `make deploy` and pnpm's own
+  `pnpm deploy` stay free. Adding `deploy` to the held words grows the quote-split regex that crashed
+  bash 3.2 on 2026-10-19, so it was measured: 0 crashes in 600 fresh hook runs under load.
 
 ## 2026-10-19 — My List reads past a TODO.md's 500th line
 
