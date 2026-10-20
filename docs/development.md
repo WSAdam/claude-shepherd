@@ -99,8 +99,8 @@ Spawning is dry-run by default: the `ORCH_DRY_RUN` code constant (true) logs the
 without running it, and only `spawn.live` turns real launching on.
 
 **CI.** [.github/workflows/ci.yml](../.github/workflows/ci.yml) runs `make lint` and `make test` on
-`ubuntu-latest` for every push and pull request. The Playwright browser suites and the Deno demo
-suite skip there; CI installs neither.
+`ubuntu-latest` for every push and pull request. The Playwright browser suites skip there (CI
+installs no browser); the worktree demo's suite runs, since it needs only Node.
 
 ### The scenario corpus: how accurate is each detector?
 

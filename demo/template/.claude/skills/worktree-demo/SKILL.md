@@ -4,7 +4,7 @@ description: >-
   Drives Shepherd's parallel-worktree demo in this repo end to end. It proposes a 2-unit batch
   (feat/shout and feat/whisper) to Shepherd, opens both unit tabs, hands them their tasks, follows
   them through Adam's Merge clicks and the deliberate merge conflict, then verifies with
-  `deno task check` and reports. Use when the user says "run the worktree demo" (or "start the
+  `npm run check` and reports. Use when the user says "run the worktree demo" (or "start the
   demo") in a worktree-demo run folder.
 ---
 
@@ -29,7 +29,7 @@ three things: approves the batch once, and clicks **Merge** twice.
 Run these one at a time; stop and tell Adam what to fix if any fails.
 - `git worktree list`: only this checkout. `git status --porcelain`: empty. `git branch
   --show-current`: `main`.
-- `deno task test`: passes.
+- `npm test`: passes.
 - Shepherd is running: `~/.claude/cc-status/.panel-alive` holds a time within 30 seconds of
   `date +%s`.
 - This window's tab bridge: the `~/.claude/cc-bridge/<pid>.json` whose `folders` include this
@@ -52,12 +52,12 @@ Write this exact file to `.demo-batch.json` (gitignored):
     {
       "type": "feat",
       "slug": "shout",
-      "task": "At the END of src/greet.ts, add an exported function `shout(name: string): string` that returns the greeting in capitals: shout(\"Adam\") returns \"HELLO, ADAM!\". At the END of src/greet_test.ts, add a Deno.test named \"shout greets loudly\" that checks shout(\"Adam\") the same way the existing greet test does (import shout from ./greet.ts). Run `deno task test` (it must pass) and commit with the message \"Add shout\"."
+      "task": "At the END of src/greet.ts, add an exported function `shout(name: string): string` that returns the greeting in capitals: shout(\"Adam\") returns \"HELLO, ADAM!\". At the END of src/greet_test.ts, add a test named \"shout greets loudly\" that checks shout(\"Adam\") the same way the existing greet test does (import shout from ./greet.ts). Run `npm test` (it must pass) and commit with the message \"Add shout\"."
     },
     {
       "type": "feat",
       "slug": "whisper",
-      "task": "At the END of src/greet.ts, add an exported function `whisper(name: string): string` that returns a quiet greeting in lower case: whisper(\"Adam\") returns \"(hello, adam…)\" (the last character is the ellipsis …). At the END of src/greet_test.ts, add a Deno.test named \"whisper greets quietly\" that checks whisper(\"Adam\") the same way the existing greet test does (import whisper from ./greet.ts). Run `deno task test` (it must pass) and commit with the message \"Add whisper\"."
+      "task": "At the END of src/greet.ts, add an exported function `whisper(name: string): string` that returns a quiet greeting in lower case: whisper(\"Adam\") returns \"(hello, adam…)\" (the last character is the ellipsis …). At the END of src/greet_test.ts, add a test named \"whisper greets quietly\" that checks whisper(\"Adam\") the same way the existing greet test does (import whisper from ./greet.ts). Run `npm test` (it must pass) and commit with the message \"Add whisper\"."
     }
   ]
 }
@@ -84,7 +84,7 @@ Write this exact file to `.demo-batch.json` (gitignored):
 - When one asks to merge, tell Adam: *"feat/<slug> is ready: its card pulses **Needs you** with
   *ready to merge*. Open it, look at the review, and click **Merge**."*
 - The second unit to merge will rebase onto the first and **hit a conflict** in `src/greet.ts` and
-  `src/greet_test.ts`. That's the point. It keeps both sides and merges once `deno task test`
+  `src/greet_test.ts`. That's the point. It keeps both sides and merges once `npm test`
   passes. Say so when it happens.
 - A unit that reports **blocked**: tell Adam its note, and don't fix it yourself.
 - You may check `~/.claude/cc-fleet.sh status --batch <id>` when a notice arrives, never on a loop.
@@ -93,7 +93,7 @@ Write this exact file to `.demo-batch.json` (gitignored):
 
 When both units have merged (or one is blocked):
 1. `~/.claude/cc-fleet.sh stop --batch <id>`. This is harmless if the batch already ended itself.
-2. `deno task check`, and show its ✅/❌ lines.
+2. `npm run check`, and show its ✅/❌ lines.
 3. Report, briefly:
    - what landed (`git log --oneline -4`);
    - how the conflict was settled (both `shout` and `whisper` are in `src/greet.ts`);

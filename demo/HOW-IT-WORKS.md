@@ -6,7 +6,7 @@ For engineers. The plain-language version is [GUIDE.md](GUIDE.md).
 
 | Part | Where | Role in the demo |
 |---|---|---|
-| `demo/setup.ts` | Shepherd repo | `deno task demo`: preflight, tidy old runs, create the run, open VS Code |
+| `demo/setup.ts` | Shepherd repo | `make demo`: preflight, tidy old runs, create the run, open VS Code |
 | Run repo | `~/Programming/worktree-demo-runs/worktree-demo-<stamp>/` | A fresh git repo per run (new path → VS Code restores no old tabs) |
 | Driver skill | run repo `.claude/skills/worktree-demo/SKILL.md` | The playbook the driver tab follows |
 | `cc-fleet.sh` | `~/.claude/` | The driver proposes the batch and asks Shepherd to open unit tabs |
@@ -36,7 +36,7 @@ ever answer the request it was shown for.
 
 ```
 Adam                Driver tab            cc-fleet / cc-merge      Shepherd                 Unit tabs
- │ deno task demo                                                                               
+ │ make demo                                                                               
  │ "run the worktree demo" ─▶                                                                   
  │                   │ preflight, write .demo-batch.json                                         
  │                   │ propose (background) ──▶ <id>.json ─────────▶ card: Needs you (batch)     
@@ -55,7 +55,7 @@ Adam                Driver tab            cc-fleet / cc-merge      Shepherd     
  │ Merge ─────────────────────────────────────────────────────────▶ decision ──────────────────▶ rebase → CONFLICT
  │                   │                                                         keep both sides, tests green, ff-merge, done
  │                   │                                               verify; close tab; batch finished
- │                   │ stop, deno task check, report                                            
+ │                   │ stop, npm run check, report                                            
 ```
 
 ## Why the conflict resolves
@@ -87,23 +87,23 @@ side — it never deletes a test to get green.
 
 ## Proving the result
 
-`deno task check` in the run (`scripts/check.ts`, a copy of `demo/check.ts`) prints one ✅/❌ line
+`npm run check` in the run (`scripts/check.ts`, a copy of `demo/check.ts`) prints one ✅/❌ line
 each: on main · shout on main · whisper on main · the tests pass · no unit worktree left · no unit
-branch left · main is clean. Exit 0 only when all hold. `deno task demo:test` in the Shepherd repo
+branch left · main is clean. Exit 0 only when all hold. `make demo-test` in the Shepherd repo
 tests the setup and the check themselves.
 
 ## Troubleshooting
 
 | You see | Why | Do |
 |---|---|---|
-| `deno task demo` lists ❌ problems | a prerequisite is missing | each line says its fix (start Hammerspoon, `make setup`, `make install`, set `CC_CODE_CLI`) |
+| `make demo` lists ❌ problems | a prerequisite is missing | each line says its fix (start Hammerspoon, `make setup`, `make install`, set `CC_CODE_CLI`) |
 | "This window runs an older Shepherd tab bridge" | the new window loaded an older extension | Command Palette → **Developer: Reload Window**, then "run the worktree demo" again |
 | The card never shows the batch | Shepherd isn't running, or `fleet.enabled` is false | start Hammerspoon; check `~/.claude/cc-config.json` |
 | A unit tab didn't open ("window wasn't in front") | focus moved while Shepherd opened it | the driver reports it; ask it to request that unit's tab again |
 | A card says *merged — close its tab yourself* | the tab couldn't be matched (no tag, no unique name) | press **Close tab** on the card, or **Dismiss** |
 | A unit reports **blocked** | the tests couldn't settle the conflict, or the suite stayed red | read its note; the run stops there by design |
 | A permission prompt appears in a unit tab | a command outside the run's allow list | approve it in the tab (or in Shepherd); the allow list is `template/.claude/settings.json` |
-| `deno task check` shows ❌ | the run didn't finish | its lines say what's left (a worktree, a branch, a missing feature) |
+| `npm run check` shows ❌ | the run didn't finish | its lines say what's left (a worktree, a branch, a missing feature) |
 
-After a run, closing its window is all the cleanup needed; the next `deno task demo` moves it to the
+After a run, closing its window is all the cleanup needed; the next `make demo` moves it to the
 Trash.

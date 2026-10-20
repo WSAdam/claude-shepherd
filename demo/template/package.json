@@ -1,0 +1,9 @@
+{
+  "name": "worktree-demo-app",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "check": "node scripts/check.ts"
+  }
+}

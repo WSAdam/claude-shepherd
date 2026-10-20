@@ -34,7 +34,7 @@ Both are added to the end of the same file — on purpose, so you see a conflict
 
 ## Step by step
 
-1. **Start a fresh run.** In a terminal, in the Shepherd folder, type `deno task demo`.
+1. **Start a fresh run.** In a terminal, in the Shepherd folder, type `make demo`.
    It checks that Shepherd and its helpers are ready, builds a fresh copy of the tiny app, and opens
    it in a **new VS Code window** named *worktree-demo-* followed by the date and time.
 
@@ -58,7 +58,7 @@ Both are added to the end of the same file — on purpose, so you see a conflict
    **conflict**. It combines the two by keeping both greetings and both tests, runs the tests, and
    only lands when they all pass. Its tab closes by itself too.
 
-7. **See the result.** The driver runs `deno task check` and reports:
+7. **See the result.** The driver runs `npm run check` and reports:
    ✅ shout is on main, ✅ whisper is on main, ✅ the tests pass, ✅ no desks or leftover jobs remain.
 
 ## What success looks like
@@ -78,5 +78,5 @@ The driver tells you in its tab, and Shepherd shows a red card with a button. Th
 
 For anything else, see the troubleshooting table in [HOW-IT-WORKS.md](HOW-IT-WORKS.md#troubleshooting).
 
-To run it again, just type `deno task demo` again: every run is brand new, and old runs go to the
+To run it again, just type `make demo` again: every run is brand new, and old runs go to the
 Trash once you've closed their windows.

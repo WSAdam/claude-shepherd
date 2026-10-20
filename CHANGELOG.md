@@ -4,6 +4,19 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-10-20 — Off Deno
+
+Deno support ends in six months, and Adam's projects are moving to Cloudflare and Astro. Shepherd
+itself never needed Deno (it is Lua and bash); only the worktree demo did.
+
+- Changed: **the worktree demo runs on Node alone.** `make demo` (was `deno task demo`) runs
+  `demo/setup.ts` with Node, which Shepherd already requires; Node 22.18+ runs the `.ts` files as
+  they are. Every run's starter app is a dependency-free Node + TypeScript project: `npm test` runs
+  `node:test`, `npm run check` proves a finished run, and the driver's playbook, permissions and
+  `CLAUDE.md` name no Deno command. The repo's `deno.json` is gone; `make demo-test` runs the
+  demo's suite, and `tests/run.sh` runs it with every Deno directory taken off `PATH`. CI now runs it
+  too, since it needs only Node.
+
 ## 2026-10-19 — My List reads past a TODO.md's 500th line
 
 - Fixed: **My List stopped receiving new items** once a project's TODO.md passed 500 items.

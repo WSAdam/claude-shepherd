@@ -755,7 +755,7 @@ after. A batch file without any of the three works as before.
 
 ## Try it: the worktree demo
 
-`deno task demo` (or `make demo`) sets up a fresh little Deno app and opens it in a new VS Code
+`make demo` sets up a fresh little Node app (no dependencies) and opens it in a new VS Code
 window. Say **run the worktree demo** in a Claude tab there and watch two units work on the same
 file at once, land on main one after the other (the second through a merge conflict settled by the
 tests), and close their own tabs, with one approval and two Merge clicks from you. See

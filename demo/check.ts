@@ -1,20 +1,30 @@
-// check.ts - does a worktree demo run show what it promised? (2026-09-12)
-// Copied into every run as scripts/check.ts; `deno task check` runs it there. Each line is a
-// plain ✅/❌ statement; the exit code is 0 only when every line holds.
+// check.ts - does a worktree demo run show what it promised? (2026-09-12; on Node since 2026-10-20)
+// Copied into every run as scripts/check.ts; `npm run check` runs it there. Each line is a plain ✅/❌
+// statement; the exit code is 0 only when every line holds. Node 22.18+ runs this .ts file as is.
+
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 
 export interface CheckLine {
   ok: boolean;
   text: string;
 }
 
-const dec = new TextDecoder();
+const run = promisify(execFile);
+// A `node --test` started from inside another one (this file's own suite) inherits NODE_TEST_CONTEXT
+// and reports to that outer runner instead of printing its results, so children never get it.
+const childEnv = { ...process.env };
+delete childEnv.NODE_TEST_CONTEXT;
 
 async function sh(cmd: string, args: string[], cwd: string): Promise<{ code: number; out: string }> {
   try {
-    const r = await new Deno.Command(cmd, { args, cwd, stdout: "piped", stderr: "piped" }).output();
-    return { code: r.code, out: (dec.decode(r.stdout) + dec.decode(r.stderr)).trim() };
+    const r = await run(cmd, args, { cwd, env: childEnv });
+    return { code: 0, out: (r.stdout + r.stderr).trim() };
   } catch (e) {
-    return { code: 127, out: String(e) };
+    const err = e as { code?: number; stdout?: string; stderr?: string };
+    return { code: typeof err.code === "number" ? err.code : 127, out: ((err.stdout || "") + (err.stderr || "")).trim() };
   }
 }
 
@@ -27,16 +37,17 @@ export async function checkRun(dir: string): Promise<{ ok: boolean; lines: Check
 
   let src = "";
   try {
-    src = await Deno.readTextFile(dir + "/src/greet.ts");
+    src = await readFile(dir + "/src/greet.ts", "utf8");
   } catch { /* reported below */ }
   for (const fn of ["shout", "whisper"]) {
     const has = src.includes(`export function ${fn}(`);
     add(has, has ? `${fn} is on main` : `${fn} is not on main (src/greet.ts has no exported ${fn})`);
   }
 
-  const tests = await sh("deno", ["task", "test"], dir);
-  const passed = tests.out.match(/(\d+) passed/);
-  add(tests.code === 0, tests.code === 0 ? `the tests pass (${passed ? passed[1] : "all"})` : "the tests fail: run deno task test");
+  const tests = await sh("npm", ["test"], dir);
+  // node's test runner ends with "ℹ pass N" (spec reporter) or "# pass N" (TAP)
+  const passed = tests.out.match(/^\S*\s*pass (\d+)\s*$/m);
+  add(tests.code === 0, tests.code === 0 ? `the tests pass (${passed ? passed[1] : "all"})` : "the tests fail: run npm test");
 
   const wts = (await sh("git", ["worktree", "list", "--porcelain"], dir)).out
     .split("\n").filter((l) => l.startsWith("worktree ")).map((l) => l.slice(9));
@@ -52,10 +63,12 @@ export async function checkRun(dir: string): Promise<{ ok: boolean; lines: Check
   return { ok: lines.every((l) => l.ok), lines };
 }
 
-if (import.meta.main) {
-  const r = await checkRun(Deno.cwd());
+// run directly (`node scripts/check.ts`), not when imported; import.meta.main needs Node 24.2+
+const isMain = import.meta.main ?? process.argv[1] === fileURLToPath(import.meta.url);
+if (isMain) {
+  const r = await checkRun(process.cwd());
   console.log("🔍 Worktree demo check");
   for (const l of r.lines) console.log(`  ${l.ok ? "✅" : "❌"} ${l.text}`);
   console.log(r.ok ? "✅ The run did what it promised." : "❌ Not there yet: see the ❌ lines above.");
-  Deno.exit(r.ok ? 0 : 1);
+  process.exit(r.ok ? 0 : 1);
 }

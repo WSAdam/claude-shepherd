@@ -1,9 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(deno task test)",
-      "Bash(deno task check)",
-      "Bash(deno test:*)",
+      "Bash(npm test)",
+      "Bash(npm run check)",
+      "Bash(node --test:*)",
       "Bash(git:*)",
       "Bash(~/.claude/cc-merge.sh:*)",
       "Bash(__HOME__/.claude/cc-merge.sh:*)",

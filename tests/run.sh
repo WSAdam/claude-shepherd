@@ -38,7 +38,7 @@ trap 'rm -rf "$CC_TEST_LOCK"' EXIT
 # File mode (2026-09-29, the red-first proof): `bash tests/run.sh tests/a.test.lua tests/b.test.sh`
 # runs JUST those files (paths from the checkout root), each under a `== <path> ==` header, by its
 # extension: .lua with lua and a temp HOME (as the stubbed suites below run), .sh with bash, .js
-# with node, .ts with deno test. Shepherd's red-first proof runs a unit's changed tests this way
+# with node, .ts with node --test (Deno until 2026-10-20). Shepherd's red-first proof runs a unit's changed tests this way
 # on the merge-base without the fix (merge.gates' redFirstCommand "bash tests/run.sh {files}") and
 # ties each FAIL line to the header above it. A file that exits non-zero without a FAIL line of
 # its own -- a crash at load: the function the fix adds isn't there yet -- gets one, naming it.
@@ -51,7 +51,7 @@ if [ "$#" -gt 0 ]; then
       *.lua) HOME="$(mktemp -d)" lua "$f" > "$cc_out" 2>&1 ;;
       *.sh)  bash "$f" > "$cc_out" 2>&1 ;;
       *.js)  node "$f" > "$cc_out" 2>&1 ;;
-      *.ts)  deno test -A --quiet "$f" > "$cc_out" 2>&1 ;;
+      *.ts)  node --test "$f" > "$cc_out" 2>&1 ;;
       *)     echo "skipped: no runner for $f"; fail=1; continue ;;
     esac
     rc=$?
@@ -319,12 +319,11 @@ echo ""
 echo "== node: ⌘V lands in the focused field, not the nudge box (behavioral, runs the shipped paste helpers) =="
 node "$DIR/paste-target.test.js" || fail=1
 echo ""
-echo "== deno: the worktree demo's setup and check (demo/) =="
-if command -v deno >/dev/null 2>&1; then
-  (cd "$DIR/.." && deno test -A --quiet demo/) || fail=1
-else
-  echo "skipped: deno isn't installed (the demo needs it; https://deno.com)"
-fi
+echo "== node: the worktree demo's setup and check (demo/), with no Deno on PATH =="
+# 2026-10-20: Deno is being retired. The demo runs on Node alone, so this runs it with every Deno
+# directory taken off PATH: anything that still reached for deno would fail here.
+(cd "$DIR/.." && PATH="$(printf '%s' "$PATH" | tr ':' '\n' | grep -v -i 'deno' | paste -sd: -)" \
+  node --test demo/setup_test.ts) || fail=1
 echo ""
 echo "== lua: New worktree tab opens a prefilled Claude tab, never a keystroke (behavioral, stubbed hs + git) =="
 HOME="$(mktemp -d)" lua "$DIR/new-worktree-tab.test.lua" || fail=1

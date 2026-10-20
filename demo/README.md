@@ -6,10 +6,10 @@ A repeatable, ten-minute proof that Shepherd's parallel worktree flow does what 
 ## Run it
 
 ```bash
-deno task demo        # from the Shepherd repo root (or: make demo)
+make demo        # from the Shepherd repo root (or: node demo/setup.ts)
 ```
 
-It checks that everything it needs is there, creates a fresh little Deno app, and opens it in a new
+It checks that everything it needs is there, creates a fresh little Node app, and opens it in a new
 VS Code window. In that window, open a Claude tab and type:
 
 ```
@@ -30,7 +30,10 @@ Then follow what it tells you: you approve the work once and click **Merge** twi
 
 | File | What it is |
 |---|---|
-| `setup.ts` | `deno task demo`: checks, tidies old runs, creates and opens a fresh run |
-| `check.ts` | `deno task check` inside a run: proves the result, line by line |
-| `template/` | the starter app every run begins from, with its `CLAUDE.md`, permissions and the driver's playbook (`.claude/skills/worktree-demo/`) |
-| `setup_test.ts` | the tests for all of the above (`deno task demo:test`) |
+| `setup.ts` | `make demo`: checks, tidies old runs, creates and opens a fresh run |
+| `check.ts` | `npm run check` inside a run: proves the result, line by line |
+| `template/` | the starter app every run begins from (Node + TypeScript, no dependencies), with its `CLAUDE.md`, permissions and the driver's playbook (`.claude/skills/worktree-demo/`) |
+| `setup_test.ts` | the tests for all of the above (`make demo-test`) |
+
+Everything here runs on Node alone (22.18 or newer runs the `.ts` files as they are), which Shepherd
+already needs. The demo ran on Deno until 2026-10-20.

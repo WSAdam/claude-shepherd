@@ -1,8 +1,8 @@
 # Plain CI for Claude Shepherd: `make lint` + `make test` on Linux, no LLM, no agents.
 # The repo is public and handed to coworkers, so the suite has to run somewhere other
 # than Adam's laptop. Everything here is bash + Lua + node; the Playwright browser
-# suites and the deno demo suite self-skip when their tooling is absent, and we leave
-# them skipping rather than install a browser stack for CI.
+# suites self-skip when their tooling is absent, and we leave them skipping rather
+# than install a browser stack for CI. The worktree demo's suite needs only node.
 name: CI
 
 on:

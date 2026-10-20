@@ -1,7 +1,0 @@
-{
-  "tasks": {
-    "test": "deno test src/",
-    "check": "deno run -A scripts/check.ts"
-  },
-  "exclude": [".claude/worktrees/"]
-}

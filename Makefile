@@ -76,11 +76,14 @@ setup:
 uninstall:
 	@bash uninstall.sh $(if $(PURGE),--purge,)
 
-# The worktree demo (demo/GUIDE.md): a fresh little Deno app, opened in a new VS Code window,
-# where "run the worktree demo" drives two units in parallel to main. Same as `deno task demo`.
-.PHONY: demo
+# The worktree demo (demo/GUIDE.md): a fresh little Node app, opened in a new VS Code window,
+# where "run the worktree demo" drives two units in parallel to main. Node only (22.18+ runs the
+# .ts files as they are); on Deno until 2026-10-20.
+.PHONY: demo demo-test
 demo:
-	@deno task demo
+	@node demo/setup.ts
+demo-test:
+	@node --test demo/setup_test.ts
 
 # Tooling check: report jq (required) + the rg/fd accelerators (optional — fleet search
 # and folder scan degrade to grep/find without them) and offer to brew-install any that are
