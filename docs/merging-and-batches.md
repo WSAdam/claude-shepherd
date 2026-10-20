@@ -144,7 +144,7 @@ the same queue and lane as above. A matching `merge.gates` entry always wins.
   post-merge run, which reads the base again: after the merge the unit's version is main's gate).
 - A shell script (`#!/bin/sh`, `bash`, `zsh`, or none) sees `$0` as the checkout's own
   `.worktree-check`, so `cd "$(dirname "$0")"` lands in the checkout. Another interpreter
-  (`#!/usr/bin/env -S deno run -A`) runs the scratch copy by path.
+  (`#!/usr/bin/env node`) runs the scratch copy by path.
 - No `.worktree-check` on the base means no gate, as before. A symlinked one, or one over 64KB,
   counts as a gate that couldn't run: it holds the merge and the review says why.
 - The review labels it **repo-declared gate** and names the copy it ran (*main's .worktree-check*).
@@ -196,7 +196,7 @@ checks that too, once the pre-merge gate has passed:
 **This repo's own suites** take file arguments through `tests/run.sh`: `bash tests/run.sh
 tests/core.test.lua tests/merge.test.sh` runs just those files, each under a `== <path> ==` header,
 by extension (`.lua` with `lua` and a temp `HOME`, `.sh` with `bash`, `.js` with `node`, `.ts` with
-`deno test`). A file that crashes before it prints a `FAIL` line gets one naming it, so a test that
+`node --test`). A file that crashes before it prints a `FAIL` line gets one naming it, so a test that
 calls a function the fix adds still reads as red. Its red-first command is
 `bash tests/run.sh {files}`.
 

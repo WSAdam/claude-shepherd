@@ -7699,6 +7699,11 @@ do
   check("a suite piped to /dev/null is no server", not core.isServerCommand("make test > /dev/null 2>&1"))
   check("a build is no server", not core.isServerCommand("npm run build"))
   check("a plain test run is no server", not core.isServerCommand("deno test -A"))
+  -- 2026-10-20: the Cloudflare/Astro stack's dev servers never finish either (docs/fleet.md names them)
+  for _, c in ipairs({ "npm run dev", "astro dev --port 4321", "npx wrangler dev", "pnpm astro preview" }) do
+    check("a Cloudflare/Astro dev server is a server: " .. c, core.isServerCommand(c))
+  end
+  check("...but a build or a deploy is not", not core.isServerCommand("astro build") and not core.isServerCommand("npx wrangler deploy"))
 
   eq("a dev server started in the background is not a job the card waits on",
      core.backgroundJobs(tail(start("srv1", "deno task dev > /tmp/dev.log 2>&1", T0))), 0)

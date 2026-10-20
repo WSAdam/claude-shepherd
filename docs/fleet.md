@@ -321,7 +321,7 @@ mistaken for one waiting on you (`subagents.activeWindow`, default 45s).
 
 Background **shell jobs** count too: a Bash command the session started with `run_in_background`
 keeps the card at **Running 1 job** until its completion notice lands in the transcript or the
-session stops it. A server or watcher (`deno task dev`, `npm start`, `http.server`, `--watch`,
+session stops it. A server or watcher (`npm run dev`, `astro dev`, `wrangler dev`, `npm start`, `http.server`, `--watch`,
 `tail -f`, a `serve.ts`) never finishes, so it doesn't count, and any other job stops counting
 30 minutes after it started (`subagents.jobMaxMinutes`). While a job counts, the card also isn't
 offered to Close selected, closed after its merge, or ended as a tab-less leftover.

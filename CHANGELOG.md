@@ -25,6 +25,11 @@ itself never needed Deno (it is Lua and bash); only the worktree demo did.
 - Added: **red-first proof and gate blame read the JS runners' failing tests**: `node --test`'s
   `✖ name`, Vitest's `× name` and Playwright's `✘ … › name` (`core.isRunnerFailMark`). Node's
   `✖ failing tests:` heading isn't a test. Deno's `... FAILED` stays known while Deno projects last.
+- Changed: **docs and the shipped methodology name no Deno-only setup as the example**:
+  `vitest.config.*` beside `tsconfig.json` as a config that must exclude `.claude/worktrees/`, tests as
+  `*.test.ts` under Vitest or `node --test`, `npm run dev` / `astro dev` / `wrangler dev` as the dev
+  servers that never count as a running job (pinned in core.test.lua). Deno stays where Shepherd still
+  supports it: `deno publish` is held, `deno.lock` is graded, Deno's failure lines are read.
 
 ## 2026-10-19 — My List reads past a TODO.md's 500th line
 

@@ -212,7 +212,7 @@ disk, `FX.alert`, interrupted turns, FSEvents). These are the others.
 ## Workflow
 
 - **`make test`** runs [tests/run.sh](tests/run.sh): about 167 files (65 Lua, 41 bash, 61 node, 17
-  of them Playwright browser suites) plus the demo's deno tests. Side-effect-free: temp dirs, a temp
+  of them Playwright browser suites) plus the demo's `node --test` suite. Side-effect-free: temp dirs, a temp
   `HOME` for stubbed-`hs` suites, recorder doubles, `hermetic-env.sh` strips `CC_*` from the calling
   shell. It holds a per-checkout lock (`install.test.sh` shells out to the real `make`), and
   `bash tests/run.sh <files…>` runs just those files, which is how the red-first proof runs a unit's
@@ -247,7 +247,8 @@ disk, `FX.alert`, interrupted turns, FSEvents). These are the others.
   `resolveBin` (PATH + `/opt/homebrew/bin` + `/usr/local/bin`), falling back to grep/find. The engine
   in use is logged (`[cc-search] engine=rg …`), and `make doctor` reports tool status and offers to
   install a missing one.
-- **Test-only:** luacheck, Playwright (browser suites skip without it), deno (the demo).
+- **Test-only:** luacheck, Playwright (browser suites skip without it). No Deno: the demo moved to
+  Node on 2026-10-20.
 - **Declined:** `gron`/`yq`/`htmlq`/`hexyl`, `jc`, `eza`/`bat`/`tv`/`fzf` (no surface in a webview).
 
 ## Known platform limits (not bugs)

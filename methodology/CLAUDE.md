@@ -36,7 +36,7 @@ parallel.
   it its own `PORT` whenever it runs a server. Test configs read `baseURL` and every host
   from the environment; never hardcode `localhost:<port>`. Gitignore `.claude/worktrees/`,
   and exclude it from anything that globs the repo (test runners, linters, `tsconfig.json`,
-  `deno.json`) — otherwise main's suite runs every worktree's copy too.
+  `vitest.config.*`) — otherwise main's suite runs every worktree's copy too.
 - **Work.** One Claude session per worktree, and never edit files that belong to another
   worktree. `EnterWorktree` fences a session off from main on its own; a session started
   normally in a sibling folder is not fenced, so there the rule is ours to keep. When I ask
@@ -162,7 +162,7 @@ parallel.
 - **Prove it goes red first.** Run the new test against the unfixed code and confirm it fails. A test that never failed proves nothing about the bug.
 - Name it for the behaviour that broke, not the function: `empty section renders when refundStatement is blank`, not `test refund 3`. One comment line with the date and the actual cause.
 - **Never delete, skip, or loosen one later to get a suite green.** If it starts failing, either the bug is back or the requirement changed — say which, out loud, before touching it.
-- Fixtures live with the project's existing tests (`deno test` / `*.test.ts`, `busted`, …). Don't stand up a parallel harness.
+- Fixtures live with the project's existing tests (`*.test.ts` under Vitest or `node --test`, `busted`, …). Don't stand up a parallel harness.
 - On a multi-bug sweep, every bug I actually fix still earns a fixture. Report any I could not cover, and why — don't quietly skip them.
 
 **When it isn't a unit test** — layout, rendering, contrast, encoding, config drift — still leave something executable:
