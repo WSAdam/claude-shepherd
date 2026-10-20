@@ -66,6 +66,10 @@ ci-deploy	Add a job to .github/workflows/ci.yml.
 ci-deploy	Update deploy.sh to copy the new file.
 ci-deploy	Edit the deploy script so it reloads.
 ci-deploy	Change the GitHub Actions matrix.
+# 2026-10-20: Cloudflare's Wrangler config also comes as .json / .jsonc (only .toml was known)
+ci-deploy	Add a D1 binding to wrangler.jsonc.
+ci-deploy	Point wrangler.json at the new KV namespace.
+ci-deploy	Bump compatibility_date in wrangler.toml.
 -	Run make deploy from main after the merge.
 -	Never edit .github/workflows.
 -	NEVER: make install/deploy/setup from the worktree.

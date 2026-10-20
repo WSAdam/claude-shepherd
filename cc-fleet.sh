@@ -106,7 +106,7 @@ def bf_rx: {
   "ci-deploy": ["\\.github/workflows", "\\.gitlab-ci", "(?<![a-z0-9])jenkinsfile", "\\.circleci", "\\.travis\\.yml",
                 "(?<![a-z0-9])deploy[a-z0-9_-]*\\.sh(?![a-z0-9])", "(?<![a-z0-9])deploy[a-z0-9_-]*\\.ya?ml",
                 "(?<![a-z0-9])fly\\.toml", "(?<![a-z0-9])netlify\\.toml", "(?<![a-z0-9])vercel\\.json",
-                "(?<![a-z0-9])wrangler\\.toml", "deploy\\s+scripts?", "github\\s+actions?", "(?<![a-z0-9])ci\\s+config",
+                "(?<![a-z0-9])wrangler\\.toml", "(?<![a-z0-9])wrangler\\.jsonc?", "deploy\\s+scripts?", "github\\s+actions?", "(?<![a-z0-9])ci\\s+config",
                 "(?<![a-z0-9])ci\\s+workflows?", "(?<![a-z0-9])ci\\s+pipelines?"]
 };
 def bf_fold($c): reduce .[] as $x ($c; if ($x.w | bf_isneg) then true elif ($x.w | bf_isreset) then false else . end);

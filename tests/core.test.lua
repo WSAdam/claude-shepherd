@@ -11009,6 +11009,16 @@ do
   check("...but not a suite that passed", fl:find("0 failed", 1, true) == nil)
   check("...and not the trailing noise", fl:find("fine 60", 1, true) == nil)
   eq("a green log has no failing lines", core.gateFailureLines("ok - a\nok - b\n", 10), "")
+  -- 2026-10-20: a Node/Vitest/Playwright project's failing tests (`✖`, `×`, `✘`), not its passes
+  local nlog = table.concat({ "✔ greet (0.4ms)", "✖ shout greets loudly (1.1ms)", "   ✓ a > b 1ms",
+    "   × whisper > greets quietly 2ms", "  ✓  1 [chromium] › a.spec.ts:1:1 › opens (0.9s)",
+    "  ✘  2 [chromium] › login.spec.ts:3:5 › logs in (1.2s)", "✖ failing tests:" }, "\n")
+  local nfl = core.gateFailureLines(nlog, 10)
+  check("gate log: node's failing test", nfl:find("shout greets loudly", 1, true) ~= nil)
+  check("gate log: vitest's failing test", nfl:find("whisper > greets quietly", 1, true) ~= nil)
+  check("gate log: playwright's failing test", nfl:find("logs in", 1, true) ~= nil)
+  check("gate log: ...not their passes, nor node's heading", nfl:find("greet (0.4ms)", 1, true) == nil
+        and nfl:find("a > b", 1, true) == nil and nfl:find("opens", 1, true) == nil and nfl:find("failing tests:", 1, true) == nil)
 
   -- the review carries the failing lines and the log's own path, so Adam can go read it
   local mreq = { phase = "requested", branch = "fix/a", base = "main", worktree = "/r/A/w/a",
@@ -13274,6 +13284,15 @@ do
   check("redFirstFailLine: an ok line quoting a failure is a pass", not core.redFirstFailLine("ok   - reads 'x ... FAILED (3ms)' as old"))
   check("redFirstFailLine: the ❌ banner names no test", not core.redFirstFailLine("❌ SOME TESTS FAILED"))
   check("redFirstFailLine: a summary names no test", not core.redFirstFailLine("-- a.test.lua: 3 run, 1 failed --"))
+  -- 2026-10-20: the Node/Vitest/Playwright projects replacing Deno print a failing test as `✖ name`
+  -- (node --test), `× name` (Vitest) or `✘ … › name` (Playwright); none of them read as a failure
+  check("redFirstFailLine: node's test runner", core.redFirstFailLine("✖ greet says hello by name (1.2ms)"))
+  check("redFirstFailLine: vitest", core.redFirstFailLine("   × greet > shouts loudly 3ms"))
+  check("redFirstFailLine: playwright", core.redFirstFailLine("  ✘  2 [chromium] › tests/login.spec.ts:3:5 › logs in (1.2s)"))
+  check("redFirstFailLine: node's 'failing tests:' heading names no test", not core.redFirstFailLine("✖ failing tests:"))
+  check("redFirstFailLine: their passes are passes",
+        not core.redFirstFailLine("✔ greet says hello by name (0.4ms)") and not core.redFirstFailLine("   ✓ greet > shouts 1ms")
+        and not core.redFirstFailLine("  ✓  1 [chromium] › tests/login.spec.ts:3:5 › logs in (1.1s)"))
 
   -- the changed-test list: an UNCAPPED --diff-filter=AMR base...branch, Shepherd's own git
   local req = { commonDir = "/r/A/.git", base = "main", branch = "feat/x", worktree = "/r/A/.claude/worktrees/x" }
@@ -15660,6 +15679,18 @@ do
   check("grant: .claude/settings* waits", says(risk({ F("M", ".claude/settings.local.json") }), "touches Claude settings: .claude/settings.local.json"))
   check("grant: a lookalike isn't risky (lockfile in a name, settings outside .claude)",
         risk({ F("M", "docs/lockfiles.md"), F("M", "settings.json"), F("M", "app/migrations.lua") }) == nil)
+  -- 2026-10-20: Adam's projects move to Cloudflare. A Wrangler config carries the bindings, routes and
+  -- vars the deploy uses, and grant grading knew no deploy file at all: a unit could repoint a Worker's
+  -- database and merge on the grant unclicked. Any folder (a monorepo keeps one per app).
+  check("grant: a wrangler.jsonc waits as deploy config",
+        says(risk({ F("M", "wrangler.jsonc") }), "touches deploy config: wrangler.jsonc"))
+  for _, p in ipairs({ "wrangler.toml", "wrangler.json", "apps/web/wrangler.jsonc", "netlify.toml", "vercel.json", "fly.toml" }) do
+    check("grant: deploy config: " .. p, says(risk({ F("M", p) }), "touches deploy config: " .. p))
+  end
+  check("grant: a deploy-config lookalike isn't risky",
+        risk({ F("M", "docs/wrangler.md"), F("M", "wrangler-notes.txt"), F("M", "src/vercel.ts") }) == nil)
+  check("grant: deploy config is a category merge.grantWaitsFor can leave out",
+        risk({ F("M", "wrangler.toml") }, nil, { merge = { grantWaitsFor = { "hookWiring" } } }) == nil)
 
   -- several reasons, in category order; a long list is cut with a count
   r = risk({ F("M", "deno.lock"), F("M", "settings-hooks.json"), F("D", "a.lua") })
@@ -15678,7 +15709,8 @@ do
   check("grant: a checker still running says nothing yet", risk({}, { state = "running", findings = pass.findings }) == nil)
 
   -- config: merge.grantWaitsFor names the categories; all of them when unset, none for []
-  check("grant: every category is on when the config doesn't say", #core.GRANT_WAIT_CATEGORIES == 10)
+  -- REQUIREMENT CHANGE 2026-10-20: 10 -> 11, the deploy category (Wrangler and friends)
+  check("grant: every category is on when the config doesn't say", #core.GRANT_WAIT_CATEGORIES == 11)
   local hooksOnly = { merge = { grantWaitsFor = { "hookWiring" } } }
   check("grant: config: only the listed categories count",
         risk({ F("M", "deno.lock"), F("M", "install.sh") }, nil, hooksOnly)[1] == "touches hook wiring: install.sh"

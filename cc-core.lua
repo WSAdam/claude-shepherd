@@ -2700,13 +2700,22 @@ end
 -- repo's suites actually emit: "FAIL - ...", TAP's "not ok ...", a "N run, M failed" summary
 -- with M > 0, and a bare ❌ line.
 M.MERGE_GATE_FAIL_LINES = 12
+-- One failing test as the JS runners print it (2026-10-20): node --test's `✖ name (1ms)`, Vitest's
+-- `× suite > name 3ms`, Playwright's `✘  2 [chromium] › file:3:5 › name`. Their passes are ✔ / ✓, and
+-- node's `✖ failing tests:` is the heading over a repeat of the list, naming no test.
+function M.isRunnerFailMark(line)
+  if type(line) ~= "string" then return false end
+  if line:find("^%s*✖%s+failing tests:%s*$") then return false end
+  return line:find("^%s*✖%s") ~= nil or line:find("^%s*×%s") ~= nil or line:find("^%s*✘%s") ~= nil
+end
+
 function M.gateFailureLines(output, maxLines)
   if type(output) ~= "string" or output == "" then return "" end
   maxLines = tonumber(maxLines) or M.MERGE_GATE_FAIL_LINES
   local out = {}
   for line in (output:gsub("\n$", "") .. "\n"):gmatch("([^\n]*)\n") do
     local hit = line:find("^%s*FAIL") ~= nil or line:find("FAIL %- ") ~= nil
-             or line:find("^%s*not ok") ~= nil or line:find("❌", 1, true) ~= nil
+             or line:find("^%s*not ok") ~= nil or line:find("❌", 1, true) ~= nil or M.isRunnerFailMark(line)
     if not hit then
       local n = tonumber(line:match("%d+%s+run,%s+(%d+)%s+failed") or "")
       hit = (n ~= nil and n > 0)
@@ -3548,10 +3557,12 @@ do
   -- `FAIL <file>`, go's `--- FAIL:`, deno's `name ... FAILED`. Not a ❌ banner or an
   -- `N run, M failed` summary: those name no test. A line that starts `ok` is a pass, whatever
   -- its test's name says.
+  -- 2026-10-20: and the runners replacing Deno: node --test's `✖ name`, Vitest's `× name`,
+  -- Playwright's `✘ … › name` (M.isRunnerFailMark). Node's `✖ failing tests:` heading names no test.
   local function failLine(line)
     if line:find("^%s*ok[%s%-]") then return false end
     return line:find("^%s*FAIL") ~= nil or line:find("FAIL %- ") ~= nil or line:find("^%s*not ok") ~= nil
-        or line:find("%-%-%- FAIL") ~= nil or line:find("%.%.%.%s*FAIL") ~= nil
+        or line:find("%-%-%- FAIL") ~= nil or line:find("%.%.%.%s*FAIL") ~= nil or M.isRunnerFailMark(line)
   end
   -- the same failure on another run: a duration or a moved line number doesn't make it new
   local function norm(line)
@@ -4471,11 +4482,12 @@ end
 -- checker reported a high-severity finding. merge.grantWaitsFor names the categories that count
 -- (all of them when unset; [] for none). His own Merge click never reads any of this.
 M.GRANT_WAIT_CATEGORIES = { "hookWiring", "deletedFiles", "instructions", "decisions", "defaults",
-                            "ci", "migrations", "lockfiles", "claudeSettings", "checkerHigh" }
+                            "ci", "deploy", "migrations", "lockfiles", "claudeSettings", "checkerHigh" }
 M.GRANT_WAIT_LABELS = {
   hookWiring = "touches hook wiring", deletedFiles = "deletes tracked files",
   instructions = "touches session instructions", decisions = "touches the decision log",
-  defaults = "touches the shipped defaults", ci = "touches CI config", migrations = "touches migrations",
+  defaults = "touches the shipped defaults", ci = "touches CI config", deploy = "touches deploy config",
+  migrations = "touches migrations",
   lockfiles = "touches lockfiles", claudeSettings = "touches Claude settings",
   checkerHigh = "the checker reported a high-severity finding",
 }
@@ -4488,6 +4500,10 @@ M.GRANT_LOCKFILES = { ["deno.lock"] = true, ["package-lock.json"] = true, ["npm-
   ["Cargo.lock"] = true, ["Gemfile.lock"] = true, ["poetry.lock"] = true, ["Pipfile.lock"] = true,
   ["uv.lock"] = true, ["composer.lock"] = true, ["go.sum"] = true, ["flake.lock"] = true, ["mix.lock"] = true,
   ["Podfile.lock"] = true, ["pubspec.lock"] = true, ["packages.lock.json"] = true, ["gradle.lockfile"] = true }
+-- 2026-10-20: deploy config, by file name in any folder (a monorepo keeps one per app). Adam's projects
+-- move to Cloudflare, where wrangler.* carries the bindings, routes and vars a deploy uses.
+M.GRANT_DEPLOY_FILES = { ["wrangler.toml"] = true, ["wrangler.json"] = true, ["wrangler.jsonc"] = true,
+  ["netlify.toml"] = true, ["vercel.json"] = true, ["fly.toml"] = true }
 M.GRANT_SHOW_FILES = 3
 
 do
@@ -4502,6 +4518,7 @@ do
     if p:sub(1, 8) == ".github/" or p:sub(1, 10) == ".circleci/" or p:sub(1, 11) == ".buildkite/" or M.GRANT_CI_FILES[p] then
       add("ci")
     end
+    if M.GRANT_DEPLOY_FILES[base] then add("deploy") end
     local dirs = "/" .. p:sub(1, #p - #base)
     if dirs:find("/migrations?/") or dirs:find("/migrate/") then add("migrations") end
     if M.GRANT_LOCKFILES[base] then add("lockfiles") end
@@ -5042,7 +5059,8 @@ do
                 "%f[%w]credentials?%f[^%w]", "private[%s_%-]key", "service[%s_%-]account[%w_%-]*%.json" },
     ["ci-deploy"] = { "%.github/workflows", "%.gitlab%-ci", "%f[%w]jenkinsfile", "%.circleci", "%.travis%.yml",
                       "%f[%w]deploy[%w_%-]*%.sh%f[^%w]", "%f[%w]deploy[%w_%-]*%.ya?ml", "%f[%w]fly%.toml",
-                      "%f[%w]netlify%.toml", "%f[%w]vercel%.json", "%f[%w]wrangler%.toml", "deploy%s+scripts?",
+                      "%f[%w]netlify%.toml", "%f[%w]vercel%.json", "%f[%w]wrangler%.toml", "%f[%w]wrangler%.jsonc?",
+                      "deploy%s+scripts?",
                       "github%s+actions?", "%f[%w]ci%s+config", "%f[%w]ci%s+workflows?", "%f[%w]ci%s+pipelines?" },
   }
   local PUSH = { push = true, pushes = true, pushed = true, pushing = true }
@@ -26572,7 +26590,7 @@ M.FEATURES = {
     what = "Every merge request gets a background review: Shepherd first scans the diff for red flags (conflict markers, deleted or weakened tests, a new .skip/.only, stubs), then a read-only Sonnet run answers pass or fail, shown in the review. A batch unit merges on your grant only after a pass; your own Merge click still works. 🔎 Verify runs the same review on any session.",
     why = "The tests prove the suite is green; the checker reads the code, so a merge nobody looked at still gets a second pair of eyes." },
   { key = "grantgrade", cat = "Control", new = true, title = "Grant grading",
-    what = "A batch unit's merge on your grant waits for your Merge click when its diff touches hook wiring (settings-hooks.json, install.sh, uninstall.sh, SHIPPED), CLAUDE.md or methodology/, DECISIONS.md, defaults/, CI config, migrations, lockfiles or .claude/settings*, deletes a tracked file, or the checker reported a high-severity finding -- read from the full file list, never the review's cut one. Otherwise it merges only on evidence Shepherd holds: the gate's pass for that commit, and the checker's pass when it's on. The review says why it waited; your own click is unaffected. merge.grantWaitsFor picks the categories.",
+    what = "A batch unit's merge on your grant waits for your Merge click when its diff touches hook wiring (settings-hooks.json, install.sh, uninstall.sh, SHIPPED), CLAUDE.md or methodology/, DECISIONS.md, defaults/, CI config, deploy config (wrangler.*, netlify.toml, vercel.json, fly.toml), migrations, lockfiles or .claude/settings*, deletes a tracked file, or the checker reported a high-severity finding -- read from the full file list, never the review's cut one. Otherwise it merges only on evidence Shepherd holds: the gate's pass for that commit, and the checker's pass when it's on. The review says why it waited; your own click is unaffected. merge.grantWaitsFor picks the categories.",
     why = "Your one approval covers the routine merges, and the ones that change how every session behaves still come to you." },
   { key = "redfirst", cat = "Control", new = true, title = "Red-first proof",
     what = "With a redFirstCommand on the project's merge gate, Shepherd runs the unit's changed tests on a scratch worktree at the merge-base, without the fix, once the gate passes. The review says whether they fail there: proved red, not red (which files), or couldn't run, leaving out failures main already has. It's a hint; Merge never waits for it.",

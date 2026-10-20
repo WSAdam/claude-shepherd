@@ -16,6 +16,15 @@ itself never needed Deno (it is Lua and bash); only the worktree demo did.
   `CLAUDE.md` name no Deno command. The repo's `deno.json` is gone; `make demo-test` runs the
   demo's suite, and `tests/run.sh` runs it with every Deno directory taken off `PATH`. CI now runs it
   too, since it needs only Node.
+- Added: **a `deploy` grant category.** A batch unit's merge on the grant waits for Adam's click when
+  it changes a `wrangler.toml`, `wrangler.json` or `wrangler.jsonc` (or `netlify.toml`,
+  `vercel.json`, `fly.toml`) in any folder: that file carries the bindings, routes and vars a deploy
+  uses, and grant grading knew no deploy file at all. Unset `merge.grantWaitsFor` and the shipped
+  default include it; a list written before today leaves it off until `deploy` is added. The brief
+  pre-flight's CI-or-deploy flag (both twins) knows `wrangler.json` / `wrangler.jsonc` too.
+- Added: **red-first proof and gate blame read the JS runners' failing tests**: `node --test`'s
+  `✖ name`, Vitest's `× name` and Playwright's `✘ … › name` (`core.isRunnerFailMark`). Node's
+  `✖ failing tests:` heading isn't a test. Deno's `... FAILED` stays known while Deno projects last.
 
 ## 2026-10-19 — My List reads past a TODO.md's 500th line
 

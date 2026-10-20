@@ -131,7 +131,7 @@
   },
   "merge": {
     "grantWaitsFor": ["hookWiring", "deletedFiles", "instructions", "decisions", "defaults",
-                      "ci", "migrations", "lockfiles", "claudeSettings", "checkerHigh"]
+                      "ci", "deploy", "migrations", "lockfiles", "claudeSettings", "checkerHigh"]
   },
   "coach": {
     "enabled": false,

@@ -173,7 +173,8 @@ checks that too, once the pre-merge gate has passed:
 - It runs in the repo's one gate lane, after the gate, so it never runs beside another suite, and
   it uses the gate's `timeoutSeconds`.
 - **Proved red** means every changed test file printed a failing line of its own: `FAIL - name`,
-  `not ok`, jest's `FAIL <file>`, go's `--- FAIL:`, or deno's `... FAILED`. A failing line belongs
+  `not ok`, jest's `FAIL <file>`, go's `--- FAIL:`, deno's `... FAILED`, `node --test`'s `✖ name`,
+  Vitest's `× name` or Playwright's `✘ … › name`. A failing line belongs
   to the file it names; otherwise to the file named by the last header above it (`== <path> ==`,
   jest's `PASS <file>`); otherwise, when only one file ran, to that file.
 - Failures that **already happen on the base branch** don't count. The changed files that also
@@ -518,7 +519,8 @@ Merge click** when its diff:
 - touches **session instructions** (any `CLAUDE.md`, or `methodology/`), the **decision log**
   (`DECISIONS.md`) or the **shipped defaults** (`defaults/`);
 - touches **CI config** (`.github/`, `.gitlab-ci.yml`, `.circleci/` and the like, and the repo's own
-  [`.worktree-check`](#a-repo-can-declare-its-own-gate)), **migrations**
+  [`.worktree-check`](#a-repo-can-declare-its-own-gate)), **deploy config** (`wrangler.toml`,
+  `wrangler.json`, `wrangler.jsonc`, `netlify.toml`, `vercel.json` or `fly.toml`, in any folder), **migrations**
   (a `migrations/`, `migration/` or `migrate/` folder at any depth), **lockfiles** (`deno.lock`, `package-lock.json`,
   `Cargo.lock` and the like) or **Claude settings** (`.claude/settings*`);
 - or the checker reported a **high-severity finding**, even on a pass.
@@ -537,13 +539,14 @@ A merge that waits reads **Needs you**, and its card and the review say why, for
 for your click*. **Your own Merge click is never graded.**
 
 `merge.grantWaitsFor` lists the categories that count: `hookWiring`, `deletedFiles`,
-`instructions`, `decisions`, `defaults`, `ci`, `migrations`, `lockfiles`, `claudeSettings` and
-`checkerHigh`. Unset means all of them, and a fresh install ships them all. `[]` turns the
-categories off, but the evidence rule above still applies.
+`instructions`, `decisions`, `defaults`, `ci`, `deploy`, `migrations`, `lockfiles`, `claudeSettings`
+and `checkerHigh`. Unset means all of them, and a fresh install ships them all. `[]` turns the
+categories off, but the evidence rule above still applies. A list written before `deploy` existed
+(2026-10-20) leaves it off until you add it.
 
 ```json
 "merge": { "grantWaitsFor": ["hookWiring", "deletedFiles", "instructions", "decisions", "defaults",
-                             "ci", "migrations", "lockfiles", "claudeSettings", "checkerHigh"] }
+                             "ci", "deploy", "migrations", "lockfiles", "claudeSettings", "checkerHigh"] }
 ```
 
 ### Coverage index: a batch says what it covers
