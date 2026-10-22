@@ -4,6 +4,19 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-10-22 — Shepherd stops freezing on big transcripts
+
+- Fixed: **the panel froze for up to 1.75 s at a time.** Adam: "shepherd is running like shit,
+  lagging and taking a while". A 60-second live profile (every tick, `FX.*`/`core.*` call and
+  `hs.execute` timed inside the running VM, drawn as a flame graph) put 69% of the tick in one call:
+  a synchronous `grep` of a session's WHOLE transcript for its rename (`custom-title`), made every 30 s
+  per session to name its VS Code tab (`FX.sessionTabCandidates`, `FX.sessionTabLabel`). The
+  transcripts had grown to 100-264 MB. Typical tick 56 ms; 1 in 20 over 1.4 s. Now
+  `FX.customTitleLines` scans a transcript once in the background (`hs.task`), then reads only the
+  bytes appended since, in Lua (`core.customTitleChunk`); a shorter or much larger file gets a fresh
+  background scan. `tests/tab-title-scan.test.lua` drives it, and `ui.test.lua` pins that no
+  synchronous whole-transcript grep comes back.
+
 ## 2026-10-22 — Remote Control on every card
 
 - Added: **a card says when its session is out of Remote Control.** Three VS Code tabs restored

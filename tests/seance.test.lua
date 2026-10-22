@@ -174,6 +174,15 @@ local function seanceTasks()
   return out
 end
 local function cmdOf(t) return tostring(t and t.args[3] or "") end
+-- Headless runs only: since 2026-10-22 the panel's own tick also starts a background
+-- tab-title scan (FX.customTitleLines), which is not a run.
+local function runTasks()
+  local n = 0
+  for _, t in ipairs(TASKS) do
+    if not tostring(t.args[2] or ""):find("custom-title", 1, true) then n = n + 1 end
+  end
+  return n
+end
 local function files(t) return cmdOf(t):match("< '([^']+)' > '([^']+)' 2> '([^']+)'") end
 -- play claude: write its output where the command line sends it, then exit
 local function answer(t, result, code, errText)
@@ -202,7 +211,7 @@ quiet(function()
   fx.runHeadless({ id = "coach|/r/A", lane = "/r/A/.git", dir = "/r/A", prompt = "coach" })
 end)
 check("(setup) the checker runs and the coach waits in repo A's lane",
-      #TASKS == 1 and fx._headless["coach|/r/A"] and fx._headless["coach|/r/A"].state == "queued")
+      runTasks() == 1 and fx._headless["coach|/r/A"] and fx._headless["coach|/r/A"].state == "queued")
 
 -- 1. A live session, asked from its detail panel
 ask({ key = "k1", question = "What did you change in <app.lua> & why?" })

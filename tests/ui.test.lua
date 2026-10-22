@@ -5699,6 +5699,20 @@ do
         at ~= nil and first ~= nil and at < first)
 end
 
+-- ---- No whole-transcript grep on the tick (2026-10-22) ----
+-- 2026-10-22: a live profile put 69% of Shepherd's tick in `hs.execute("grep -F '"type":"custom-title"' <transcript>")`
+-- -- 100-264 MB files, up to 1.75s a call, every 30s per session. FX.customTitleLines replaced it
+-- (tests/tab-title-scan.test.lua); no synchronous custom-title grep may come back.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("tab names: no synchronous grep of a whole transcript for its rename",
+        src:find([[hs.execute("grep -F '\"type\":\"custom-title\"']], 1, true) == nil)
+  check("tab names: both tab-name paths read renames through FX.customTitleLines",
+        select(2, src:gsub("FX%.customTitleLines%(path%)", "")) >= 2)
+end
+
 -- ---- Remote Control on the card (2026-10-22) ----
 -- 2026-10-22: three VS Code tabs sat out of Remote Control for six days with nothing on their cards;
 -- FX.stepRemoteControl stamps it.rcOff (core.rcChip) and the card shows a fixed-text chip for it.

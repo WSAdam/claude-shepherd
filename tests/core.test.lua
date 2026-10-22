@@ -16627,5 +16627,28 @@ do
   eq("rc fix: not a gateway session", #targets(tile({ base_url = "https://gw.example" })), 0)
 end
 
+-- ---- A tab's rename read from appended bytes only (2026-10-22) ----
+do
+  -- 2026-10-22: FX.sessionTabCandidates grepped the WHOLE transcript for custom-title records every 30s
+  -- per session, synchronously; at 100-264 MB that froze the panel up to 1.75s a time (69% of the tick
+  -- in a live profile). core.customTitleChunk folds just the bytes appended since the last read.
+  local CT = function(t) return '{"type":"custom-title","customTitle":"' .. t .. '","sessionId":"s"}' end
+  local lines, rest = core.customTitleChunk(nil, "", '{"type":"user"}\n' .. CT("Alpha") .. "\n" .. '{"type":"assistant"}\n')
+  eq("chunk: a complete rename line is kept", table.concat(lines, "|"), CT("Alpha"))
+  eq("chunk: nothing torn, nothing carried", rest, "")
+  lines, rest = core.customTitleChunk(lines, "", CT("Beta") .. "\n" .. '{"type":"custom-ti')
+  eq("chunk: a later rename joins the list", #lines, 2)
+  eq("chunk: a line torn at the end of the read is carried, not counted", rest, '{"type":"custom-ti')
+  lines, rest = core.customTitleChunk(lines, rest, 'tle","customTitle":"Gamma","sessionId":"s"}\n' .. CT("Delta") .. "\n")
+  eq("chunk: the carried line completes on the next read, and only the last three stay",
+     table.concat(lines, "|"), table.concat({ CT("Beta"), CT("Gamma"), CT("Delta") }, "|"))
+  eq("chunk: ...and the title reader takes the newest", core.claudeTabTitle(table.concat(lines, "\n"), nil), "Delta")
+  local big = string.rep("x", core.CUSTOM_TITLE_REST_MAX + 10)
+  local _, r2 = core.customTitleChunk(nil, "", big)
+  eq("chunk: an endless line isn't carried forever (no rename is that long)", r2, "")
+  local l3 = core.customTitleChunk(nil, "", "")
+  eq("chunk: an empty read changes nothing", #l3, 0)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

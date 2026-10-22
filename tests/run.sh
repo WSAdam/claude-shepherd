@@ -401,6 +401,9 @@ echo ""
 echo "== lua: Remote Control on every card -- a session file with no bridgeSessionId shows a chip, and a VS Code tab alone in its window gets /remote-control once past the grace, never a shared window or one that's in (behavioral, stubbed hs + a temp session registry) =="
 HOME="$(mktemp -d)" lua "$DIR/remote-control.test.lua" || fail=1
 echo ""
+echo "== lua: a tab's rename is read once in the background, then only from the bytes a transcript grows by -- never a blocking grep of the whole file on the tick (behavioral, stubbed hs + a real transcript) =="
+HOME="$(mktemp -d)" lua "$DIR/tab-title-scan.test.lua" || fail=1
+echo ""
 echo "== node: a card's main-is-red flag, its failing lines in the tooltip, both escaped (behavioral, runs the shipped mainRedBadge) =="
 node "$DIR/maingreen-badge.test.js" || fail=1
 echo ""

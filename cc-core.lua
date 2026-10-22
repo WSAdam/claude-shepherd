@@ -778,6 +778,35 @@ function M.claudeTabTitle(customText, tailText)
   return found or M.aiTitleFromTranscript(tailText)
 end
 
+-- 2026-10-22: a tab's rename records, folded from appended bytes only. FX.sessionTabCandidates grepped
+-- the WHOLE transcript every 30s per session, synchronously -- at 100-264 MB that froze the panel up to
+-- 1.75s a time (69% of the tick in a live profile). FX.customTitleLines scans a transcript once in the
+-- background, then hands this the bytes appended since its last read: `rest` is the line torn at the
+-- end of the previous read, `lines` the custom-title lines kept so far (the last
+-- M.CUSTOM_TITLE_KEEP, the shape `grep | tail -n 3` gave claudeTabTitle). Returns lines, rest. Lines
+-- are walked with a plain find (the quadratic-backtrack trap on torn last lines). Pure.
+M.CUSTOM_TITLE_KEEP = 3
+M.CUSTOM_TITLE_REST_MAX = 65536   -- a rename line is short; a longer torn tail can't be one
+function M.customTitleChunk(lines, rest, chunk)
+  local out = {}
+  for _, l in ipairs(type(lines) == "table" and lines or {}) do out[#out + 1] = l end
+  local s = (type(rest) == "string" and rest or "") .. (type(chunk) == "string" and chunk or "")
+  local pos, n = 1, #s
+  while pos <= n do
+    local nl = s:find("\n", pos, true)
+    if not nl then break end
+    local line = s:sub(pos, nl - 1)
+    if line:find('"type":"custom-title"', 1, true) then
+      out[#out + 1] = line
+      if #out > M.CUSTOM_TITLE_KEEP then table.remove(out, 1) end
+    end
+    pos = nl + 1
+  end
+  local tail = pos <= n and s:sub(pos) or ""
+  if #tail > M.CUSTOM_TITLE_REST_MAX then tail = "" end
+  return out, tail
+end
+
 -- The Claude extension's tab label for a title: its webview sends
 -- `q.length > 25 ? q.substring(0, 24) + "…" : q` -- JS lengths are UTF-16 units, so an
 -- astral character (emoji) counts twice. nil for no title or invalid UTF-8.

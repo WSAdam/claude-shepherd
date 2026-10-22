@@ -5264,17 +5264,68 @@ function FX.tabBridgeRegistry(hostPid)
   return (ok and type(reg) == "table") and reg or nil
 end
 
+-- 2026-10-22: a transcript's rename (custom-title) records without re-reading the transcript. This was a
+-- synchronous `grep` of the WHOLE file every 30s per session; Adam's transcripts reached 100-264 MB and
+-- each grep froze the panel up to 1.75s (69% of the tick in a live profile). Now: one background scan of
+-- the bytes the file has at first sight (hs.task), then only the bytes appended since, read here in Lua
+-- (core.customTitleChunk). A file that got shorter (rewritten), or grew past FX.CT_INCR_MAX at once
+-- (Shepherd was off), gets a fresh background scan; the last answer stands until it lands. Returns the
+-- custom-title lines joined by "\n" (what `grep | tail -n 3` gave), or nil while there are none.
+FX._ctScan = {}                    -- transcript path -> { scanned, lines, rest, joined, task }
+FX.CT_INCR_MAX = 8 * 1024 * 1024
+function FX.customTitleLines(path)
+  if type(path) ~= "string" or path == "" then return nil end
+  local size
+  pcall(function() local f = io.open(path, "rb"); if f then size = f:seek("end"); f:close() end end)
+  if not size then return nil end
+  local e = FX._ctScan[path]
+  if e and e.task then return e.joined end            -- a scan in flight: what we had
+  if e and (size < e.scanned or size - e.scanned > FX.CT_INCR_MAX) then
+    e = { scanned = 0, lines = {}, rest = "", joined = e.joined, fresh = true }
+    FX._ctScan[path] = e
+  end
+  if not e or e.fresh then
+    e = e or { scanned = 0, lines = {}, rest = "", joined = nil }
+    e.fresh = nil
+    FX._ctScan[path] = e
+    local q = "'" .. path:gsub("'", "'\\''") .. "'"
+    local cmd = "head -c " .. math.floor(size) .. " " .. q .. " 2>/dev/null | grep -F '\"type\":\"custom-title\"' | tail -n "
+      .. core.CUSTOM_TITLE_KEEP
+    local ok, t = pcall(function()
+      return hs.task.new("/bin/sh", function(_, out)
+        e.task = nil
+        local lines = {}
+        for line in tostring(out or ""):gmatch("[^\n]+") do lines[#lines + 1] = line end
+        e.lines, e.rest, e.scanned = lines, "", size
+        e.joined = (#lines > 0) and table.concat(lines, "\n") or nil
+      end, { "-c", cmd })
+    end)
+    if ok and t and t:start() then e.task = t else FX._ctScan[path] = nil end
+    return e.joined
+  end
+  if size > e.scanned then
+    local chunk
+    pcall(function()
+      local f = io.open(path, "rb")
+      if f then f:seek("set", e.scanned); chunk = f:read(size - e.scanned); f:close() end
+    end)
+    if chunk then
+      e.lines, e.rest = core.customTitleChunk(e.lines, e.rest, chunk)
+      e.scanned = e.scanned + #chunk
+      e.joined = (#e.lines > 0) and table.concat(e.lines, "\n") or nil
+    end
+  end
+  return e.joined
+end
+
 -- The label this session's tab shows. A rename (custom-title) can sit far behind the
--- tail, so those records come from a grep of the whole transcript; the AI title is
--- re-appended as the chat evolves, so the tail has the newest one.
+-- tail, so those records come from FX.customTitleLines (the whole transcript, read once and
+-- then only as it grows); the AI title is re-appended as the chat evolves, so the tail has
+-- the newest one.
 function FX.sessionTabLabel(it)
   local path = it and it.transcript_path
   if type(path) ~= "string" or path == "" then return nil end
-  local custom
-  pcall(function()
-    local q = "'" .. path:gsub("'", "'\\''") .. "'"
-    custom = hs.execute("grep -F '\"type\":\"custom-title\"' " .. q .. " 2>/dev/null | tail -n 3")
-  end)
+  local custom = FX.customTitleLines(path)
   local title = core.claudeTabTitle(custom, FX.readTail(path, 131072))
   if not title then
     -- 2026-09-11: no custom or AI title yet -> the extension names the tab after the first
@@ -6207,11 +6258,7 @@ FX._tabLabels = {}   -- key -> { names, at }: a transcript grep + head + tail at
 function FX.sessionTabCandidates(it)
   local path = it and it.transcript_path
   if type(path) ~= "string" or path == "" then return nil end
-  local custom, head
-  pcall(function()
-    local q = "'" .. path:gsub("'", "'\\''") .. "'"
-    custom = hs.execute("grep -F '\"type\":\"custom-title\"' " .. q .. " 2>/dev/null | tail -n 3")
-  end)
+  local custom, head = FX.customTitleLines(path), nil   -- 2026-10-22: never a whole-transcript grep
   pcall(function() local f = io.open(path, "rb"); if f then head = f:read(16384); f:close() end end)
   return core.claudeTabCandidates({
     custom = core.claudeTabTitle(custom, nil), ai = core.aiTitleFromTranscript(FX.readTail(path, 131072)),
