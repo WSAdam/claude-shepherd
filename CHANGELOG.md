@@ -4,6 +4,22 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-10-22 — Remote Control on every card
+
+- Added: **a card says when its session is out of Remote Control.** Three VS Code tabs restored
+  together on 2026-10-16 came back without it, though `remoteControlAtStartup` is on, and nothing
+  showed it for six days: the `/rc` sweep is terminal-only, and spawn's `--remote-control` never
+  reaches a tab the extension starts. Adam: "this repo is not in remote control and several others
+  aren't, i thought we had a feature for making sure they were in remote control at all time".
+  Claude Code's session file (`~/.claude/sessions/<pid>.json`) carries a `bridgeSessionId` while a
+  session is connected; a card whose session has none shows **⊘ no Remote Control**
+  (`FX.stepRemoteControl`, `core.rcStateFor`, `core.rcChip`).
+- Added: **Shepherd connects a VS Code or Cursor tab that stays out**: idle or finished, alone in its
+  window, out for 90 seconds, extension 2.1.257+ -> `/remote-control` typed once (`core.rcFixTargets`).
+  Never twice (a second one disconnects), never into a shared window (the chip stays for Adam's
+  click), never a gateway session. `remoteControl.sweepOnStartup` turns it off with the `/rc` sweep;
+  `remoteControl.dryRun` records it without typing. `tests/remote-control.test.lua` drives it.
+
 ## 2026-10-22 — The selected card's panel sits under the cards
 
 - Changed: **a selected card's panel comes right after the cards**, above the fleet token bars and

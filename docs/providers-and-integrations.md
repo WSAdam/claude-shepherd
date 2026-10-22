@@ -184,14 +184,22 @@ into Kitty windows.
   gateway and SSH providers, so the flag is skipped for those.
 - **On startup** (`remoteControl.sweepOnStartup`): when Shepherd starts, it types `/rc` into
   already-running idle or finished local **terminal** sessions (Kitty / Terminal), so Remote Control
-  is re-armed after a restart. It skips sessions mid-turn or waiting on you, and never types into a
-  VS Code or Cursor tab (the extension has no `/rc`, and its slash menu used to turn it into another
-  command).
-- **Sessions you start yourself** aren't Shepherd-spawned. To register them automatically, run
-  `/config` inside Claude Code once and set **Enable Remote Control for all sessions**; there is no
-  documented settings.json key for that, so Shepherd can't set it for you. (The installer's
-  [default Claude Code settings](install.md#what-the-install-sets-up) turn on Remote Control at
-  startup where you haven't set it.)
+  is re-armed after a restart. It skips sessions mid-turn or waiting on you, and never types `/rc`
+  into a VS Code or Cursor tab (its slash menu once turned `/rc` into another command).
+- **Every card shows whether its session is in** (2026-10-22). Claude Code's own session file
+  (`~/.claude/sessions/<pid>.json`) carries a `bridgeSessionId` while a session is connected; a card
+  whose session has none shows **⊘ no Remote Control**. A **VS Code or Cursor tab** that stays out for
+  90 seconds, while idle or finished and **alone in its window**, gets `/remote-control` typed once
+  (extension 2.1.257 or newer, which lists that command). Never twice: a second `/remote-control`
+  disconnects. A tab in a window shared with other sessions keeps the chip, since Shepherd won't type
+  into a shared window; type `/remote-control` there yourself. The same `sweepOnStartup` switch turns
+  this off, and `remoteControl.dryRun` records it without typing.
+- **Sessions you start yourself** aren't Shepherd-spawned. Claude Code's `remoteControlAtStartup`
+  setting (in `~/.claude/settings.json`, or `/config` → **Enable Remote Control for all sessions**)
+  connects them as they start; the installer's
+  [default Claude Code settings](install.md#what-the-install-sets-up) turn it on where you haven't set
+  it. Tabs VS Code restores together can still come back out (three did on 2026-10-16), which is what
+  the chip and the `/remote-control` fix above are for.
 
 > **Security: this is on by default.** A session with Remote Control can be driven from your
 > claude.ai account, so anyone with access to that account (or the Claude mobile app) can type into

@@ -45,6 +45,7 @@ const lib = new Function(
   "function bgBadge(){ return ''; } function notesBadge(){ return ''; } function pinChipsHtml(){ return ''; }\n" +
   "function ticketBadge(){ return ''; } function coachBadge(){ return ''; } function schedLockBadge(){ return ''; }\n" +
   "function mainRedBadge(){ return ''; }\n" +   // 2026-10-03: the main-green check's flag joined the row
+  "function rcOffBadge(){ return ''; }\n" +     // 2026-10-22: the Remote Control chip joined the row
   escSrc + "\n" + titleSrc + "\n" + badgeSrc + "\n" + badgesSrc +
   "\nreturn { leaseBadge, badgesHtml };")();
 

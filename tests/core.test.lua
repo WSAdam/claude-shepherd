@@ -16566,5 +16566,66 @@ do
   eq("a bundle with no alwaysAsk writes no alwaysAsk key", plain and plain.alwaysAsk, nil)
 end
 
+-- ---- Remote Control: which sessions are out, and which Shepherd may connect (2026-10-22) ----
+do
+  -- 2026-10-22: three VS Code tabs restored together at 10:09:12 on 2026-10-16 came back without Remote
+  -- Control (no bridgeSessionId in ~/.claude/sessions/<pid>.json) though remoteControlAtStartup is on;
+  -- the /rc sweep skips VS Code tabs, so nothing showed it or fixed it for six days.
+  local reg = {
+    ["9028"] = { pid = 9028, sessionId = "s-off", version = "2.1.301" },
+    ["36004"] = { pid = 36004, sessionId = "s-on", version = "2.1.301", bridgeSessionId = "session_01MsGA8cr4NRdQDfAuJn45qY" },
+    ["777"] = { pid = 777, sessionId = "s-new-after-clear", version = "2.1.301" },
+  }
+  local st, v = core.rcStateFor({ session_pid = "9028", session_id = "s-off" }, reg)
+  eq("rc: a session file with no bridgeSessionId is out of Remote Control", st, "off")
+  eq("rc: ...and carries the session's Claude Code version", v, "2.1.301")
+  eq("rc: one with a bridgeSessionId is in", (core.rcStateFor({ session_pid = 36004, session_id = "s-on" }, reg)), "on")
+  eq("rc: no session file for the pid -> unknown", (core.rcStateFor({ session_pid = "1", session_id = "x" }, reg)), nil)
+  eq("rc: a file for another session id -> unknown, never 'off'",
+     (core.rcStateFor({ session_pid = "777", session_id = "s-before-clear" }, reg)), nil)
+  eq("rc: no pid -> unknown", (core.rcStateFor({ session_id = "s-off" }, reg)), nil)
+
+  check("rc chip: a local session out of Remote Control shows it", core.rcChip({ rc = "off", model = "claude-opus-5-5" }))
+  check("rc chip: ...not one that's in", not core.rcChip({ rc = "on" }))
+  check("rc chip: ...not an unknown one", not core.rcChip({}))
+  check("rc chip: ...not a remote (bridge) tile", not core.rcChip({ rc = "off", remote = true }))
+  check("rc chip: ...not a gateway session (Remote Control needs claude.ai auth)",
+        not core.rcChip({ rc = "off", base_url = "https://gw.example" }))
+
+  local NOW = 100000
+  local function tile(over)
+    local t = { key = "k1", session_id = "s-off", rc = "off", ccVersion = "2.1.301", editor = "vscode",
+                status = "idle", model = "claude-opus-5-5" }
+    for k, x in pairs(over or {}) do t[k] = x end
+    return t
+  end
+  local function targets(t, offSince, tried)
+    return core.rcFixTargets({ t }, NOW, offSince or { k1 = NOW - core.RC_FIX_GRACE }, tried or {})
+  end
+  local got = targets(tile())
+  check("rc fix: an idle VS Code tab alone in its window, out past the grace, gets /remote-control",
+        #got == 1 and got[1].it.key == "k1" and got[1].command == "/remote-control")
+  check("rc fix: a done one too", #targets(tile({ status = "done" })) == 1)
+  check("rc fix: Cursor too", #targets(tile({ editor = "cursor" })) == 1)
+  eq("rc fix: never one that's in (a second /remote-control disconnects it)", #targets(tile({ rc = "on" })), 0)
+  eq("rc fix: never an unknown one", #targets(tile({ rc = false })), 0)
+  eq("rc fix: not before the grace (remoteControlAtStartup may still connect it)",
+     #targets(tile(), { k1 = NOW - core.RC_FIX_GRACE + 1 }), 0)
+  eq("rc fix: not with no off-since stamp", #targets(tile(), {}), 0)
+  eq("rc fix: only once per session", #targets(tile(), nil, { ["s-off"] = true }), 0)
+  eq("rc fix: never into a window that hosts other sessions", #targets(tile({ sharedWindow = 3 })), 0)
+  eq("rc fix: never mid-turn", #targets(tile({ status = "working" })), 0)
+  eq("rc fix: never over a pending approval", #targets(tile({ status = "approval" })), 0)
+  eq("rc fix: not an extension too old to have /remote-control", #targets(tile({ ccVersion = "2.1.256" })), 0)
+  eq("rc fix: not an unreadable version", #targets(tile({ ccVersion = "?" })), 0)
+  check("rc fix: a newer major/minor still counts", #targets(tile({ ccVersion = "2.2.0" })) == 1)
+  eq("rc fix: not a terminal (the startup /rc sweep has those)", #targets(tile({ editor = "terminal" })), 0)
+  eq("rc fix: not a remote tile", #targets(tile({ remote = true })), 0)
+  -- a quiet card is "stale" 90s after its last hook; an idle tab is exactly that, so stale doesn't
+  -- exclude it -- the session file (there only while the process runs) is the liveness check
+  check("rc fix: a quiet (stale) idle tab still counts", #targets(tile({ stale = true })) == 1)
+  eq("rc fix: not a gateway session", #targets(tile({ base_url = "https://gw.example" })), 0)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

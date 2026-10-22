@@ -49,6 +49,7 @@ const lib = new Function("sent", "stubs",
   "function bgBadge(){ return ''; } function notesBadge(){ return ''; } function leaseBadge(){ return ''; }\n" +
   "function ticketBadge(){ return ''; } function coachBadge(){ return ''; } function schedLockBadge(){ return ''; }\n" +
   "function mainRedBadge(){ return ''; }\n" +   // 2026-10-03: the main-green check's flag joined the row
+  "function rcOffBadge(){ return ''; }\n" +     // 2026-10-22: the Remote Control chip joined the row
   escSrc + "\n" + chipsSrc + "\n" + openSrc + "\n" + badgesSrc +
   "\nreturn { pinChipsHtml, openPin, badgesHtml, setSel: function(k){ selectedKey = k; } };")(sent, { selectedKey: null });
 

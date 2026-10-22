@@ -7175,6 +7175,39 @@ function FX.mainGreenJudge(cd, g, cfg)
   return changed
 end
 
+-- ---- Remote Control on every card (2026-10-22) ----
+-- Each card's Remote Control state from Claude Code's own session registry (core.rcStateFor; the
+-- registry is read every core.RC_REG_EVERY seconds), the "not in Remote Control" chip (core.rcChip),
+-- and /remote-control typed once into a VS Code tab that stays out past the grace while alone in its
+-- window (core.rcFixTargets). Off with the /rc sweep's own switch (remoteControl.sweepOnStartup);
+-- remoteControl.dryRun applies through FX.typeWhenReady. A second /remote-control DISCONNECTS, which
+-- is why a session is typed into once, and only while its file says it's out.
+FX._rc = { reg = nil, readAt = 0, offSince = {}, tried = {} }
+function FX.stepRemoteControl(list, cfg)
+  local R, now = FX._rc, FX.now()
+  if not R.reg or now - R.readAt >= core.RC_REG_EVERY then R.reg = FX.readSessions(); R.readAt = now end
+  local seen = {}
+  for _, it in ipairs(list or {}) do
+    if type(it) == "table" and it.key and not it.remote then
+      local st, v = core.rcStateFor(it, R.reg)
+      it.rc, it.ccVersion = st, v
+      it.rcOff = core.rcChip(it) or nil
+      if st == "off" then R.offSince[it.key] = R.offSince[it.key] or now else R.offSince[it.key] = nil end
+      seen[it.key] = true
+    end
+  end
+  for k in pairs(R.offSince) do if not seen[k] then R.offSince[k] = nil end end
+  if core.config(cfg, "remoteControl.sweepOnStartup", true) ~= true then return end
+  for _, t in ipairs(core.rcFixTargets(list, now, R.offSince, R.tried)) do
+    local it = t.it
+    R.tried[tostring(it.session_id)] = true
+    print("[cc-rc] " .. t.command .. " -> '" .. tostring(it.label or it.name) .. "': out of Remote Control for "
+      .. tostring(now - (R.offSince[it.key] or now)) .. "s")
+    FX.typeWhenReady(it, "rc-sweep", function() FX.typeIntoWindow(FX.targetFor(it), t.command) end,
+      { summary = t.command .. " (not in Remote Control)" })
+  end
+end
+
 -- Tick, after the stacks (repoKey) and the holds are stamped.
 function FX.stepMainGreen(list, cfg)
   local state = FX.mainGreenLoad()
@@ -17565,6 +17598,10 @@ local HTML = [[
   /* 2026-10-03: the repo's main went red on its scheduled check -- a heads-up, the failing lines in its tooltip */
   .mainred-b { display:inline-block; font-size:10px; line-height:14px; margin-left:6px; padding:1px 5px;
     border-radius:8px; border:1px solid var(--warn); color:var(--warn); cursor:help;
+    white-space:nowrap; vertical-align:middle; }
+  /* 2026-10-22: the session is out of Remote Control -- a quiet heads-up chip */
+  .rcoff-b { display:inline-block; font-size:10px; line-height:14px; margin-left:6px; padding:1px 5px;
+    border-radius:8px; border:1px solid var(--border); color:var(--muted); cursor:help;
     white-space:nowrap; vertical-align:middle; }
   @keyframes spin { to { transform:rotate(360deg); } }
   /* 2026-09-17: .srow (dot + status line) and .badges (risk / PR / background agents) are
@@ -28348,7 +28385,15 @@ local HTML = [[
       b += coachBadge(it);     // 2026-09-29: the coach's CLAUDE.md suggestions for this repo
       b += schedLockBadge(it); // 2026-09-29: a dead, committed or foreign scheduled-tasks lock
       b += mainRedBadge(it);   // 2026-10-03: the repo's scheduled main-green check found main red
+      b += rcOffBadge(it);     // 2026-10-22: the session is out of Remote Control
       return b ? '<span class="badges">'+b+'</span>' : "";
+    }
+    // 2026-10-22: out of Remote Control (it.rcOff, FX.stepRemoteControl / core.rcChip): Claude Code's own
+    // session file has no bridgeSessionId. Fixed text only. Shepherd types /remote-control itself into a
+    // tab alone in its window; in a shared one the click is Adam's.
+    function rcOffBadge(it){
+      if(!it || !it.rcOff) return "";
+      return '<span class="rcoff-b" title="Not in Remote Control: type /remote-control in this tab. Shepherd does it itself for a tab alone in its window, once it has stayed out for 90 seconds.">⊘ no Remote Control</span>';
     }
     // 2026-09-29: the coach (build program unit 32) -- CLAUDE.md suggestions waiting for this card's
     // repo (it.coach, FX.stepCoach): a count that opens the Coach overlay; a quiet chip while the
@@ -30473,6 +30518,12 @@ function FX._refreshBody()
   do
     local okg, errg = pcall(FX.stepMainGreen, list, cfg)
     if not okg then print("[cc-dashboard] ❌ main-green step failed: " .. tostring(errg)) end
+  end
+  -- 2026-10-22: Remote Control state on every card, and /remote-control for a lone tab that stays out
+  -- (after the shared-window stamp, which the fix reads)
+  do
+    local okrc, errrc = pcall(FX.stepRemoteControl, list, cfg)
+    if not okrc then print("[cc-dashboard] ❌ remote-control step failed: " .. tostring(errrc)) end
   end
   -- resume at the usage limit's reset (2026-09-29): plan new arms, type or flag the ones due
   do

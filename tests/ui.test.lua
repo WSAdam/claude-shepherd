@@ -5699,6 +5699,22 @@ do
         at ~= nil and first ~= nil and at < first)
 end
 
+-- ---- Remote Control on the card (2026-10-22) ----
+-- 2026-10-22: three VS Code tabs sat out of Remote Control for six days with nothing on their cards;
+-- FX.stepRemoteControl stamps it.rcOff (core.rcChip) and the card shows a fixed-text chip for it.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local badges = src:match("function badgesHtml%(it%)(.-)\n    }") or ""
+  check("rc chip: the card's badge row carries it", badges:find("rcOffBadge(it)", 1, true) ~= nil)
+  local fn = src:match("function rcOffBadge%(it%)(.-)\n    }") or ""
+  check("rc chip: drawn only for a card stamped rcOff", fn:find("it.rcOff", 1, true) ~= nil)
+  check("rc chip: fixed text only -- no session field reaches innerHTML", fn ~= "" and not fn:find("it%.[%w_]+%s*%+") and not fn:find("esc%("))
+  check("rc chip: the tick stamps it after the shared-window stamp",
+        src:find("pcall(FX.stepRemoteControl, list, cfg)", 1, true) ~= nil)
+end
+
 -- ---- The panel page never bounces past its edges (2026-10-19) ----
 -- 2026-10-19: Adam saw an empty band between the title bar and the toolbar ("what's with this weird
 -- gap at the top?"). The DOM had nothing there and the live window measured right minutes later: the

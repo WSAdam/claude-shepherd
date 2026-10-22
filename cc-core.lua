@@ -12362,6 +12362,72 @@ end
 -- path's autocomplete Return ran it -- on every Shepherd reload, into every idle VS Code tab
 -- (11 times since 2026-09-08). Extension tabs get Remote Control from their launch flags instead.
 M.RC_SWEEP_EDITORS = { kitty = true, terminal = true }
+
+-- ---- Remote Control state, and connecting a VS Code tab that stays out (2026-10-22) ----
+-- Three VS Code tabs restored together on 2026-10-16 came back without Remote Control though
+-- remoteControlAtStartup is on, and nothing said so for six days. Claude Code's own session file
+-- (~/.claude/sessions/<pid>.json) carries a bridgeSessionId while the session is connected. The VS
+-- Code extension now has /remote-control (the slash-command list from 2.1.257 shows it), but a second
+-- /remote-control DISCONNECTS, so Shepherd types it only into a tab known to be out, past a grace that
+-- lets remoteControlAtStartup connect it first, once per session, never into a shared window.
+M.RC_FIX_EDITORS = { vscode = true, cursor = true }
+M.RC_VSCODE_MIN = "2.1.257"
+M.RC_FIX_GRACE = 90          -- seconds a session must stay out before Shepherd types
+M.RC_REG_EVERY = 15          -- seconds between reads of ~/.claude/sessions
+
+-- "on" / "off" for a card from the session registry (by its process id), plus the session's Claude Code
+-- version; nil when no file names this session (a file for another session id -- a /clear's -- says
+-- nothing about this one).
+function M.rcStateFor(it, registry)
+  if type(it) ~= "table" or type(registry) ~= "table" then return nil end
+  local pid = tostring(it.session_pid or ""):match("^%d+$")
+  local e = pid and registry[pid] or nil
+  if type(e) ~= "table" then return nil end
+  if e.sessionId ~= nil and it.session_id ~= nil and tostring(e.sessionId) ~= tostring(it.session_id) then return nil end
+  local on = type(e.bridgeSessionId) == "string" and e.bridgeSessionId ~= ""
+  return on and "on" or "off", type(e.version) == "string" and e.version or nil
+end
+
+-- The card's "not in Remote Control" chip: a local session known to be out, on claude.ai auth
+-- (Remote Control rejects gateways and API keys, so a gateway session is never "out").
+function M.rcChip(it)
+  return type(it) == "table" and it.rc == "off" and not it.remote
+     and M.isAnthropicSession(it.model, it.base_url)
+end
+
+local function rcVersionOk(v)
+  local x = {}
+  for n in tostring(v or ""):gmatch("%d+") do x[#x + 1] = tonumber(n) end
+  if #x < 3 then return false end
+  local y = {}
+  for n in M.RC_VSCODE_MIN:gmatch("%d+") do y[#y + 1] = tonumber(n) end
+  for i = 1, 3 do if x[i] ~= y[i] then return x[i] > y[i] end end
+  return true
+end
+
+-- The VS Code / Cursor tabs to type /remote-control into now: { { it, command } }. offSince[key] is
+-- when the card was first seen out (FX.stepRemoteControl), tried[session_id] a session already typed
+-- into. Pure.
+function M.rcFixTargets(list, now, offSince, tried)
+  local out = {}
+  now, offSince, tried = tonumber(now) or 0, offSince or {}, tried or {}
+  for _, it in ipairs(list or {}) do
+    -- `stale` (no hook for 90s) is every idle tab, so it doesn't count here: rc == "off" needs the
+    -- session's own registry file, which exists only while its process runs
+    if type(it) == "table" and it.rc == "off" and M.RC_FIX_EDITORS[it.editor]
+       and not it.remote
+       and (it.status == "idle" or it.status == "done")
+       and it.session_id ~= nil and tostring(it.session_id) ~= "" and not tried[tostring(it.session_id)]
+       and tonumber(offSince[it.key]) and now - tonumber(offSince[it.key]) >= M.RC_FIX_GRACE
+       and not M.keystrokeBlocked(it)
+       and M.isAnthropicSession(it.model, it.base_url)
+       and rcVersionOk(it.ccVersion) then
+      out[#out + 1] = { it = it, command = "/remote-control" }
+    end
+  end
+  return out
+end
+
 function M.remoteControlSweepTargets(list)
   local out = {}
   for _, it in ipairs(list or {}) do

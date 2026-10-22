@@ -398,6 +398,9 @@ echo ""
 echo "== lua: the scheduled main-green check -- a gate routine runs the repo's merge gate in its main checkout, in the gate lane; red raises one banner, a card flag and a coach-log entry, green clears it, couldn't-run never reds, a freeze or a held session stands it down (behavioral, stubbed hs + a real git repo) =="
 HOME="$(mktemp -d)" lua "$DIR/maingreen.test.lua" || fail=1
 echo ""
+echo "== lua: Remote Control on every card -- a session file with no bridgeSessionId shows a chip, and a VS Code tab alone in its window gets /remote-control once past the grace, never a shared window or one that's in (behavioral, stubbed hs + a temp session registry) =="
+HOME="$(mktemp -d)" lua "$DIR/remote-control.test.lua" || fail=1
+echo ""
 echo "== node: a card's main-is-red flag, its failing lines in the tooltip, both escaped (behavioral, runs the shipped mainRedBadge) =="
 node "$DIR/maingreen-badge.test.js" || fail=1
 echo ""
