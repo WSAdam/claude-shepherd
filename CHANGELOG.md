@@ -4,6 +4,15 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-10-22 — The selected card's panel sits under the cards
+
+- Changed: **a selected card's panel comes right after the cards**, above the fleet token bars and
+  the commit lines, instead of at the very bottom. Its Approve, merge review and crossing boxes used
+  to sit below the commit drawer, so every approval meant scrolling past both. Adam: "i want these
+  requests and such to sit above the commits and such rather than at the very bottom, tired of
+  having to scroll down to approve". `tests/commits-layout.browser.test.js` measures it at 400px and
+  580px: the panel under the cards, above the plan bars, with the commit lines still below them.
+
 ## 2026-10-20 — Off Deno
 
 Deno support ends in six months, and Adam's projects are moving to Cloudflare and Astro. Shepherd

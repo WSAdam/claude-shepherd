@@ -134,7 +134,9 @@ const payload = {
     check("the week's text keeps real room beside the strip (" + Math.round(g.valW) + "px)" + W, g.valW >= 200);
     if (width >= 580) check("at the default width the whole week line reads without an ellipsis" + W, !g.valClipped);
     check("the block sits under the plan bars" + W, g.footTop >= g.usageBottom - 0.5);
-    check("...and above the detail panel" + W, g.footBottom <= g.detailTop + 0.5);
+    // REQUIREMENT CHANGE 2026-10-22: the detail panel moved ABOVE the plan bars and these lines (Adam:
+    // "i want these requests and such to sit above the commits ... tired of having to scroll down to
+    // approve"), so "above the detail panel" no longer holds; the selected-card check below replaces it.
     check("today's bar is drawn" + W, g.todayBar >= 2);
 
     // open the drawer: it asks for a fresh count and scrolls inside itself
@@ -202,6 +204,25 @@ const payload = {
     await page.click("#commit-foot .cf-row");
     check("a second click closes the drawer" + W,
       await page.evaluate(() => !document.querySelector("#commit-foot .cf-drawer")));
+
+    // 2026-10-22: a selected card's panel (its Approve, its merge review) sits right under the cards,
+    // above the plan bars and the commit lines -- Adam scrolled past both to reach every approval.
+    if (liveKey) {
+      await page.evaluate((k) => selectTile(k), liveKey);
+      const o = await page.evaluate(() => {
+        const r = (id) => document.getElementById(id).getBoundingClientRect();
+        const d = r("detail"), grid = r("grid"), usage = r("usage-foot"), foot = r("commit-foot");
+        return { shown: d.height > 0, dTop: d.top, dBottom: d.bottom, gridBottom: grid.bottom,
+                 usageTop: usage.top, footTop: foot.top };
+      });
+      check("a selected card's panel shows" + W, o.shown);
+      check("...under the cards" + W, o.dTop >= o.gridBottom - 0.5);
+      check("...and above the plan bars, so its Approve needs no scroll past them" + W, o.dBottom <= o.usageTop + 0.5);
+      check("...and the commit lines stay below the plan bars" + W, o.footTop >= o.usageTop);
+      await page.evaluate(() => { selectedKey = null; renderDetail(); });
+    } else {
+      check("the captured panel has a card to select" + W, false);
+    }
 
     await page.evaluate(() => window.ccCommits({ enabled: false }));
     check("commits.enabled=false hides the block" + W,

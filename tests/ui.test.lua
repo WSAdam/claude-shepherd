@@ -3778,7 +3778,11 @@ do
   local usage, commits, detail = src:find('<div id="usage-foot">', 1, true), src:find('<div id="commit-foot"', 1, true),
                                  src:find('<div id="detail">', 1, true)
   check("commits: the block sits right under the fleet usage block",
-        usage ~= nil and commits ~= nil and detail ~= nil and usage < commits and commits < detail)
+        usage ~= nil and commits ~= nil and usage < commits)
+  -- REQUIREMENT CHANGE 2026-10-22: the detail panel moved up from below the commits to right under the
+  -- cards (Adam: "tired of having to scroll down to approve"); tests/commits-layout.browser.test.js measures it
+  check("detail: the selected card's panel comes before the fleet usage and the commit lines",
+        detail ~= nil and usage ~= nil and detail < usage)
   local ur = src:find('if a == "usage-refresh" then', 1, true)
   local urEnd = ur and src:find("\n  end\n", ur, true)
   check("commits: Update now also refreshes the commit stats",

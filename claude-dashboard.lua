@@ -19132,15 +19132,6 @@ local HTML = [[
     </div>
   </div>
 
-  <div id="usage-foot">
-    <div class="uf-row">
-      <span class="uf-total" id="uf-total">Fleet: —</span>
-      <button id="uf-update" onclick="send('usage-refresh')" title="Recompute from local transcripts (no tokens used)">Update now</button>
-    </div>
-    <div class="uf-windows" id="uf-windows"></div>
-  </div>
-  <div id="commit-foot"></div>
-
   <div id="detail">
     <div id="d-head">
       <span id="d-dot"></span>
@@ -19377,6 +19368,15 @@ local HTML = [[
     <div id="tpl-menu"></div>
     <div id="nudge-chip"><span id="nudge-chip-label"></span><button onclick="clearImage()" title="Remove image">✕</button></div>
   </div>
+
+  <div id="usage-foot">
+    <div class="uf-row">
+      <span class="uf-total" id="uf-total">Fleet: —</span>
+      <button id="uf-update" onclick="send('usage-refresh')" title="Recompute from local transcripts (no tokens used)">Update now</button>
+    </div>
+    <div class="uf-windows" id="uf-windows"></div>
+  </div>
+  <div id="commit-foot"></div>
 
   <div id="settings">
     <div id="s-head"><span>Claude Shepherd settings</span><button class="s-x" onclick="closeSettings()">✕</button></div>
