@@ -7413,29 +7413,167 @@ function FX.reqsStore()
   return store, why
 end
 
--- Mint the repo's next REQ id. -> req | nil, why.
-function FX.mintReq(repo, fields)
-  local dir = FX.REQS_FILE:match("^(.*)/[^/]+$")
+-- 2026-10-27: the Requirements tab, FX.mintReq's only caller, is gone (Adam: a Compare tab in its
+-- place). Nothing mints now; a merge review's receipt still reads the ids already in the store.
+
+-- ---- Compare tab: a weekly GitHub leaderboard (2026-10-27) -----------------------------------
+-- Adam against up to 5 GitHub users, commits and lines per day, from every repo his gh login can
+-- read. ~/.claude/cc-compare.json holds the list and what the checks found; it exists once the tab
+-- has been opened, and until then nothing here calls GitHub. A check is a queue of core.compareJobs
+-- run as background gh tasks, core.COMPARE_PARALLEL at a time -- never a synchronous call (on
+-- 2026-10-22 one blocking grep froze the panel 1.75s) -- each answer folded in by
+-- core.compareApply. FX.stepCompare starts the day's check and ends a gh call that hangs.
+FX.COMPARE_FILE = os.getenv("CC_COMPARE_FILE") or ((os.getenv("HOME") or "") .. "/.claude/cc-compare.json")
+-- state (parsed file), loaded, exists, run (the check in flight), rerun, gh (a test pins the path;
+-- false = absent), pushedAt
+FX._compare = { state = nil, loaded = false, exists = false, run = nil, rerun = false, gh = nil, pushedAt = 0 }
+
+function FX.compareState()
+  local C = FX._compare
+  if not C.loaded then
+    local raw = FX.readFile(FX.COMPARE_FILE)
+    C.exists = raw ~= nil
+    C.state = core.parseCompareState(raw)
+    C.loaded = true
+    if C.state.garbled then print("[cc-dashboard] ⚠️ compare: " .. FX.COMPARE_FILE .. " isn't valid JSON; leaving it alone") end
+  end
+  return C.state
+end
+
+function FX.compareSave()
+  local st = FX.compareState()
+  if st.garbled then return false end
+  local dir = FX.COMPARE_FILE:match("^(.*)/[^/]+$")
   if dir then pcall(function() hs.fs.mkdir(dir) end) end
-  local fio = {
-    read = function(p) return FX.readFile(p) end,
-    write = function(p, text)
-      local f = io.open(p, "w"); if not f then return false end
-      local ok = pcall(function() f:write(text) end); f:close()
-      return ok
-    end,
-    rename = function(from, to) return os.rename(from, to) and true or false end,
-    remove = function(p) os.remove(p) end,
-    token = function()
-      FX._reqsSeq = (FX._reqsSeq or 0) + 1
-      return tostring(hs.processInfo and hs.processInfo.processID or "p") .. "." .. tostring(FX.now()) .. "." .. FX._reqsSeq
-    end,
-  }
-  local req, why = core.reqsMint(fio, FX.REQS_FILE, repo, fields, FX.now())
-  FX._reqsCache = nil   -- the next read sees what was just written
-  if req then print("[cc-dashboard] ✅ minted " .. req.id .. " for " .. tostring(repo))
-  else print("[cc-dashboard] ❌ couldn't mint a requirement for " .. tostring(repo) .. ": " .. tostring(why)) end
-  return req, why
+  local ok = FX.writeFileAtomic(FX.COMPARE_FILE, core.encodeCompareState(st))
+  if ok then FX._compare.exists = true else print("[cc-dashboard] ❌ compare: couldn't write " .. FX.COMPARE_FILE) end
+  return ok
+end
+
+-- What the tab shows: core.compareBoard plus whether a check is running (and how far it got).
+function FX.compareView(extra)
+  local C, st, now = FX._compare, FX.compareState(), FX.now()
+  local b = core.compareBoard(st, now, core.localTzOffset(now))
+  b.running = C.run ~= nil
+  if C.run then b.progress = { done = C.run.done, total = C.run.total } end
+  if st.garbled then b.error = "~/.claude/cc-compare.json isn't valid JSON: fix or delete it" end
+  for k, v in pairs(type(extra) == "table" and extra or {}) do b[k] = v end
+  return b
+end
+
+function FX.comparePush(extra)
+  if not wv then return end
+  FX._compare.pushedAt = FX.now()
+  local ok, js = pcall(function() return "window.ccCompare(" .. hs.json.encode(FX.compareView(extra)) .. ")" end)
+  if ok then pcall(function() wv:evaluateJavaScript(js) end)
+  else print("[cc-dashboard] ❌ compare: couldn't build the board: " .. tostring(js)) end
+end
+
+function FX.compareGh()
+  local g = FX._compare.gh
+  if g == nil then g = ghBin() end
+  return g or nil
+end
+
+-- Start a check (the day's, the tab's first, Refresh, or a new list). false, why when one runs or
+-- it can't: no gh, or an unreadable file.
+function FX.compareStart(reason)
+  local C = FX._compare
+  local st = FX.compareState()
+  if C.run then return false, "running" end
+  if st.garbled then FX.comparePush(); return false, "garbled" end
+  local now = FX.now()
+  st.triedAt = now
+  local gh = FX.compareGh()
+  if not gh then
+    st.error = "gh isn't installed: Compare reads GitHub through the gh CLI (brew install gh, then gh auth login)"
+    FX.compareSave(); FX.comparePush()
+    return false, "no-gh"
+  end
+  st.error = nil
+  local win = core.compareWindow(now, core.localTzOffset(now))
+  local queue = core.compareJobs(st, win)
+  C.run = { win = win, gh = gh, queue = queue, tasks = {}, inflight = 0, done = 0, total = #queue, reason = reason }
+  print("[cc-dashboard] 🚀 compare: checking GitHub (" .. tostring(reason) .. ")")
+  FX.comparePump()
+  FX.comparePush()
+  return true
+end
+
+-- Launch queued jobs up to the limit; finish the check when nothing is queued or in flight.
+function FX.comparePump()
+  local R = FX._compare.run
+  if not R then return end
+  while R.inflight < core.COMPARE_PARALLEL and #R.queue > 0 do
+    local job = table.remove(R.queue, 1)
+    local args = core.compareArgs(job, R.win)
+    if args then FX.compareLaunch(R, job, args) else R.done = R.done + 1 end
+  end
+  if R.inflight == 0 and #R.queue == 0 then FX.compareDone() end
+end
+
+function FX.compareLaunch(R, job, args)
+  local entry = { job = job, at = FX.now(), settled = false }
+  -- settle runs once: from the task's callback, or from FX.stepCompare when the call hangs
+  entry.settle = function(code, out, errText)
+    if entry.settled or FX._compare.run ~= R then return end
+    entry.settled = true
+    R.tasks[entry] = nil
+    R.inflight, R.done = R.inflight - 1, R.done + 1
+    local ok, follow = pcall(core.compareApply, FX.compareState(), job, code, out or "", errText or "", R.win)
+    if ok then
+      for _, j in ipairs(follow or {}) do R.queue[#R.queue + 1] = j end
+      R.total = R.total + #(follow or {})
+    else print("[cc-dashboard] ❌ compare: " .. tostring(follow)) end
+    if FX.now() - (FX._compare.pushedAt or 0) >= 2 then FX.comparePush() end
+    FX.comparePump()
+  end
+  local ok, t = pcall(function()
+    return hs.task.new(R.gh, function(code, out, errText) entry.settle(code, out, errText) end, args)
+  end)
+  if ok and t and t:start() then
+    entry.task = t
+    R.tasks[entry] = true
+    R.inflight = R.inflight + 1
+  else
+    R.done = R.done + 1
+    FX.compareState().error = "couldn't start gh"
+  end
+end
+
+function FX.compareDone()
+  local C = FX._compare
+  local R = C.run
+  if not R then return end
+  C.run = nil
+  local st, now = FX.compareState(), FX.now()
+  core.compareFinish(st, now, core.localTzOffset(now))
+  FX.compareSave()
+  if st.error then print("[cc-dashboard] ⚠️ compare: " .. st.error)
+  else print("[cc-dashboard] ✅ compare: checked GitHub (" .. R.done .. " calls)") end
+  FX.comparePush()
+  if C.rerun then C.rerun = false; FX.compareStart("users") end
+end
+
+-- The tick: end a gh call past its deadline, and start the day's check when it's due. Cheap: the
+-- file is read once; the due check is arithmetic.
+function FX.stepCompare()
+  local C, now = FX._compare, FX.now()
+  local R = C.run
+  if R then
+    local late = {}
+    for entry in pairs(R.tasks) do
+      if now - entry.at >= core.COMPARE_TASK_TIMEOUT then late[#late + 1] = entry end
+    end
+    for _, entry in ipairs(late) do
+      pcall(function() entry.task:terminate() end)
+      print("[cc-dashboard] ⚠️ compare: a gh call ran past " .. core.COMPARE_TASK_TIMEOUT .. "s; ended it")
+      entry.settle(124, "", "timed out")
+    end
+    return
+  end
+  FX.compareState()
+  if C.exists and core.compareDue(C.state, now, core.localTzOffset(now)) then FX.compareStart("daily") end
 end
 
 -- What the receipt needs beyond the request (core.mergeReceipt's ctx): a batch unit's brief (the
@@ -16258,43 +16396,33 @@ local function handleBridgeMsg(msg)
     reply({ ok = true, blocks = doc.blocks, areas = doc.areas, hash = core.cheapHash(dec.text) })
     return
   end
-  if a == "detail-reqs" then
-    -- Requirements tab (2026-09-29, unit 22): the repo's REQ ids from ~/.claude/cc-reqs.json. The
-    -- repo is the SESSION's main checkout (core.reqsRepoOf) -- no client-supplied path at all.
-    local key = tostring(payload.v or "")
-    local it = byKey[key]
-    local function reply(tbl)
-      pcall(function() wv:evaluateJavaScript("window.ccReqs("
-        .. jsString(key) .. ", " .. hs.json.encode(tbl) .. ")") end)
-    end
-    local repo = core.reqsRepoOf(it)
-    if not repo then reply({ noRepo = true }); return end
-    local store, why = FX.reqsStore()
-    local list = core.reqsFor(store, repo)
-    reply({ reqs = list, hash = core.reqsHash(list), repo = repo, broken = (store == nil) and why or nil })
+  -- Compare tab (2026-10-27; it replaced the Requirements tab): the board, the same on every card.
+  -- Opening it creates ~/.claude/cc-compare.json -- until then Shepherd never calls GitHub for it --
+  -- and starts a check when one is due (FX.compareStart: background gh tasks only).
+  if a == "compare-load" then
+    local st = FX.compareState()
+    if not FX._compare.exists and not st.garbled then FX.compareSave() end
+    local now = FX.now()
+    if not FX._compare.run and core.compareDue(st, now, core.localTzOffset(now)) then FX.compareStart("open") end
+    FX.comparePush()
     return
   end
-  if a == "reqs-add" then
-    -- Add one: refused when the list changed since the panel loaded it (core.reqsAddDecision, the
-    -- stories-save guard -- a double click never mints twice), then Shepherd's one minting path.
-    local key = tostring(payload.v or "")
-    local it = byKey[key]
-    local function reply(tbl)
-      pcall(function() wv:evaluateJavaScript("window.ccReqsAdded("
-        .. jsString(key) .. ", " .. hs.json.encode(tbl) .. ")") end)
-    end
-    local repo = core.reqsRepoOf(it)
-    if not repo then reply({ ok = false, error = "no-repo" }); return end
-    local list = core.reqsFor(FX.reqsStore(), repo)
-    local dec = core.reqsAddDecision(list, tostring(payload.hash or ""), payload)
-    if not dec.ok then reply({ ok = false, error = dec.error, reqs = list, hash = core.reqsHash(list) }); return end
-    local req, why = FX.mintReq(repo, dec.fields)
-    local fresh = core.reqsFor(FX.reqsStore(), repo)
-    if not req then
-      reply({ ok = false, error = "write-failed", why = why, reqs = fresh, hash = core.reqsHash(fresh) })
-      return
-    end
-    reply({ ok = true, id = req.id, reqs = fresh, hash = core.reqsHash(fresh) })
+  if a == "compare-refresh" then
+    if FX._compare.run then FX.alert("Compare is already checking GitHub"); FX.comparePush(); return end
+    FX.compareStart("refresh")
+    return
+  end
+  if a == "compare-users" then
+    -- The whole new list (an add or a ×): checked by core.compareUsers, saved, then checked on GitHub
+    -- at once -- after the check in flight, when there is one.
+    local st = FX.compareState()
+    if st.garbled then FX.comparePush(); return end
+    local users, bad = core.compareUsers(type(payload.users) == "table" and payload.users or {}, st.self)
+    st.users = users
+    FX.compareSave()
+    print("[cc-dashboard] ✅ compare: comparing with " .. (#users > 0 and table.concat(users, ", ") or "nobody"))
+    if FX._compare.run then FX._compare.rerun = true else FX.compareStart("users") end
+    FX.comparePush({ rejected = bad })
     return
   end
   if a == "detail-onpurpose" then
@@ -18183,18 +18311,50 @@ local HTML = [[
   #d-stories .us-add { margin:6px 0 2px; background:none; border:1px dashed var(--border); color:var(--text-3);
                        border-radius:7px; padding:3px 10px; font-size:12px; cursor:pointer; }
   #d-stories .us-add:hover { color:var(--accent-text); border-color:var(--accent); }
-  /* Requirements tab (2026-09-29, unit 22) */
-  #d-reqs .rq-head { color:var(--muted); font-size:11px; margin:2px 0 8px; word-break:break-all; }
-  #d-reqs .rq-flash { color:var(--text-2); font-size:11px; margin:0 0 8px; }
-  #d-reqs .rq-row { display:flex; align-items:baseline; gap:8px; padding:5px 4px; border-bottom:1px solid var(--border-weak); }
-  #d-reqs .rq-id { flex:0 0 auto; color:var(--accent-text); font-family:ui-monospace,monospace; font-size:12px; }
-  #d-reqs .rq-title { flex:1; color:var(--text); font-size:13px; line-height:1.45; word-break:break-word; }
-  #d-reqs .rq-src { color:var(--muted); font-size:11px; word-break:break-word; }
-  #d-reqs .rq-form { display:flex; flex-wrap:wrap; gap:6px; margin:10px 0 2px; }
-  #d-reqs .rq-form input { flex:1; min-width:120px; background:var(--surface-2); color:var(--text); border:1px solid var(--border);
-                           border-radius:6px; padding:3px 7px; font:inherit; font-size:12px; }
-  #d-reqs .rq-add { background:var(--surface); color:var(--accent-text); border:1px solid var(--accent); border-radius:7px;
-                    padding:3px 10px; font-size:12px; cursor:pointer; }
+  /* Compare tab (2026-10-27): a weekly GitHub leaderboard */
+  #d-compare .cmp-head { display:flex; align-items:center; gap:8px; margin:2px 0 8px; flex-wrap:wrap; }
+  #d-compare .cmp-seg { display:inline-flex; border:1px solid var(--border); border-radius:7px; overflow:hidden; }
+  #d-compare .cmp-seg button { background:none; border:0; color:var(--text-3); font-size:12px; padding:3px 10px; cursor:pointer; }
+  #d-compare .cmp-seg button.on { background:var(--surface-2); color:var(--text); }
+  #d-compare .cmp-when { flex:1; color:var(--muted); font-size:11px; }
+  #d-compare button[data-cmp="refresh"], #d-compare button[data-cmp="add"] { background:var(--surface); color:var(--accent-text);
+    border:1px solid var(--accent); border-radius:7px; padding:3px 10px; font-size:12px; cursor:pointer; }
+  #d-compare button:disabled { opacity:.45; cursor:default; }
+  #d-compare .cmp-flash { color:var(--text-2); font-size:11px; margin:0 0 8px; word-break:break-word; }
+  #d-compare .cmp-grid { display:grid; grid-template-columns:22px minmax(0,1fr) 64px 92px 104px; align-items:center; gap:6px; }
+  #d-compare .cmp-cols { color:var(--muted); font-size:11px; padding:0 4px 4px; border-bottom:1px solid var(--border-weak); }
+  #d-compare .cmp-sort { background:none; border:0; padding:0; color:var(--muted); font-size:11px; text-align:right; cursor:pointer; }
+  #d-compare .cmp-sort.on { color:var(--text); font-weight:600; }
+  #d-compare .cmp-dayh { display:flex; justify-content:space-between; font-size:10px; }
+  #d-compare .cmp-dayh .today { color:var(--accent-text); font-weight:600; }
+  #d-compare .cmp-row { padding:6px 4px; border-bottom:1px solid var(--border-weak); }
+  #d-compare .cmp-row.cmp-you { background:var(--surface-2); border-radius:6px; }
+  #d-compare .cmp-rank { color:var(--muted); font-size:12px; text-align:right; }
+  #d-compare .cmp-who { min-width:0; display:flex; flex-direction:column; }
+  #d-compare .cmp-name { background:none; border:0; padding:0; text-align:left; color:var(--text); font:inherit; font-size:13px;
+                         cursor:pointer; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #d-compare .cmp-name:hover { color:var(--accent-text); text-decoration:underline; }
+  #d-compare .cmp-youtag { color:var(--accent-text); font-size:10px; }
+  #d-compare .cmp-hidden, #d-compare .cmp-pending { color:var(--muted); font-size:10px; }
+  #d-compare .cmp-num { text-align:right; font-variant-numeric:tabular-nums; font-size:13px; color:var(--text); }
+  #d-compare .cmp-lines { text-align:right; font-variant-numeric:tabular-nums; font-size:12px; white-space:nowrap; }
+  #d-compare .cmp-add { color:var(--ok, #3fb950); }
+  #d-compare .cmp-del { color:var(--danger); }
+  #d-compare .cmp-spark { display:flex; align-items:flex-end; justify-content:space-between; height:20px; }
+  #d-compare .cmp-bar { width:10px; min-height:1px; background:var(--accent); border-radius:2px 2px 0 0; }
+  #d-compare .cmp-bar.cmp-future { background:var(--border-weak); }
+  #d-compare .cmp-repos { margin:6px 0 0 28px; }
+  #d-compare .cmp-repo { display:flex; gap:10px; align-items:baseline; font-size:12px; padding:2px 0; color:var(--text-2); }
+  #d-compare .cmp-rname { flex:1; min-width:0; word-break:break-all; color:var(--text); }
+  #d-compare .cmp-users { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin:12px 0 4px; }
+  #d-compare .cmp-ulabel { color:var(--muted); font-size:11px; }
+  #d-compare .cmp-chip { display:inline-flex; align-items:center; gap:4px; background:var(--surface-2); border:1px solid var(--border);
+                         border-radius:12px; padding:1px 4px 1px 9px; font-size:12px; color:var(--text); }
+  #d-compare .cmp-chip button { background:none; border:0; color:var(--text-3); cursor:pointer; font-size:13px; padding:0 3px; }
+  #d-compare .cmp-chip button:hover { color:var(--danger); }
+  #d-compare #cmp-new { width:150px; background:var(--surface-2); color:var(--text); border:1px solid var(--border);
+                        border-radius:6px; padding:3px 7px; font:inherit; font-size:12px; }
+  #d-compare .cmp-note { color:var(--muted); font-size:11px; margin:6px 0 2px; line-height:1.45; }
   /* On purpose tab (unit 33): the repo's DECISIONS.md */
   #d-onpurpose .op-head { display:flex; align-items:center; gap:8px; margin:2px 0 8px; }
   #d-onpurpose .op-path { color:var(--muted); font-size:11px; flex:1; word-break:break-all; }
@@ -19346,9 +19506,9 @@ local HTML = [[
     <div class="d-panel" data-tab="stories">
       <div id="d-stories"></div>
     </div>
-    <!-- Requirements (2026-09-29, unit 22): the repo's REQ ids, minted by Shepherd -->
-    <div class="d-panel" data-tab="reqs">
-      <div id="d-reqs"></div>
+    <!-- Compare (2026-10-27; it replaced Requirements): you against up to 5 GitHub users, weekly -->
+    <div class="d-panel" data-tab="compare">
+      <div id="d-compare" onclick="compareAct(event)"></div>
     </div>
     <div class="d-panel" data-tab="onpurpose">
       <div id="d-onpurpose"></div>
@@ -22102,68 +22262,135 @@ local HTML = [[
       var add = (t.classList && t.classList.contains("us-add")) ? t : (t.closest ? t.closest(".us-add") : null);
       if(add && add.getAttribute){ storiesAdd(add.getAttribute("data-area") || ""); return; }
     });
-    // ---- Requirements tab (2026-09-29, unit 22): the repo's REQ ids, minted by Shepherd ----
-    // detail-reqs loads the list from ~/.claude/cc-reqs.json; an add posts reqs-add with the hash of
-    // the list it showed, and Shepherd refuses one made on a list that has changed since (a double
-    // click never mints twice). Every field reaches innerHTML through esc().
-    var REQS = { key:null, data:null, flash:null, clear:false };
-    function itemHasReqs(key){ var it = findItem(key); return !!(it && it.has_reqs); }
-    window.ccReqs = function(key, data){
-      if(key !== selectedKey) return;
-      REQS = { key:key, data:data || {}, flash:null, clear:false };
-      renderReqs();
-    };
-    window.ccReqsAdded = function(key, res){
-      if(key !== selectedKey || !res || REQS.key !== key) return;
-      var d = REQS.data || {};
-      if(Array.isArray(res.reqs)){ d.reqs = res.reqs; d.hash = res.hash; }
-      REQS.data = d;
-      if(res.ok){ REQS.flash = "Minted " + (res.id || "") + " ✓"; REQS.clear = true; }
-      else {
-        var er = res.error || "unknown";
-        REQS.flash = er === "changed" ? "⚠ The list changed since it loaded — here it is now; add yours again if it's still missing"
-          : er === "bad-title" ? "⚠ A requirement needs a title"
-          : er === "no-repo" ? "⚠ This session isn't in a git repo"
-          : "⚠ Couldn't save it: " + (res.why || er);
-      }
-      renderReqs();
-    };
-    function reqsAdd(){
-      var ti = document.getElementById("rq-title"), so = document.getElementById("rq-source");
-      if(!ti || !REQS.data || REQS.key !== selectedKey) return;
-      if(!ti.value.trim()){ REQS.flash = "⚠ A requirement needs a title"; renderReqs(); return; }
-      try { window.webkit.messageHandlers.cc.postMessage(JSON.stringify({ a:"reqs-add", v:selectedKey, hash:REQS.data.hash || "",
-                                                                          title:ti.value, source:so ? so.value : "" })); }
-      catch(e){ console.log("reqs-add error", e); }
+    // ---- Compare tab (2026-10-27; it replaced Requirements): a weekly GitHub leaderboard ----
+    // Shepherd checks GitHub in the background (FX.compareStart) and pushes the board
+    // (core.compareBoard) through ccCompare; it's the same on every card. A name opens the repos
+    // that person wrote to; the column clicked ranks the board. Every login, repo and error
+    // reaching innerHTML goes through esc().
+    var COMPARE = { data:null, week:"this", sort:"commits", open:{}, draft:"" };
+    window.ccCompare = function(d){ COMPARE.data = d || {}; if(detailTab === "compare") renderCompare(); };
+    function compareSorted(rows, sort){
+      var out = (Array.isArray(rows) ? rows : []).slice();
+      out.sort(function(a, b){
+        var la = (a.add || 0) + (a.del || 0), lb = (b.add || 0) + (b.del || 0);
+        var ka = sort === "lines" ? la : (a.commits || 0), kb = sort === "lines" ? lb : (b.commits || 0);
+        if(ka !== kb) return kb - ka;
+        var sa = sort === "lines" ? (a.commits || 0) : la, sb = sort === "lines" ? (b.commits || 0) : lb;
+        if(sa !== sb) return sb - sa;
+        return String(a.login).localeCompare(String(b.login));
+      });
+      return out;
     }
-    function renderReqs(){
-      var box = document.getElementById("d-reqs"); if(!box) return;
-      if(REQS.key !== selectedKey){ box.innerHTML = ""; return; }
-      var d = REQS.data;
-      if(d === null){ box.innerHTML = '<div class="tl-empty">Loading requirements…</div>'; return; }
-      if(d.noRepo){ box.innerHTML = '<div class="tl-empty">This session isn\'t in a git repo.</div>'; return; }
-      // a re-render keeps what's typed in the form, unless an add just landed
-      var oldT = document.getElementById("rq-title"), oldS = document.getElementById("rq-source");
-      var keepT = (!REQS.clear && oldT) ? oldT.value : "", keepS = (!REQS.clear && oldS) ? oldS.value : "";
-      REQS.clear = false;
-      var list = Array.isArray(d.reqs) ? d.reqs : [];
-      var html = '<div class="rq-head">' + esc(String(list.length)) + ' requirement' + (list.length === 1 ? '' : 's')
-        + ' in ' + esc(d.repo || "this repo") + ' — Shepherd mints the ids and never reuses one</div>';
-      if(d.broken) html += '<div class="rq-flash">⚠ ' + esc(d.broken) + '</div>';
-      if(REQS.flash) html += '<div class="rq-flash">' + esc(REQS.flash) + '</div>';
-      if(!list.length) html += '<div class="tl-empty">No requirements yet. Add one below, then name its id (REQ-001) in a merge request: the review\'s receipt links it.</div>';
-      for(var i=0; i<list.length; i++){
-        var rq = list[i] || {};
-        html += '<div class="rq-row"><span class="rq-id">' + esc(rq.id) + '</span><span class="rq-title">' + esc(rq.title)
-          + (rq.source ? '<div class="rq-src">' + esc(rq.source) + '</div>' : '') + '</span></div>';
+    function compareHtml(st){
+      var d = st.data;
+      if(!d) return '<div class="tl-empty">Loading Compare…</div>';
+      var users = Array.isArray(d.users) ? d.users : [];
+      var weeks = d.weeks || {};
+      var w = (st.week === "last" ? weeks.last : weeks.this) || { rows: [], days: [] };
+      var days = Array.isArray(w.days) ? w.days : [];
+      var rows = compareSorted(w.rows, st.sort);
+      var max = 1;
+      rows.forEach(function(r){ (r.days || []).forEach(function(x){ if((x.commits || 0) > max) max = x.commits; }); });
+      var when = d.running ? 'Checking GitHub…' + (d.progress ? ' (' + esc(d.progress.done) + '/' + esc(d.progress.total) + ')' : '')
+        : (d.runAt ? 'Checked ' + esc(new Date(d.runAt * 1000).toLocaleString([], { weekday:"short", hour:"numeric", minute:"2-digit" }))
+                   : 'Not checked yet');
+      var html = '<div class="cmp-head"><span class="cmp-seg">'
+        + '<button data-cmp="week:this" class="' + (st.week !== "last" ? 'on' : '') + '">This week</button>'
+        + '<button data-cmp="week:last" class="' + (st.week === "last" ? 'on' : '') + '">Last week</button></span>'
+        + '<span class="cmp-when">' + when + '</span>'
+        + '<button class="cmp-refresh" data-cmp="refresh"' + (d.running ? ' disabled' : '') + '>Refresh</button></div>';
+      if(d.error) html += '<div class="cmp-flash">⚠ ' + esc(d.error) + '</div>';
+      if(Array.isArray(d.rejected) && d.rejected.length)
+        html += '<div class="cmp-flash">⚠ Not added (not a GitHub username, or past 5): ' + esc(d.rejected.join(", ")) + '</div>';
+      var letters = "MTWTFSS", dh = "";
+      for(var i = 0; i < 7; i++){ var dd = days[i] || {}; dh += '<span class="' + (dd.isToday ? 'today' : '') + '">' + letters.charAt(i) + '</span>'; }
+      html += '<div class="cmp-grid cmp-cols"><span></span><span>Who</span>'
+        + '<button data-cmp="sort:commits" class="cmp-sort' + (st.sort !== "lines" ? ' on' : '') + '">Commits</button>'
+        + '<button data-cmp="sort:lines" class="cmp-sort' + (st.sort === "lines" ? ' on' : '') + '">Lines</button>'
+        + '<span class="cmp-dayh">' + dh + '</span></div>';
+      rows.forEach(function(r, n){
+        var login = String(r.login == null ? "" : r.login);
+        var spark = "";
+        for(var k = 0; k < 7; k++){
+          var x = (r.days || [])[k] || {}, c = x.commits || 0, dy = days[k] || {};
+          var hgt = c > 0 ? Math.max(3, Math.round(20 * c / max)) : 1;
+          var label = (dy.dayEpoch ? new Date(dy.dayEpoch * 1000).toLocaleDateString([], { weekday:"short", month:"short", day:"numeric" }) : "")
+            + ": " + c + " commit" + (c === 1 ? "" : "s") + ", +" + (x.add || 0) + " −" + (x.del || 0);
+          spark += '<span class="cmp-bar' + (dy.future ? ' cmp-future' : '') + '" style="height:' + hgt + 'px" title="' + esc(label) + '"></span>';
+        }
+        html += '<div class="cmp-row' + (r.you ? ' cmp-you' : '') + '"><div class="cmp-grid">'
+          + '<span class="cmp-rank">' + (n + 1) + '</span>'
+          + '<span class="cmp-who"><button class="cmp-name" data-cmp="open:' + esc(login) + '" title="Show the repos they wrote to">'
+          + esc(login) + '</button>'
+          + (r.you ? '<span class="cmp-youtag">you</span>' : '')
+          + (r.hidden ? '<span class="cmp-hidden" title="Contributions GitHub counts in repos your login can\'t see (commits, PRs, issues): not ranked">+'
+                        + esc(r.hidden) + ' private elsewhere</span>' : '')
+          + (r.pending ? '<span class="cmp-pending">' + esc(r.pending) + ' still being counted</span>' : '')
+          + '</span>'
+          + '<span class="cmp-num">' + esc(r.commits || 0) + '</span>'
+          + '<span class="cmp-lines"><span class="cmp-add">+' + esc(r.add || 0) + '</span> <span class="cmp-del">−' + esc(r.del || 0) + '</span></span>'
+          + '<span class="cmp-spark">' + spark + '</span></div>';
+        if(st.open[login]){
+          var repos = Array.isArray(r.repos) ? r.repos : [];
+          html += '<div class="cmp-repos">';
+          if(!repos.length) html += '<div class="cmp-repo">No commits your login can see this week.</div>';
+          repos.forEach(function(rp){
+            html += '<div class="cmp-repo"><span class="cmp-rname">' + esc(rp.repo) + '</span><span>' + esc(rp.commits || 0)
+              + ' commit' + (rp.commits === 1 ? '' : 's') + '</span><span class="cmp-add">+' + esc(rp.add || 0)
+              + '</span><span class="cmp-del">−' + esc(rp.del || 0) + '</span></div>';
+          });
+          html += '</div>';
+        }
+        html += '</div>';
+      });
+      if(!rows.length) html += '<div class="tl-empty">' + (d.running ? 'Checking GitHub…' : 'Nobody on the board yet.') + '</div>';
+      var full = users.length >= 5;
+      html += '<div class="cmp-users"><span class="cmp-ulabel">Comparing with</span>';
+      users.forEach(function(u){
+        html += '<span class="cmp-chip">' + esc(u) + '<button data-cmp="rm:' + esc(u) + '" title="Stop comparing with ' + esc(u) + '">×</button></span>';
+      });
+      html += '<input id="cmp-new" maxlength="39" placeholder="' + (full ? '5 is the most' : 'GitHub username') + '"' + (full ? ' disabled' : '') + '>'
+        + '<button data-cmp="add"' + (full ? ' disabled' : '') + '>Add</button></div>'
+        + '<div class="cmp-note">Commits on each repo\'s main branch that your gh login can read, checked once a day. Lockfiles and build output don\'t count toward lines.</div>';
+      return html;
+    }
+    function renderCompare(){
+      var box = document.getElementById("d-compare"); if(!box) return;
+      var old = document.getElementById("cmp-new");
+      if(old) COMPARE.draft = old.value;      // a repaint keeps what's being typed
+      box.innerHTML = compareHtml(COMPARE);
+      var ni = document.getElementById("cmp-new");
+      if(ni){
+        ni.value = COMPARE.draft || "";
+        ni.onkeydown = function(e){ if(e.key === "Enter"){ e.preventDefault(); compareAct({ target: box.querySelector('button[data-cmp="add"]') }); } };
       }
-      html += '<div class="rq-form"><input id="rq-title" maxlength="200" placeholder="New requirement: what must be true">'
-        + '<input id="rq-source" maxlength="300" placeholder="Source: who asked, where (optional)">'
-        + '<button class="rq-add" onclick="reqsAdd()">Add</button></div>';
-      box.innerHTML = html;
-      var nt = document.getElementById("rq-title"), ns = document.getElementById("rq-source");
-      if(nt){ nt.value = keepT; nt.onkeydown = function(e){ if(e.key === "Enter"){ e.preventDefault(); reqsAdd(); } }; }
-      if(ns){ ns.value = keepS; ns.onkeydown = function(e){ if(e.key === "Enter"){ e.preventDefault(); reqsAdd(); } }; }
+    }
+    function comparePost(msg){
+      try { window.webkit.messageHandlers.cc.postMessage(JSON.stringify(msg)); }
+      catch(e){ console.log("compare error", e); }
+    }
+    function compareAct(ev){
+      var t = ev && ev.target;
+      var el = (t && t.closest) ? t.closest("[data-cmp]") : null;
+      if(!el || el.disabled) return;
+      var act = el.getAttribute("data-cmp") || "", at = act.indexOf(":");
+      var verb = at < 0 ? act : act.slice(0, at), arg = at < 0 ? "" : act.slice(at + 1);
+      var d = COMPARE.data || {};
+      var users = Array.isArray(d.users) ? d.users.slice() : [];
+      if(verb === "week"){ COMPARE.week = arg === "last" ? "last" : "this"; renderCompare(); }
+      else if(verb === "sort"){ COMPARE.sort = arg === "lines" ? "lines" : "commits"; renderCompare(); }
+      else if(verb === "open"){ COMPARE.open[arg] = !COMPARE.open[arg]; renderCompare(); }
+      else if(verb === "rm"){ comparePost({ a:"compare-users", users: users.filter(function(u){ return u !== arg; }) }); }
+      else if(verb === "add"){
+        var inp = document.getElementById("cmp-new");
+        var v = inp ? String(inp.value || "").trim() : "";
+        if(!v) return;
+        users.push(v);
+        if(inp) inp.value = "";
+        COMPARE.draft = "";
+        comparePost({ a:"compare-users", users: users });
+      }
+      else if(verb === "refresh"){ comparePost({ a:"compare-refresh" }); }
     }
 
     // ---- On purpose tab (build program unit 33, 2026-09-29): the repo's DECISIONS.md ----
@@ -23391,7 +23618,6 @@ local HTML = [[
         CHECKPOINTS = { key:null, data:null };      // DR3: rewind checkpoints are per-session, lazy
         CHANGES = { key:null, data:null }; CH_DIFFS = {}; CH_OPEN = {};  // git Changes: per-session
         STORIES = { key:null, data:null, blocks:null, hash:null, dirty:false, editing:null, flash:null };  // per-session
-        REQS = { key:null, data:null, flash:null, clear:false };   // requirements: per-session (2026-09-29)
         ONPURPOSE = { key:null, data:null, flash:null, draft:null };  // per-session
         resetScoreReadout();   // DR4: clear the run-score readout on selection change
         closeTabMenu();
@@ -23400,9 +23626,6 @@ local HTML = [[
         // "stories" but this project has none, fall back to the default view.
         if(detailTab === "stories" && !itemHasStories(key)) detailTab = "activity";
         lastSelectedHasStories = itemHasStories(key);   // seed the gated-tab tracker for ccUpdate
-        // The Requirements tab is gated on a git repo (2026-09-29): the same fallback and tracker.
-        if(detailTab === "reqs" && !itemHasReqs(key)) detailTab = "activity";
-        lastSelectedHasReqs = itemHasReqs(key);
         // On purpose is gated on a local repo (unit 33): the same fallback and tracker.
         if(detailTab === "onpurpose" && !itemHasOnPurpose(key)) detailTab = "activity";
         lastSelectedHasOnPurpose = itemHasOnPurpose(key);
@@ -23463,7 +23686,6 @@ local HTML = [[
       DETAIL_TABS.forEach(function(t){
         if(detailUnpinned[t.id]) return;           // hidden for this project
         if(t.id === "stories" && !itemHasStories(selectedKey)) return;  // gated: file must exist
-        if(t.id === "reqs" && !itemHasReqs(selectedKey)) return;  // gated: a git repo
         if(t.id === "onpurpose" && !itemHasOnPurpose(selectedKey)) return;  // gated: a local repo
         var b = document.createElement("button");
         b.className = "d-tab" + (t.id === detailTab ? " active" : "");
@@ -23535,13 +23757,11 @@ local HTML = [[
           send("detail-stories", selectedKey);          // ccStories repaints
         }
         renderStories();
-      } else if(detailTab === "reqs"){
-        // loaded once per session (an add pushes the fresh list back itself)
-        if(REQS.key !== selectedKey){
-          REQS = { key: selectedKey, data: null, flash: null, clear: false };
-          send("detail-reqs", selectedKey);             // ccReqs repaints
-        }
-        renderReqs();
+      } else if(detailTab === "compare"){
+        // the same board on every card: each activation asks for it (Shepherd starts a check when
+        // one is due) and paints what it has meanwhile; ccCompare repaints
+        send("compare-load", "");
+        renderCompare();
       } else if(detailTab === "onpurpose"){
         if(ONPURPOSE.key !== selectedKey){
           ONPURPOSE = { key: selectedKey, data: null, flash: null, draft: null };   // pending (dedupes re-fetch)
@@ -23799,7 +24019,6 @@ local HTML = [[
       h.textContent = "Tabs for this project"; m.appendChild(h);
       DETAIL_TABS.forEach(function(t){
         if(t.id === "stories" && !itemHasStories(selectedKey)) return;  // gated tab: not offered when the file is absent
-        if(t.id === "reqs" && !itemHasReqs(selectedKey)) return;  // gated tab: not offered outside a git repo
         if(t.id === "onpurpose" && !itemHasOnPurpose(selectedKey)) return;  // gated tab: only in a local repo
         var locked = (t.id === "activity");
         var lab = document.createElement("label"); if(locked) lab.className = "locked";
@@ -28271,7 +28490,6 @@ local HTML = [[
     var PANEL_BUNDLES = [];   // L2 policy-bundle names (detail-panel Policy dropdown)
     var lastSelectedStatus = null;
     var lastSelectedHasStories = null;   // tracks the selected tile's user-stories-file presence (gated tab)
-    var lastSelectedHasReqs = null;      // ...and whether it's in a git repo (the Requirements tab, 2026-09-29)
     var lastSelectedHasOnPurpose = null; // ...and whether it is in a local repo (the On purpose tab, unit 33)
     window.ccUpdate = function(items, providers, bundles){
       lastItems = items || [];
@@ -28305,13 +28523,6 @@ local HTML = [[
         renderTabBar(); applyTabVisibility(); maybeLoadActiveTab();
       }
       lastSelectedHasStories = sel ? hs : null;
-      // The Requirements tab is gated on a git repo: the same rebuild when that flips.
-      var hr = sel ? !!sel.has_reqs : false;
-      if(sel && lastSelectedHasReqs !== null && hr !== lastSelectedHasReqs){
-        if(detailTab === "reqs" && !hr) detailTab = "activity";
-        renderTabBar(); applyTabVisibility(); maybeLoadActiveTab();
-      }
-      lastSelectedHasReqs = sel ? hr : null;
       var hp = sel ? !!sel.onpurpose : false;
       if(sel && lastSelectedHasOnPurpose !== null && hp !== lastSelectedHasOnPurpose){
         if(detailTab === "onpurpose" && !hp) detailTab = "activity";
@@ -30523,9 +30734,6 @@ function FX._refreshBody()
   -- session that entered a sibling worktree finds its launch folder through its origin.
   FX.annotateOrigins(list)   -- the window each session lives in (see FX.annotateOrigins)
   FX.annotateStacks(list, labels, cfg)
-  -- 2026-09-29 (unit 22): the Requirements tab's gate -- a local session in a git repo (after the
-  -- stacks: it reads mainRoot). No stat, no git: the stacks already asked.
-  for _, it in ipairs(list) do it.has_reqs = core.reqsRepoOf(it) and true or nil end
   -- 2026-09-29: the overlap radar's line on each worktree tile -- after the stacks (it reads
   -- repoKey/wtRoot); a read of the cached scan, never a scan (FX.radarTimer runs those)
   do
@@ -30571,6 +30779,11 @@ function FX._refreshBody()
   do
     local okrc, errrc = pcall(FX.stepRemoteControl, list, cfg)
     if not okrc then print("[cc-dashboard] ❌ remote-control step failed: " .. tostring(errrc)) end
+  end
+  -- Compare tab (2026-10-27): the day's GitHub check when it's due, and a hung gh call ended
+  do
+    local okc, errc = pcall(FX.stepCompare)
+    if not okc then print("[cc-dashboard] ❌ compare step failed: " .. tostring(errc)) end
   end
   -- resume at the usage limit's reset (2026-09-29): plan new arms, type or flag the ones due
   do

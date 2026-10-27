@@ -8505,7 +8505,9 @@ do
   -- 2026-10-03: 59 -> 60 for holding a queued line and the Queues view ("queuehold", flagged new).
   -- 2026-10-04: 60 -> 61 for past sessions in History, with Resume ("pastsessions", flagged new).
   -- 2026-10-14: 61 -> 62 for crossings, Adam approving what one project sends another ("crossings", flagged new).
-  eq("FEATURES: the 62 new features are flagged", newCount, 62)
+  -- 2026-10-27: 62 -> 63 for the Compare tab, a weekly GitHub leaderboard ("compare", flagged new).
+  eq("FEATURES: the 63 new features are flagged", newCount, 63)
+  check("FEATURES: lists the Compare tab", keys.compare == true)
   check("FEATURES: lists crossings", keys.crossings == true)
   check("FEATURES: lists queue hold and the Queues view", keys.queuehold == true)
   check("FEATURES: lists past sessions", keys.pastsessions == true)
@@ -16648,6 +16650,148 @@ do
   eq("chunk: an endless line isn't carried forever (no rename is that long)", r2, "")
   local l3 = core.customTitleChunk(nil, "", "")
   eq("chunk: an empty read changes nothing", #l3, 0)
+end
+
+-- ---- Compare tab: a weekly GitHub leaderboard (2026-10-27) ----
+-- Adam, 2026-10-27: replace the Requirements tab with a Compare tab -- his commits and lines per day
+-- against up to 5 GitHub users, a weekly leaderboard from a daily check, no setup on their side, and a
+-- drill into which repos each one wrote to. Pure half: the job list, each gh answer folded into the
+-- state, the daily due check, and the board.
+do
+  local iso = core.isoToEpoch
+  local TZ = -4 * 3600
+  local NOW = iso("2026-10-27T18:00:00Z")            -- Tuesday 14:00 local
+  local THIS, LAST = iso("2026-10-26T04:00:00Z"), iso("2026-10-19T04:00:00Z")
+  local A, B, C, D = string.rep("a", 40), string.rep("b", 40), string.rep("c", 40), string.rep("d", 40)
+
+  check("compare: a GitHub login is letters, digits and single inner hyphens",
+        core.compareLoginOk("jonkopp17") and core.compareLoginOk("KoyaDzogbema-MRG") and core.compareLoginOk("a"))
+  check("compare: ...never a leading, trailing or double hyphen, a space, a slash, 40+ chars or nothing",
+        not core.compareLoginOk("-x") and not core.compareLoginOk("x-") and not core.compareLoginOk("a--b")
+        and not core.compareLoginOk("a b") and not core.compareLoginOk("org/repo")
+        and not core.compareLoginOk(string.rep("a", 40)) and not core.compareLoginOk("") and not core.compareLoginOk(nil))
+  local users, bad = core.compareUsers({ " @jonkopp17 ", "HaydnFM", "jonkopp17", "JONKOPP17", "WSAdam", "bad name",
+                                         "a", "b", "c", "d" }, "wsadam")
+  eq("compare: the list trims, drops @, dedupes in any case, leaves you out and keeps 5",
+     table.concat(users, ","), "jonkopp17,HaydnFM,a,b,c")
+  eq("compare: ...and names what it refused (bad, or past the 5)", table.concat(bad, ","), "bad name,d")
+
+  local win = core.compareWindow(NOW, TZ)
+  eq("compare: this week starts Monday 00:00 local", win.thisStart, THIS)
+  eq("compare: last week is the Monday before", win.lastStart, LAST)
+  eq("compare: repos are listed from last Monday, exactly", win.sinceIso, "2026-10-19T04:00:00Z")
+  eq("compare: search asks from the day before (its dates carry no zone)", win.searchDate, "2026-10-18")
+
+  local empty = core.parseCompareState(nil)
+  check("compare: no file is an empty state", type(empty) == "table" and #empty.users == 0 and next(empty.commits) == nil)
+  local garbled = core.parseCompareState("{not json")
+  check("compare: a garbled file reads as empty, flagged so nothing writes over it", #garbled.users == 0 and garbled.garbled == true)
+  local round = core.parseCompareState(core.encodeCompareState({ users = { "jonkopp17" }, self = "WSAdam",
+    commits = { [A] = { login = "jonkopp17", repo = "Org/x", at = THIS + 10, add = 3, del = 1 } } }))
+  check("compare: the state survives a write and a read",
+        round.users[1] == "jonkopp17" and round.self == "WSAdam" and round.commits[A] and round.commits[A].add == 3)
+
+  -- the jobs: who you are first, then a search and two hidden counts per person
+  local s = core.parseCompareState(nil)
+  s.users = { "jonkopp17" }
+  local jobs = core.compareJobs(s, win)
+  eq("compare: without your login, the one first job asks gh who you are", #jobs == 1 and jobs[1].kind, "self")
+  eq("compare: ...its argv", table.concat(core.compareArgs(jobs[1], win), "|"), "api|user|-q|.login")
+  local follow = core.compareApply(s, jobs[1], 0, "WSAdam\n", "", win)
+  eq("compare: the answer sets you", s.self, "WSAdam")
+  local kinds = {}
+  for _, j in ipairs(follow) do kinds[#kinds + 1] = j.kind .. ":" .. j.login .. (j.week and (":" .. j.week) or "") end
+  eq("compare: then a search and two hidden counts per person, you first", table.concat(kinds, " "),
+     "search:WSAdam hidden:WSAdam:this hidden:WSAdam:last search:jonkopp17 hidden:jonkopp17:this hidden:jonkopp17:last")
+  eq("compare: a search's argv", table.concat(core.compareArgs({ kind = "search", login = "jonkopp17" }, win), "|"),
+     "api|--paginate|-X|GET|search/commits|-f|q=author:jonkopp17 author-date:>=2026-10-18|-f|per_page=100|-q|.items[].repository.full_name")
+  eq("compare: a repo list's argv", table.concat(core.compareArgs({ kind = "list", login = "jonkopp17", repo = "Org/crm-sdk" }, win), "|"),
+     'api|--paginate|repos/Org/crm-sdk/commits?author=jonkopp17&since=2026-10-19T04:00:00Z&per_page=100|-q|.[] | "\\(.sha) \\(.commit.author.date)"')
+  eq("compare: a commit's argv", table.concat(core.compareArgs({ kind = "stats", repo = "Org/crm-sdk", sha = A }, win), "|"),
+     "api|repos/Org/crm-sdk/commits/" .. A .. "|-q|{a:.stats.additions,d:.stats.deletions,f:[.files[]?|{n:.filename,a:.additions,d:.deletions}]}")
+  local hv = core.compareArgs({ kind = "hidden", login = "jonkopp17", week = "last" }, win)
+  check("compare: a hidden count asks GraphQL for that person's week",
+        hv[2] == "graphql" and table.concat(hv, "|"):find("login=jonkopp17", 1, true) ~= nil
+        and table.concat(hv, "|"):find("from=2026-10-19T04:00:00Z|-f|to=2026-10-26T04:00:00Z", 1, true) ~= nil
+        and hv[#hv] == ".data.user.contributionsCollection.restrictedContributionsCount")
+
+  -- a search names repos; only clean owner/name pairs go into a URL
+  follow = core.compareApply(s, { kind = "search", login = "jonkopp17" }, 0,
+                             "Org/crm-sdk\nOrg/crm-sdk\nOrg/mail.v2\nnot a repo\n../x/y\nOrg/a b\n", "", win)
+  local lists = {}
+  for _, j in ipairs(follow) do lists[#lists + 1] = j.kind .. ":" .. j.repo end
+  eq("compare: a search lists each repo once, and nothing that isn't owner/name", table.concat(lists, " "),
+     "list:Org/crm-sdk list:Org/mail.v2")
+
+  -- a repo's commit list is the truth: in the window, by that person; then their lines
+  follow = core.compareApply(s, { kind = "list", login = "jonkopp17", repo = "Org/crm-sdk" }, 0,
+    A .. " 2026-10-26T15:00:00Z\n" .. B .. " 2026-10-20T10:00:00Z\n" .. C .. " 2026-10-10T10:00:00Z\nnot-a-sha 2026-10-26T15:00:00Z\n", "", win)
+  check("compare: a listed commit is stored for that person and repo",
+        s.commits[A] and s.commits[A].login == "jonkopp17" and s.commits[A].repo == "Org/crm-sdk" and s.commits[A].at == iso("2026-10-26T15:00:00Z"))
+  check("compare: ...one from before last Monday isn't", s.commits[C] == nil)
+  local stats = {}
+  for _, j in ipairs(follow) do stats[#stats + 1] = j.kind .. ":" .. j.sha:sub(1, 1) end
+  eq("compare: ...and each new commit's lines are asked for", table.concat(stats, " "), "stats:a stats:b")
+  core.compareApply(s, { kind = "stats", repo = "Org/crm-sdk", sha = A }, 0,
+    '{"a":120,"d":20,"f":[{"n":"src/a.ts","a":20,"d":5},{"n":"web/package-lock.json","a":100,"d":15}]}', "", win)
+  eq("compare: a commit's lines skip lockfiles", (s.commits[A].add or -1) .. "/" .. (s.commits[A].del or -1), "20/5")
+  core.compareApply(s, { kind = "stats", repo = "Org/crm-sdk", sha = B }, 1, "", "HTTP 403: API rate limit exceeded", win)
+  check("compare: a commit whose lines couldn't be read (rate limit) stays pending", s.commits[B].add == nil)
+  follow = core.compareApply(s, { kind = "list", login = "jonkopp17", repo = "Org/crm-sdk" }, 0,
+    A .. " 2026-10-26T15:00:00Z\n" .. B .. " 2026-10-20T10:00:00Z\n", "", win)
+  eq("compare: the next list asks again only for the pending one", #follow == 1 and follow[1].sha, B)
+  core.compareApply(s, { kind = "stats", repo = "Org/crm-sdk", sha = B }, 1, "", "gh: Not Found (HTTP 404)", win)
+  check("compare: a listed commit that 404s counts with no lines, and isn't asked again",
+        s.commits[B].add == 0 and s.commits[B].del == 0 and #core.compareApply(s, { kind = "list", login = "jonkopp17",
+          repo = "Org/crm-sdk" }, 0, A .. " 2026-10-26T15:00:00Z\n" .. B .. " 2026-10-20T10:00:00Z\n", "", win) == 0)
+  -- 2026-10-27: GitHub's search listed jonkopp17's crm-sdk commit 8dfaced, which the repo no longer had (404):
+  -- rewritten history. Commits come from the repo's own list, and one that leaves it leaves the board.
+  core.compareApply(s, { kind = "list", login = "jonkopp17", repo = "Org/crm-sdk" }, 0, A .. " 2026-10-26T15:00:00Z\n", "", win)
+  check("compare: a commit the repo no longer lists (rewritten history) leaves the count", s.commits[B] == nil and s.commits[A] ~= nil)
+  core.compareApply(s, { kind = "list", login = "jonkopp17", repo = "Org/crm-sdk" }, 1, "", "HTTP 502", win)
+  check("compare: ...but a list that failed drops nothing", s.commits[A] ~= nil)
+  core.compareApply(s, { kind = "list", login = "jonkopp17", repo = "Org/mail.v2" }, 0, D .. " 2026-10-27T13:00:00Z\n", "", win)
+  core.compareApply(s, { kind = "stats", repo = "Org/mail.v2", sha = D }, 0, '{"a":7,"d":2,"f":[{"n":"m.ts","a":7,"d":2}]}', "", win)
+  core.compareApply(s, { kind = "hidden", login = "jonkopp17", week = "this" }, 0, "20\n", "", win)
+  core.compareApply(s, { kind = "list", login = "WSAdam", repo = "WSAdam/claude-shepherd" }, 0, C:gsub("c", "e") .. " 2026-10-21T12:00:00Z\n", "", win)
+  core.compareApply(s, { kind = "stats", repo = "WSAdam/claude-shepherd", sha = C:gsub("c", "e") }, 0, '{"a":300,"d":10,"f":[]}', "", win)
+  local e = core.compareApply(s, { kind = "search", login = "jonkopp17" }, 1, "", "gh: API rate limit exceeded (HTTP 403)\nmore", win)
+  check("compare: a failed search records why, and asks nothing more", #e == 0 and tostring(s.error):find("rate limit", 1, true) ~= nil)
+  s.error = nil
+
+  -- the board
+  local b = core.compareBoard(s, NOW, TZ)
+  local tw, lw = b.weeks.this, b.weeks.last
+  eq("compare: this week's rows: the person with commits first", tw.rows[1].login .. "," .. tw.rows[2].login, "jonkopp17,WSAdam")
+  check("compare: ...you're marked", tw.rows[2].you == true and not tw.rows[1].you)
+  eq("compare: a row adds up the week", tw.rows[1].commits .. " +" .. tw.rows[1].add .. " -" .. tw.rows[1].del, "2 +27 -7")
+  eq("compare: ...per day, Monday first", tw.rows[1].days[1].commits .. "," .. tw.rows[1].days[2].commits, "1,1")
+  check("compare: ...days after today are marked ahead", tw.days[3].future == true and not tw.days[2].future)
+  eq("compare: a row's repos, busiest first", tw.rows[1].repos[1].repo .. ":" .. tw.rows[1].repos[1].commits .. " "
+     .. tw.rows[1].repos[2].repo .. ":" .. tw.rows[1].repos[2].commits, "Org/crm-sdk:1 Org/mail.v2:1")
+  eq("compare: the hidden count rides on its own week", tostring(tw.rows[1].hidden) .. "/" .. tostring(lw.rows[1].hidden), "20/nil")
+  eq("compare: last week has its own rows", lw.rows[1].login .. ":" .. lw.rows[1].commits .. " +" .. lw.rows[1].add, "WSAdam:1 +300")
+  eq("compare: someone with nothing still gets a row", lw.rows[2].login .. ":" .. lw.rows[2].commits, "jonkopp17:0")
+  s.commits[A].add, s.commits[A].del = nil, nil
+  eq("compare: a commit whose lines aren't in yet counts, and says so", core.compareBoard(s, NOW, TZ).weeks.this.rows[1].pending, 1)
+  s.commits[A].add, s.commits[A].del = 20, 5
+
+  -- finishing a run: the day is done; only the two weeks and the people listed are kept
+  s.commits[string.rep("f", 40)] = { login = "jonkopp17", repo = "Org/x", at = LAST - 60, add = 1, del = 1 }
+  s.commits[string.rep("9", 40)] = { login = "someoneRemoved", repo = "Org/x", at = THIS + 60, add = 1, del = 1 }
+  s.hidden.jonkopp17[tostring(LAST - 7 * 86400)] = 4
+  check("compare: never run is due", core.compareDue(s, NOW, TZ))
+  core.compareFinish(s, NOW, TZ)
+  check("compare: a finished run keeps two weeks and the people listed",
+        s.commits[string.rep("f", 40)] == nil and s.commits[string.rep("9", 40)] == nil and s.commits[A] ~= nil
+        and s.hidden.jonkopp17[tostring(LAST - 7 * 86400)] == nil and s.hidden.jonkopp17[tostring(THIS)] == 20)
+  check("compare: ...and isn't due again today", not core.compareDue(s, NOW + 3 * 3600, TZ))
+  check("compare: ...but is the next morning", core.compareDue(s, iso("2026-10-28T05:00:00Z"), TZ))
+  local f = core.parseCompareState(nil)
+  f.triedAt, f.error = NOW, "gh: not logged in"
+  core.compareFinish(f, NOW, TZ)
+  check("compare: a run that failed tries again an hour later, not every tick",
+        not core.compareDue(f, NOW + 600, TZ) and core.compareDue(f, NOW + 3601, TZ))
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

@@ -404,6 +404,12 @@ echo ""
 echo "== lua: a tab's rename is read once in the background, then only from the bytes a transcript grows by -- never a blocking grep of the whole file on the tick (behavioral, stubbed hs + a real transcript) =="
 HOME="$(mktemp -d)" lua "$DIR/tab-title-scan.test.lua" || fail=1
 echo ""
+echo "== lua: the Compare tab's GitHub check -- nothing until the tab is opened, then background gh calls (4 at once) for who you are, each person's repos, commits and lines, once a day or on Refresh; a hung call is ended (behavioral, stubbed hs + a fake gh) =="
+HOME="$(mktemp -d)" lua "$DIR/compare.test.lua" || fail=1
+echo ""
+echo "== node: the Compare tab's leaderboard -- ranked by the column clicked, a name opens their repos, This/Last week, the user list edits, everything escaped (behavioral, runs the shipped compareHtml / compareAct) =="
+node "$DIR/compare-view.test.js" || fail=1
+echo ""
 echo "== node: a card's main-is-red flag, its failing lines in the tooltip, both escaped (behavioral, runs the shipped mainRedBadge) =="
 node "$DIR/maingreen-badge.test.js" || fail=1
 echo ""

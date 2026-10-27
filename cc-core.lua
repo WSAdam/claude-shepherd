@@ -23416,7 +23416,7 @@ M.DETAIL_TABS = {
   { id = "changes",    label = "Changes" },
   { id = "stories",    label = "User Stories" },  -- gated: shows only when spec/product/user-stories.md exists
   { id = "onpurpose",  label = "On purpose" },    -- gated: a local session in a git repo (adding creates DECISIONS.md)
-  { id = "reqs",       label = "Requirements" },  -- gated: shows only for a session in a git repo (2026-09-29)
+  { id = "compare",    label = "Compare" },     -- 2026-10-27: replaces Requirements; the same board on every card
   { id = "subagents",  label = "Agents" },
   { id = "queue",      label = "Queue" },
 }
@@ -24923,6 +24923,304 @@ function M.commitWeek(parsed, opts)
   table.sort(res.emails)
   res.noIdentity = (res.repoCount > 0 and not anyIdentity) or nil
   return res
+end
+
+-- ---- Compare tab: a weekly GitHub leaderboard (2026-10-27) ----------------------------------
+-- Adam's commits and lines per day against up to 5 GitHub users, from a daily check of every repo
+-- his `gh` login can read -- nothing for them to set up. A check is a list of gh jobs: who you are
+-- (once), then per person a commit search (which repos they wrote to), each of those repos' commit
+-- list since last Monday (the truth: GitHub's search still lists commits a rewrite removed), each
+-- new commit's lines (lockfiles and build output skipped, as in the commit stats), and GraphQL's
+-- count of their contributions his login can't see. FX runs the jobs as background tasks
+-- (FX.compareStart); everything here is pure. Only default branches are searched, so feature-branch
+-- work counts once it merges, under its own author date (each check re-reads both weeks).
+do
+  M.COMPARE_MAX_USERS = 5
+  M.COMPARE_RETRY_SECONDS = 3600   -- a check that failed tries again after this, never every tick
+  M.COMPARE_TASK_TIMEOUT = 120     -- a gh call still going after this is ended (FX.stepCompare)
+  M.COMPARE_PARALLEL = 4           -- gh calls at once
+  local WEEK = 7 * 86400
+  local LIST_Q = '.[] | "\\(.sha) \\(.commit.author.date)"'
+  local STATS_Q = "{a:.stats.additions,d:.stats.deletions,f:[.files[]?|{n:.filename,a:.additions,d:.deletions}]}"
+  local HIDDEN_Q = "query($login:String!,$from:DateTime!,$to:DateTime!){user(login:$login)"
+    .. "{contributionsCollection(from:$from,to:$to){restrictedContributionsCount}}}"
+  local function iso(t) return os.date("!%Y-%m-%dT%H:%M:%SZ", t) end
+  local function wkKey(t) return string.format("%d", math.floor(tonumber(t) or 0)) end
+  local function firstLine(s) return (tostring(s or ""):match("[^\n]+") or ""):sub(1, 200) end
+  -- An owner/name a URL path can carry: no spaces, no "..", never just ".".
+  local function repoOk(r)
+    return type(r) == "string" and #r <= 200 and r:match("^[%w%._%-]+/[%w%._%-]+$") ~= nil
+      and not r:find("..", 1, true) and not r:match("/%.$")
+  end
+
+  -- A GitHub login: 1-39 letters, digits and single inner hyphens.
+  function M.compareLoginOk(s)
+    if type(s) ~= "string" or #s < 1 or #s > 39 or not s:match("^[%w%-]+$") then return false end
+    return s:sub(1, 1) ~= "-" and s:sub(-1) ~= "-" and not s:find("--", 1, true)
+  end
+
+  -- The people to compare with: trimmed, "@" dropped, once in any case, never you, at most 5.
+  -- -> list, refused (bad names and any past the 5).
+  function M.compareUsers(list, self)
+    local out, bad, seen = {}, {}, {}
+    local me = type(self) == "string" and self:lower() or nil
+    for _, raw in ipairs(type(list) == "table" and list or {}) do
+      local s = tostring(raw or ""):gsub("^%s+", ""):gsub("%s+$", ""):gsub("^@", "")
+      if s ~= "" then
+        local low = s:lower()
+        if not M.compareLoginOk(s) then bad[#bad + 1] = s
+        elseif low ~= me and not seen[low] then
+          seen[low] = true
+          if #out < M.COMPARE_MAX_USERS then out[#out + 1] = s else bad[#bad + 1] = s end
+        end
+      end
+    end
+    return out, bad
+  end
+
+  -- The two weeks a check covers: this one (Monday 00:00 local on) and the one before.
+  function M.compareWindow(now, tz)
+    local thisStart = M.localWeekStart(now, tz)
+    local lastStart = thisStart - WEEK
+    return { now = now, tz = tz, thisStart = thisStart, lastStart = lastStart, sinceIso = iso(lastStart),
+             thisIso = iso(thisStart), nowIso = iso(now),
+             searchDate = os.date("!%Y-%m-%d", lastStart - 86400) }   -- search dates carry no zone: a day early
+  end
+
+  -- The local day number of `now` (the daily check's clock).
+  function M.compareDay(now, tz) return math.floor(((tonumber(now) or 0) + (tonumber(tz) or 0)) / 86400) end
+
+  -- ~/.claude/cc-compare.json: { users, self, commits = { sha = { login, repo, at, add, del } },
+  -- hidden = { login = { weekStart = n } }, runAt, runDay, triedAt, error }. Never nil: a missing
+  -- file is empty, an unreadable one empty and `garbled` (FX never writes over it).
+  function M.parseCompareState(raw)
+    local st = { v = 1, users = {}, commits = {}, hidden = {} }
+    if type(raw) ~= "string" or raw == "" then return st end
+    local ok, t = pcall(function() return M.json.decode(raw) end)
+    if not ok or type(t) ~= "table" then st.garbled = true; return st end
+    if type(t.self) == "string" and M.compareLoginOk(t.self) then st.self = t.self end
+    st.users = (M.compareUsers(type(t.users) == "table" and t.users or {}, st.self))
+    for sha, c in pairs(type(t.commits) == "table" and t.commits or {}) do
+      if type(sha) == "string" and #sha == 40 and sha:match("^%x+$") and type(c) == "table"
+         and type(c.login) == "string" and repoOk(c.repo) and tonumber(c.at) then
+        st.commits[sha] = { login = c.login, repo = c.repo, at = tonumber(c.at), add = tonumber(c.add), del = tonumber(c.del) }
+      end
+    end
+    for login, weeks in pairs(type(t.hidden) == "table" and t.hidden or {}) do
+      if type(login) == "string" and type(weeks) == "table" then
+        local w = {}
+        for k, n in pairs(weeks) do if tonumber(k) and tonumber(n) then w[wkKey(k)] = tonumber(n) end end
+        st.hidden[login] = w
+      end
+    end
+    st.runAt, st.runDay, st.triedAt = tonumber(t.runAt), tonumber(t.runDay), tonumber(t.triedAt)
+    if type(t.error) == "string" and t.error ~= "" then st.error = t.error end
+    return st
+  end
+
+  function M.encodeCompareState(st)
+    st = type(st) == "table" and st or {}
+    return M.json.encode({ v = 1, users = st.users or {}, self = st.self, commits = st.commits or {},
+                           hidden = st.hidden or {}, runAt = st.runAt, runDay = st.runDay,
+                           triedAt = st.triedAt, error = st.error })
+  end
+
+  -- Everyone on the board: you first (once gh has said who you are), then the people you listed.
+  function M.compareLogins(st)
+    local out = {}
+    if type(st) ~= "table" then return out end
+    if st.self then out[1] = st.self end
+    for _, u in ipairs(st.users or {}) do
+      if not (st.self and u:lower() == st.self:lower()) then out[#out + 1] = u end
+    end
+    return out
+  end
+
+  local function personJobs(st)
+    local jobs = {}
+    for _, login in ipairs(M.compareLogins(st)) do
+      jobs[#jobs + 1] = { kind = "search", login = login }
+      jobs[#jobs + 1] = { kind = "hidden", login = login, week = "this" }
+      jobs[#jobs + 1] = { kind = "hidden", login = login, week = "last" }
+    end
+    return jobs
+  end
+
+  -- A check's first jobs: who you are, until gh has said; then each person's search + hidden counts.
+  function M.compareJobs(st, win)
+    if not st.self then return { { kind = "self" } } end
+    return personJobs(st)
+  end
+
+  -- gh's argv for a job (an argv, never a shell line: logins and repos are checked anyway).
+  function M.compareArgs(job, win)
+    local k = type(job) == "table" and job.kind
+    if k == "self" then return { "api", "user", "-q", ".login" } end
+    if k == "search" and M.compareLoginOk(job.login) then
+      return { "api", "--paginate", "-X", "GET", "search/commits",
+               "-f", "q=author:" .. job.login .. " author-date:>=" .. win.searchDate,
+               "-f", "per_page=100", "-q", ".items[].repository.full_name" }
+    end
+    if k == "list" and M.compareLoginOk(job.login) and repoOk(job.repo) then
+      return { "api", "--paginate",
+               "repos/" .. job.repo .. "/commits?author=" .. job.login .. "&since=" .. win.sinceIso .. "&per_page=100",
+               "-q", LIST_Q }
+    end
+    if k == "stats" and repoOk(job.repo) and type(job.sha) == "string" and #job.sha == 40 and job.sha:match("^%x+$") then
+      return { "api", "repos/" .. job.repo .. "/commits/" .. job.sha, "-q", STATS_Q }
+    end
+    if k == "hidden" and M.compareLoginOk(job.login) then
+      local from, to = win.thisIso, win.nowIso
+      if job.week == "last" then from, to = win.sinceIso, win.thisIso end
+      return { "api", "graphql", "-f", "login=" .. job.login, "-f", "from=" .. from, "-f", "to=" .. to,
+               "-f", "query=" .. HIDDEN_Q, "-q", ".data.user.contributionsCollection.restrictedContributionsCount" }
+    end
+    return nil
+  end
+
+  -- Fold one gh answer into the state; -> the jobs it leads to. A failed call records why (the run
+  -- then retries in an hour), except a listed commit that 404s: it counts, with no lines.
+  function M.compareApply(st, job, code, out, err, win)
+    local follow = {}
+    if tonumber(code) ~= 0 then
+      local c = job.kind == "stats" and st.commits[job.sha] or nil
+      if c and tostring(err or ""):find("404", 1, true) then
+        c.add, c.del = 0, 0
+      else
+        local why = firstLine(err)
+        if why == "" then why = "gh exited " .. tostring(code) end
+        st.error = (job.login and (job.login .. ": ") or "") .. why
+      end
+      return follow
+    end
+    if job.kind == "self" then
+      local login = firstLine(out):gsub("%s+", "")
+      if M.compareLoginOk(login) then st.self = login; return personJobs(st) end
+      st.error = "gh didn't say who you are"
+    elseif job.kind == "search" then
+      local seen = {}
+      for line in tostring(out or ""):gmatch("[^\n]+") do
+        local r = line:gsub("%s+$", "")
+        if repoOk(r) and not seen[r:lower()] then
+          seen[r:lower()] = true
+          follow[#follow + 1] = { kind = "list", login = job.login, repo = r }
+        end
+      end
+    elseif job.kind == "list" then
+      local listed = {}
+      for line in tostring(out or ""):gmatch("[^\n]+") do
+        local sha, date = line:match("^(%x+)%s+(%S+)")
+        local at = date and M.isoToEpoch(date)
+        if sha and #sha == 40 and at and at >= win.lastStart then
+          listed[sha] = true
+          local c = st.commits[sha]
+          if c then c.login, c.repo, c.at = job.login, job.repo, at
+          else c = { login = job.login, repo = job.repo, at = at }; st.commits[sha] = c end
+          if c.add == nil then follow[#follow + 1] = { kind = "stats", repo = job.repo, sha = sha } end
+        end
+      end
+      -- the repo's own list is the truth: a commit it no longer has (a rewrite) leaves the count
+      for sha, c in pairs(st.commits) do
+        if c.login == job.login and c.repo == job.repo and c.at >= win.lastStart and not listed[sha] then
+          st.commits[sha] = nil
+        end
+      end
+    elseif job.kind == "stats" then
+      local c = st.commits[job.sha]
+      local ok, t = pcall(function() return M.json.decode(tostring(out or "")) end)
+      if c and ok and type(t) == "table" then
+        -- totals minus the skipped files (GitHub lists at most 300 files; its totals cover them all)
+        local add, del = tonumber(t.a) or 0, tonumber(t.d) or 0
+        for _, f in ipairs(type(t.f) == "table" and t.f or {}) do
+          if type(f) == "table" and commitFileExcluded(f.n, M.COMMIT_EXCLUDE_DEFAULT) then
+            add = add - (tonumber(f.a) or 0); del = del - (tonumber(f.d) or 0)
+          end
+        end
+        c.add, c.del = math.max(0, add), math.max(0, del)
+      end
+    elseif job.kind == "hidden" then
+      local n = tonumber(firstLine(out))
+      if n then
+        st.hidden[job.login] = st.hidden[job.login] or {}
+        st.hidden[job.login][wkKey(job.week == "last" and win.lastStart or win.thisStart)] = math.floor(n)
+      end
+    end
+    return follow
+  end
+
+  -- A check is over: keep the two weeks and the people listed; a clean one marks today done.
+  function M.compareFinish(st, now, tz)
+    local win = M.compareWindow(now, tz)
+    local keep = {}
+    for _, l in ipairs(M.compareLogins(st)) do keep[l] = true end
+    for sha, c in pairs(st.commits) do
+      if c.at < win.lastStart or not keep[c.login] then st.commits[sha] = nil end
+    end
+    for login, weeks in pairs(st.hidden) do
+      if not keep[login] then st.hidden[login] = nil
+      else for k in pairs(weeks) do if (tonumber(k) or 0) < win.lastStart then weeks[k] = nil end end end
+    end
+    if not st.error then st.runAt, st.runDay = now, M.compareDay(now, tz) end
+  end
+
+  -- Once a day: due on a day with no clean check, an hour after the last try.
+  function M.compareDue(st, now, tz)
+    if type(st) ~= "table" or st.runDay == M.compareDay(now, tz) then return false end
+    return (tonumber(now) or 0) - (tonumber(st.triedAt) or 0) >= M.COMPARE_RETRY_SECONDS
+  end
+
+  -- The board both weeks: a row per person (you marked) with the week's commits and lines, a bucket
+  -- per day Monday first, their repos busiest first, commits whose lines aren't read yet (pending)
+  -- and GitHub's hidden count for that week. Rows by commits, then lines.
+  function M.compareBoard(st, now, tz)
+    local win = M.compareWindow(now, tz)
+    local today = M.compareDay(now, tz)
+    local logins = M.compareLogins(st)
+    local function busier(x, y)
+      if x.commits ~= y.commits then return x.commits > y.commits end
+      if x.add + x.del ~= y.add + y.del then return x.add + x.del > y.add + y.del end
+      return tostring(x.login or x.repo) < tostring(y.login or y.repo)
+    end
+    local function week(start)
+      local firstDay = M.compareDay(start, tz)
+      local W = { start = start, days = {}, rows = {} }
+      for i = 1, 7 do
+        local dn = firstDay + i - 1
+        W.days[i] = { dayEpoch = dn * 86400 - (tonumber(tz) or 0), isToday = (dn == today) or nil, future = (dn > today) or nil }
+      end
+      local byLogin, reposOf = {}, {}
+      for _, l in ipairs(logins) do
+        local row = { login = l, you = (l == st.self) or nil, commits = 0, add = 0, del = 0, pending = 0, days = {}, repos = {} }
+        for i = 1, 7 do row.days[i] = { commits = 0, add = 0, del = 0 } end
+        local h = st.hidden[l]
+        row.hidden = h and h[wkKey(start)] or nil
+        byLogin[l], reposOf[l] = row, {}
+        W.rows[#W.rows + 1] = row
+      end
+      for _, c in pairs(st.commits) do
+        local row = byLogin[c.login]
+        if row and c.at >= start and c.at < start + WEEK then
+          local a, d = c.add or 0, c.del or 0
+          row.commits, row.add, row.del = row.commits + 1, row.add + a, row.del + d
+          if c.add == nil then row.pending = row.pending + 1 end
+          local b = row.days[M.compareDay(c.at, tz) - firstDay + 1]
+          if b then b.commits, b.add, b.del = b.commits + 1, b.add + a, b.del + d end
+          local rp = reposOf[c.login][c.repo]
+          if not rp then
+            rp = { repo = c.repo, commits = 0, add = 0, del = 0 }
+            reposOf[c.login][c.repo] = rp
+            row.repos[#row.repos + 1] = rp
+          end
+          rp.commits, rp.add, rp.del = rp.commits + 1, rp.add + a, rp.del + d
+        end
+      end
+      for _, row in ipairs(W.rows) do table.sort(row.repos, busier) end
+      table.sort(W.rows, busier)
+      return W
+    end
+    return { self = st.self, users = st.users, runAt = st.runAt, error = st.error,
+             weeks = { this = week(win.thisStart), last = week(win.lastStart) } }
+  end
 end
 
 -- ============================================================================
@@ -26700,8 +26998,11 @@ M.FEATURES = {
     what = "A routine with the action \"Check main is green\" runs a repo's merge gate in its main checkout at the time you set, in the repo's gate lane behind any merge. When main goes red you get one banner, the repo's card shows ⚠ main is red with the failing lines in its tooltip, and the coach's log notes it; the next green run clears the flag. A run that couldn't run (uncommitted changes, another branch checked out, a busy suite) or timed out never counts as red, and a fleet freeze or a held session of the repo skips it.",
     why = "A main that broke between merges is caught on your schedule, not by the next unit's red gate." },
   { key = "reqs", cat = "Control", new = true, title = "Requirement ids and merge receipts",
-    what = "A Requirements tab (for a session in a git repo) lists the repo's requirements and adds one with a title and a source; Shepherd mints its id -- REQ-001, REQ-002... per repo, never reused -- in ~/.claude/cc-reqs.json. Every merge review carries a receipt: the source (the batch, the REQ ids the request names, or the session's first prompt), the requester's words, the tests it changed by layer, the gate, red-first and checker evidence, and the known issues from cc-merge.sh request --known-issues. The receipt is display only.",
-    why = "Each merge answers what was asked and what proves it's done, in one place, against an id that outlives the chat." },
+    what = "Every merge review carries a receipt: the source (the batch, the REQ ids the request names, or the session's first prompt), the requester's words, the tests it changed by layer, the gate, red-first and checker evidence, and the known issues from cc-merge.sh request --known-issues. The receipt is display only.",
+    why = "Each merge answers what was asked and what proves it's done, in one place, against an id that outlives the chat. (The Requirements tab that minted the ids gave its place to Compare on 2026-10-27; the ids already in ~/.claude/cc-reqs.json still show.)" },
+  { key = "compare", cat = "Control", new = true, title = "Compare",
+    what = "A Compare tab ranks your week against up to 5 GitHub users: commits and lines (+added / -deleted, lockfiles skipped) per day and for the week, from every repo your gh login can read -- they set up nothing. Click a name for the repos they wrote to, a column to rank by it, and switch This week / Last week. Shepherd checks GitHub once a day in the background, on Refresh, and when the list changes.",
+    why = "A weekly leaderboard against the people you work with, kept current without anyone reporting anything." },
   { key = "fleet", cat = "Control", new = true, title = "Claude drives a batch",
     what = "A Claude session proposes a batch of worktree units; you approve it once on its card (and choose whether it may merge them when green). It then opens each unit's tab through Shepherd and hands it its task. Stop batch ends it.",
     why = "Parallel work without opening tabs, pressing Return or clicking every merge -- your one approval is the permission." },

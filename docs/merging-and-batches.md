@@ -344,9 +344,11 @@ The verdict shows under the buttons, and you get a toast when it's in.
 
 ### Requirement ids and the merge receipt
 
-**Requirement ids.** A session in a git repo has a **Requirements** tab in its detail panel. It
-lists the repo's requirements and adds one: a title (what must be true) and, optionally, a source
-(who asked, where). Shepherd mints the id: `REQ-001`, `REQ-002` and so on, counted per repo, so
+**Requirement ids.** Until 2026-10-27 a session in a git repo had a **Requirements** tab in its
+detail panel, which listed the repo's requirements and added one: a title (what must be true) and,
+optionally, a source (who asked, where). The [Compare tab](fleet.md#compare-tab) took its place;
+nothing mints new ids now, and the receipt below still reads the ones already in the store. Shepherd
+minted the id: `REQ-001`, `REQ-002` and so on, counted per repo, so
 the main checkout and every worktree share one list. An id is never reused. The list lives in
 `~/.claude/cc-reqs.json`, keyed by the repo's main checkout, and Shepherd is its only writer:
 

@@ -180,9 +180,16 @@ do
   check("reqsRepoOf: no git repo -> no tab", core.reqsRepoOf({ cwd = "/tmp/x" }) == nil)
   check("reqsRepoOf: a remote tile -> no tab", core.reqsRepoOf({ mainRoot = A, remote = "box" }) == nil)
   check("reqsRepoOf: not a tile -> nil", core.reqsRepoOf(nil) == nil)
-  local hasTab = false
-  for _, t in ipairs(core.DETAIL_TABS) do if t.id == "reqs" then hasTab = true end end
-  check("the Requirements tab is a detail tab (id reqs)", hasTab)
+  -- 2026-10-27 REQUIREMENT CHANGE (Adam: "get rid of the requirements tab and instead have a compare
+  -- tab"): the tab is gone and Compare holds its place; the receipt still reads the ids already minted.
+  local hasTab, at, cmpAt = false, nil, nil
+  for i, t in ipairs(core.DETAIL_TABS) do
+    if t.id == "reqs" then hasTab = true end
+    if t.id == "onpurpose" then at = i end
+    if t.id == "compare" then cmpAt = i end
+  end
+  check("the Requirements tab is gone from the detail tabs", not hasTab)
+  check("...and Compare sits where it was, after On purpose", at ~= nil and cmpAt == at + 1)
 end
 
 -- ---- REQ ids named in text ----

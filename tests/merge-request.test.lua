@@ -1061,44 +1061,20 @@ do
   r.known_issues = "the edit button is missing"
   write(MD .. "/rq1.json", json.encode(r))
   FACTS[wt] = FACTS[wt]:gsub("@@files\nM\tapp.lua\n", "@@files\nM\tapp.lua\nA\ttests/reqs.test.lua\nM\ttests/merge.test.sh\n")
-  tick()
-  local I = items()
-  check("a session in a git repo gets the Requirements tab", I.rq1 and I.rq1.has_reqs == true)
-  check("...a session outside one doesn't", I.h1 == nil or I.h1.has_reqs == nil)
+  -- 2026-10-27 REQUIREMENT CHANGE (Adam: "get rid of the requirements tab and instead have a compare
+  -- tab"): the panel no longer mints, so REQ-001 is put in the store directly; the receipt still reads it.
   local REQS = T .. "/.claude/cc-reqs.json"
+  local seeded = core.mintReq(core.parseReqs(nil), "/r/Q", { title = "The <b>thing</b>", source = "Adam, chat" }, os.time())
+  write(REQS, core.encodeReqs(seeded))
+  fx._reqsCache = nil   -- this harness's hs.fs has no mtimes, so the store's cache can't see the write
   local function post(tbl) js = {}; return quiet(function() PANEL_CB({ body = json.encode(tbl) }) end) end
-  local function reply(fn)
-    for i = #js, 1, -1 do
-      local body = tostring(js[i]):match("^window%." .. fn .. "%(\"[^\"]*\", (.*)%)$")
-      if body then return json.decode(body) end
-    end
-    return nil
-  end
   check("the panel's message channel is wired", type(PANEL_CB) == "function")
-  post({ a = "detail-reqs", v = "rq1" })
-  local list = reply("ccReqs")
-  check("the tab loads the repo's (empty) list, with its hash", list and type(list.reqs) == "table" and #list.reqs == 0
-        and type(list.hash) == "string")
-  post({ a = "reqs-add", v = "rq1", title = "The <b>thing</b>", source = "Adam, chat", hash = list and list.hash })
-  local added = reply("ccReqsAdded")
-  check("adding one mints REQ-001  (" .. tostring(added and (added.id or added.error)) .. ")", added and added.ok == true and added.id == "REQ-001")
-  local store = read(REQS)
-  check("...into ~/.claude/cc-reqs.json, under the repo's main checkout",
-        store ~= nil and store:find("/r/Q", 1, true) ~= nil and store:find("REQ-001", 1, true) ~= nil)
-  check("...with no temp file left behind", (function()
-    local p = io.popen('ls -1 "' .. T .. '/.claude" 2>/dev/null'); local s = p:read("*a"); p:close()
-    return not s:find("cc-reqs.json.tmp", 1, true) end)())
-  post({ a = "reqs-add", v = "rq1", title = "A double click", source = "", hash = list and list.hash })
-  local stale = reply("ccReqsAdded")
-  check("the same click again, on the list it no longer shows, is refused  (" .. tostring(stale and stale.error) .. ")",
-        stale and stale.ok == false and stale.error == "changed")
-  check("...and minted nothing", not (read(REQS) or ""):find("REQ-002", 1, true))
-  check("...it hands the panel the fresh list", stale and type(stale.reqs) == "table" and #stale.reqs == 1)
-  post({ a = "reqs-add", v = "rq1", title = "   ", source = "", hash = added and added.hash })
-  local blank = reply("ccReqsAdded")
-  check("a blank title is refused", blank and blank.ok == false and blank.error == "bad-title")
+  post({ a = "reqs-add", v = "rq1", title = "Minted from the panel", source = "", hash = "" })
+  check("the panel can't mint a requirement any more", not (read(REQS) or ""):find("REQ-002", 1, true))
 
   tick()
+  local I = items()
+  check("no tile carries the Requirements tab's flag", I.rq1 and I.rq1.has_reqs == nil)
   I = items()
   local m = I.rq1 and I.rq1.merge
   local rc = m and m.receipt

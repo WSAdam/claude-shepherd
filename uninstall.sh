@@ -42,7 +42,7 @@ if [ -z "$CLAUDE_FILES" ] || [ -z "$HS_FILES" ] || [ -z "$HOOK_RE" ]; then
 fi
 # Shepherd's settings and state under ~/.claude (--purge only)
 STATE="cc-ab.json cc-agents.json cc-approved cc-ask cc-audit cc-automodel cc-autopilot cc-autotitles.json cc-bridge cc-coach
-  cc-config.json cc-decide cc-exports cc-fleet cc-gate-tools cc-gate.enabled cc-groups.json cc-guard cc-hidden.json cc-hold cc-inbox cc-labels.json
+  cc-compare.json cc-config.json cc-decide cc-exports cc-fleet cc-gate-tools cc-gate.enabled cc-groups.json cc-guard cc-hidden.json cc-hold cc-inbox cc-labels.json
   cc-lease cc-ledger cc-lesson cc-lock.json cc-main-green.json cc-mcp-configs cc-mcp.json cc-merge cc-notes cc-pins cc-policy cc-policy-override cc-presets.json
   cc-prompts cc-queue cc-recent-dirs.json cc-reqs.json cc-restart.json cc-resume cc-rules.json cc-run cc-scenarios cc-schedules.json cc-scratch cc-send cc-shepherd.log cc-skill-labels.json cc-tickets
   cc-status cc-status-mirror cc-talk cc-templates.json cc-usage-state.json cc-worklist.json cc-worklist-archive.json"

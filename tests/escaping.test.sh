@@ -57,11 +57,13 @@ assert_eq "an Inbox row's session name is esc()'d"  "yes" "$(has 'esc(r.session)
 assert_eq "an Inbox row's project is esc()'d"       "yes" "$(has 'esc(r.project)')"
 assert_eq "an Inbox question's default is esc()'d"  "yes" "$(has 'esc(r["default"])')"
 assert_eq "an Inbox question's options are esc()'d" "yes" "$(has "inboxAct(event)\">' + esc(o) + '</button>'")"
-# requirement ids (2026-09-29): a requirement's title and source are typed by hand, and the id is
-# read back from ~/.claude/cc-reqs.json -- renderReqs' `rq.` never reaches HTML raw
-assert_eq "a requirement's id is esc()'d"          "yes" "$(has 'esc(rq.id)')"
-assert_eq "a requirement's title is esc()'d"       "yes" "$(has 'esc(rq.title)')"
-assert_eq "a requirement's source is esc()'d"      "yes" "$(has 'esc(rq.source)')"
+# the Compare tab (2026-10-27; it replaced the Requirements tab, whose rq.* checks went with it): a
+# login is typed by hand, a repo name and an error come back from GitHub -- compareHtml escapes each
+# (tests/compare-view.test.js runs the real renderer)
+assert_eq "a Compare login is esc()'d"             "yes" "$(has 'esc(login)')"
+assert_eq "a Compare repo is esc()'d"              "yes" "$(has 'esc(rp.repo)')"
+assert_eq "a Compare error is esc()'d"             "yes" "$(has 'esc(d.error)')"
+assert_eq "a compared user's chip is esc()'d"      "yes" "$(has "'<span class=\"cmp-chip\">' + esc(u)")"
 # cross-repo tickets (2026-09-29): a ticket's title, body, replies, closing note and every name on the
 # board were written by sessions (cc-ticket.sh) -- ticketRowsHtml's `r.` fields; the card badge's
 # tooltip carries the oldest title (tests/tickets-view.test.js runs the real renderer)

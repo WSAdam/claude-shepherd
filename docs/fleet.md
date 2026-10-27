@@ -298,13 +298,35 @@ session is never in the snapshot.
   Only read-only git runs against the repo (`rev-parse`, `status`, `diff`).
 - **User Stories**: shown only when the project has `spec/product/user-stories.md` (below).
 - **On purpose**: the repo's `DECISIONS.md`, what the project does on purpose (below).
-- **Requirements**: shown for a session in a git repo. It lists the repo's `REQ-NNN` ids and adds
-  one ([Merging and batches → Requirement ids](merging-and-batches.md#requirement-ids-and-the-merge-receipt)).
+- **Compare**: a weekly leaderboard of you against up to 5 GitHub users (below). The same board on
+  every card.
 - **Agents**: the session's subagents and Workflows (below).
 - **Queue**: the session's task queue ([Automation → Task queue](automation.md#task-queue)).
 
 The expensive tabs load only when opened. The **⋯** button hides tabs you don't want; your choice
 (and the last-open tab) is remembered per project.
+
+### Compare tab
+
+The **Compare** tab ranks your week against up to 5 GitHub users: commits, and lines as
+**+added / −deleted**, per day and for the week. Add people by GitHub username at the bottom (× drops
+one); they don't install or set up anything. Shepherd reads GitHub through your `gh` login, so it
+counts commits in every repo that login can read, public or private:
+
+- **Which repos.** One commit search per person names the repos they wrote to; each repo's own
+  commit list since last Monday is what counts (the search can still list a commit a force-push
+  removed). Only each repo's default branch is searched, so feature-branch work counts once it merges,
+  under its original date.
+- **Lines** skip lockfiles and build output (the same list as the commit stats).
+- **+N private elsewhere** under a name is GitHub's count of their contributions in repos your login
+  can't see. It mixes commits, PRs and issues, so it isn't ranked.
+- **Click a name** to see the repos they wrote to that week, busiest first. Click **Commits** or
+  **Lines** to rank by it, and switch between **This week** and **Last week**.
+
+Nothing calls GitHub until you first open the tab. After that, Shepherd checks once a day in the
+background (a few `gh` calls at a time, never blocking the panel), again on **Refresh**, and at once
+when the list changes. A check that fails says why on the tab and tries again an hour later.
+Everything lives in `~/.claude/cc-compare.json`.
 
 ### Agents tab and background work
 

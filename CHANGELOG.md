@@ -4,6 +4,27 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-10-27 — A Compare tab in the Requirements tab's place
+
+- Added: **Compare**, a weekly leaderboard in the detail panel. Adam: "i want to get rid of the
+  requirements tab and instead have a compare tab, i want to be able to list up to 5 github users
+  and have it track our commits + lines per day vs the people on the comparison list". You and up to
+  5 GitHub users, ranked by commits or lines (+added / −deleted, lockfiles and build output skipped),
+  with a bar per day, This week / Last week, and a click on a name for the repos they wrote to.
+  Nobody else sets anything up: Shepherd reads GitHub through your `gh` login, so it counts every repo
+  that login can read. Per person, one commit search names the repos; each repo's own commit list
+  since last Monday is what counts, because GitHub's search still listed a commit a force-push had
+  removed (jonkopp17's `8dfaced` in crm-sdk, a 404 when fetched). GitHub's count of their contributions
+  in repos you can't see shows as a grey "+N private elsewhere". Nothing calls GitHub until the tab is
+  first opened; then a check runs once a day, on Refresh and when the list changes, as background
+  `gh` calls four at a time (`FX.compareStart`, `core.compareApply`), never on the tick. A hung call
+  is ended after 120 s; a failed check says why and retries an hour later. State in
+  `~/.claude/cc-compare.json` (`uninstall.sh --purge` removes it). Tests: `tests/compare.test.lua`,
+  `tests/compare-view.test.js`, the `core.compare*` block in `tests/core.test.lua`.
+- Removed: the **Requirements** tab, its tile flag, its bridge handlers and `FX.mintReq`. A merge
+  review's receipt still shows the `REQ-NNN` ids already in `~/.claude/cc-reqs.json`; nothing mints
+  new ones.
+
 ## 2026-10-22 — Shepherd stops freezing on big transcripts
 
 - Fixed: **the panel froze for up to 1.75 s at a time.** Adam: "shepherd is running like shit,

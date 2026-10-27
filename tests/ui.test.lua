@@ -4771,32 +4771,16 @@ do
   local src = f and f:read("*a") or ""
   if f then f:close() end
   local okCore, core = pcall(dofile, ROOT .. "cc-core.lua")
+  -- 2026-10-27 REQUIREMENT CHANGE (Adam: "i want to get rid of the requirements tab and instead have a
+  -- compare tab"): the tab, its gate, its bridge handlers and FX.mintReq are gone; the receipt stays.
   local hasTab = false
-  for _, t in ipairs(okCore and core.DETAIL_TABS or {}) do if t.id == "reqs" and t.label == "Requirements" then hasTab = true end end
-  check("reqs: a Requirements tab in core.DETAIL_TABS", hasTab)
-  check("reqs: its panel exists", src:find('<div class="d-panel" data-tab="reqs">', 1, true) ~= nil
-        and src:find('<div id="d-reqs"></div>', 1, true) ~= nil)
-  check("reqs: the tile flag, from the session's repo", src:find("it.has_reqs = core.reqsRepoOf(it) and true or nil", 1, true) ~= nil)
-  check("reqs: renderTabBar skips it without a repo",
-        src:find('if(t.id === "reqs" && !itemHasReqs(selectedKey)) return;  // gated: a git repo', 1, true) ~= nil)
-  check("reqs: renderTabMenu doesn't offer it without a repo",
-        src:find('if(t.id === "reqs" && !itemHasReqs(selectedKey)) return;  // gated tab: not offered outside a git repo', 1, true) ~= nil)
-  check("reqs: a restored tab falls back when the project has no repo",
-        src:find('if(detailTab === "reqs" && !itemHasReqs(key)) detailTab = "activity";', 1, true) ~= nil)
-  check("reqs: ccUpdate rebuilds the bar when the gate flips",
-        src:find("var hr = sel ? !!sel.has_reqs : false;", 1, true) ~= nil
-        and src:find('if(detailTab === "reqs" && !hr) detailTab = "activity";', 1, true) ~= nil)
-  check("reqs: lazy-loads on tab activation (not the 1Hz tick)", src:find('send("detail-reqs", selectedKey)', 1, true) ~= nil)
-  check("reqs: load + add handlers in the bridge",
-        src:find('if a == "detail-reqs" then', 1, true) ~= nil and src:find('if a == "reqs-add" then', 1, true) ~= nil)
-  check("reqs: the add goes through the hash guard, then Shepherd's one minting path",
-        src:find("core.reqsAddDecision(list, tostring(payload.hash or \"\"), payload)", 1, true) ~= nil
-        and src:find("FX.mintReq(repo, dec.fields)", 1, true) ~= nil)
-  check("reqs: FX.mintReq commits through core.reqsMint (temp + mv)",
-        (src:match("\nfunction FX%.mintReq%(repo, fields%)(.-)\nend\n") or ""):find("core.reqsMint(", 1, true) ~= nil)
-  check("reqs: every requirement field reaching innerHTML is esc()'d",
-        src:find("esc(rq.id)", 1, true) ~= nil and src:find("esc(rq.title)", 1, true) ~= nil
-        and src:find("esc(rq.source)", 1, true) ~= nil)
+  for _, t in ipairs(okCore and core.DETAIL_TABS or {}) do if t.id == "reqs" then hasTab = true end end
+  check("reqs: no Requirements tab in core.DETAIL_TABS", not hasTab)
+  check("reqs: its panel, gate and tile flag are gone", src:find('data-tab="reqs"', 1, true) == nil
+        and src:find('id="d-reqs"', 1, true) == nil and src:find("itemHasReqs", 1, true) == nil
+        and src:find("it.has_reqs", 1, true) == nil)
+  check("reqs: nothing mints from the panel any more", src:find('if a == "detail-reqs" then', 1, true) == nil
+        and src:find('if a == "reqs-add" then', 1, true) == nil and src:find("function FX.mintReq", 1, true) == nil)
   check("receipt: the review has its line", src:find('<div class="dm-receipt" id="dm-receipt"></div>', 1, true) ~= nil)
   check("receipt: set with textContent, only while the review is asking",
         src:find('document.getElementById("dm-receipt").textContent = asking ? receiptText(m.receipt) : "";', 1, true) ~= nil)
@@ -5741,6 +5725,35 @@ do
   local rule = src:match("\n  html,body {(.-)}")
   check("the page's html,body rule turns overscroll off (no rubber-band band above the toolbar)",
         rule ~= nil and rule:find("overscroll-behavior:none;", 1, true) ~= nil)
+end
+
+-- ---- The Compare tab (2026-10-27) ----
+-- Adam, 2026-10-27: a Compare tab in the Requirements tab's place -- his commits and lines per day
+-- against up to 5 GitHub users, checked once a day. tests/compare.test.lua drives the check,
+-- compare-view.test.js the shipped renderer; these pin the wiring.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local okCore, core = pcall(dofile, ROOT .. "cc-core.lua")
+  local ids = {}
+  for _, t in ipairs(okCore and core.DETAIL_TABS or {}) do ids[#ids + 1] = t.id end
+  check("compare: a Compare tab where Requirements was  (" .. table.concat(ids, ",") .. ")",
+        table.concat(ids, ","):find("onpurpose,compare,subagents", 1, true) ~= nil)
+  check("compare: it loads when the tab opens, never on the 1s tick", src:find('send("compare-load", "");', 1, true) ~= nil)
+  check("compare: the bridge handles load, Refresh and the user list", src:find('if a == "compare-load" then', 1, true) ~= nil
+        and src:find('if a == "compare-refresh" then', 1, true) ~= nil and src:find('if a == "compare-users" then', 1, true) ~= nil)
+  check("compare: the tick runs FX.stepCompare in a pcall", src:find("local okc, errc = pcall(FX.stepCompare)", 1, true) ~= nil)
+  local block = src:match("\n(%-%- %-%-%-%- Compare tab: a weekly GitHub leaderboard.-)\nfunction FX%.stepCompare%(%)") or ""
+  local step = src:match("\nfunction FX%.stepCompare%(%)(.-)\nend\n") or ""
+  check("compare: the FX section is found", #block > 0 and #step > 0)
+  check("compare: no synchronous shell anywhere in it -- every gh call is a background task",
+        not (block .. step):find("hs.execute", 1, true) and (block):find("hs.task.new(R.gh,", 1, true) ~= nil)
+  check("compare: its file is ~/.claude/cc-compare.json", src:find('"/.claude/cc-compare.json"', 1, true) ~= nil)
+  local un = io.open(ROOT .. "uninstall.sh", "r")
+  local unsrc = un and un:read("*a") or ""
+  if un then un:close() end
+  check("compare: uninstall --purge removes its file", unsrc:find("cc-compare.json", 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

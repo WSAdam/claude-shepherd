@@ -60,6 +60,7 @@ Every feature below has a reference page one click away. The panel lists the sam
   usage, with a warning at every point past 90%.
 - [**Commits today and this week**](docs/usage-and-cost.md#commits-today-and-this-week): your
   commits and lines changed per day and project, from local git, each linked to its session.
+- [**Compare**](docs/fleet.md#compare-tab): a weekly leaderboard of your commits and lines against up to 5 GitHub users, from every repo your `gh` login can read; click a name for their repos.
 - [**Where the time went**](docs/usage-and-cost.md#where-the-time-went): time lost to waits, limits, stalls and errors.
 - [**How often each skill works**](docs/providers-and-integrations.md#how-often-each-skill-works): runs and ok-rate per skill, from how each run's turn ended; your own label wins.
 - [**Shift report**](docs/usage-and-cost.md#shift-report): a summary of what the fleet did while you were away.
@@ -144,8 +145,7 @@ the fleet idle alert; every other automatic behaviour here waits for its switch.
   merges on your grant only on a pass, and 🔎 Verify reviews any session.
 - [**Red-first proof**](docs/merging-and-batches.md#the-red-first-proof-do-the-new-tests-fail-without-the-fix):
   the unit's changed tests run on the merge-base without its fix, and the review says whether they fail.
-- [**Requirement ids and merge receipts**](docs/merging-and-batches.md#requirement-ids-and-the-merge-receipt):
-  Shepherd mints REQ ids per repo, and every review shows what was asked and what proves it's done.
+- [**Requirement ids and merge receipts**](docs/merging-and-batches.md#requirement-ids-and-the-merge-receipt): every review shows what was asked and what proves it's done, with the REQ ids already minted.
 - [**Claude drives a batch**](docs/merging-and-batches.md#claude-drives-a-batch): a session proposes several units, you approve once, and it opens their tabs and hands out the tasks;
   [**Grant grading**](docs/merging-and-batches.md#grant-grading-a-risky-merge-waits-for-your-click): a merge on your grant waits for your click when it touches hook wiring, instructions, defaults, CI, migrations, lockfiles or settings, deletes a file, has a high checker finding, or has no gate pass.
 - [**Overlap radar & unit order**](docs/merging-and-batches.md#overlap-radar-and-unit-order): worktrees that touch the same files are flagged with which to merge first, and a batch unit can wait for others;

@@ -36,6 +36,7 @@ mkdir -p "$C/cc-lease/db"; printf '{"v":1,"main":"/r","leases":{}}' > "$C/cc-lea
 mkdir -p "$C/cc-bridge"; printf '0.5.0' > "$C/cc-bridge/.installed"
 mkdir -p "$C/cc-send"; printf '{"nonce":"ab"}' > "$C/cc-send/shell.1790000000-1.answer"
 printf '{"v":1,"repos":{}}' > "$C/cc-reqs.json"
+printf '{"v":1,"users":[]}' > "$C/cc-compare.json"
 mkdir -p "$C/cc-tickets"; printf '{"v":1,"id":"t1790000000-1"}' > "$C/cc-tickets/t1790000000-1.json"
 mkdir -p "$C/cc-audit/-r"; printf -- '- [ ] [LOW] AUD-001 x\n' > "$C/cc-audit/-r/AUDIT-FINDINGS.md"
 printf '{"v":1,"labels":{"toolu_a":{"verdict":"ok"}}}' > "$C/cc-skill-labels.json"
@@ -130,6 +131,8 @@ assert_eq "--purge removes the worktree leases" "gone" "$([ -e "$C/cc-lease" ] &
 assert_eq "--purge removes cc-send's requests" "gone" "$([ -e "$C/cc-send" ] && echo there || echo gone)"
 # 2026-09-29: the requirement ids Shepherd minted (cc-reqs.json) too
 assert_eq "--purge removes the minted requirement ids" "gone" "$([ -e "$C/cc-reqs.json" ] && echo there || echo gone)"
+# 2026-10-27: the Compare tab's list and what its GitHub checks found (cc-compare.json) too
+assert_eq "--purge removes the Compare tab's file" "gone" "$([ -e "$C/cc-compare.json" ] && echo there || echo gone)"
 # 2026-09-29: the cross-repo tickets (cc-tickets/) too
 assert_eq "--purge removes the cross-repo tickets" "gone" "$([ -e "$C/cc-tickets" ] && echo there || echo gone)"
 # 2026-09-29: the find-only audits' findings, settings and MCP configs (cc-audit/) too
