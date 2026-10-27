@@ -16425,6 +16425,15 @@ local function handleBridgeMsg(msg)
     FX.comparePush({ rejected = bad })
     return
   end
+  if a == "compare-name" then
+    -- a nickname (2026-10-27, a right-click on a name): saved, shown, nothing asked of GitHub
+    local st = FX.compareState()
+    if st.garbled then FX.comparePush(); return end
+    local ok, why = core.compareSetName(st, tostring(payload.login or ""), payload.name)
+    if ok then FX.compareSave() else print("[cc-dashboard] ⚠️ compare: can't name " .. tostring(payload.login) .. ": " .. tostring(why)) end
+    FX.comparePush()
+    return
+  end
   if a == "detail-onpurpose" then
     -- On purpose tab (unit 33): the repo's DECISIONS.md, from the session's own git root. Lazy:
     -- tab activation and Reload only, never the tick.
@@ -18335,6 +18344,8 @@ local HTML = [[
                          cursor:pointer; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   #d-compare .cmp-name:hover { color:var(--accent-text); text-decoration:underline; }
   #d-compare .cmp-youtag { color:var(--accent-text); font-size:10px; }
+  #d-compare .cmp-nick { width:100%; box-sizing:border-box; background:var(--surface-2); color:var(--text); border:1px solid var(--accent);
+                         border-radius:6px; padding:2px 6px; font:inherit; font-size:13px; }
   #d-compare .cmp-pending { color:var(--muted); font-size:10px; }
   #d-compare .cmp-num { text-align:right; font-variant-numeric:tabular-nums; font-size:13px; color:var(--text); }
   #d-compare .cmp-lines { text-align:right; font-variant-numeric:tabular-nums; font-size:12px; white-space:nowrap; }
@@ -22267,7 +22278,7 @@ local HTML = [[
     // (core.compareBoard) through ccCompare; it's the same on every card. A name opens the repos
     // that person wrote to; the column clicked ranks the board. Every login, repo and error
     // reaching innerHTML goes through esc().
-    var COMPARE = { data:null, week:"this", sort:"commits", open:{}, draft:"" };
+    var COMPARE = { data:null, week:"this", sort:"commits", open:{}, draft:"", editing:null, nick:"" };
     window.ccCompare = function(d){ COMPARE.data = d || {}; if(detailTab === "compare") renderCompare(); };
     function compareSorted(rows, sort){
       var out = (Array.isArray(rows) ? rows : []).slice();
@@ -22285,6 +22296,7 @@ local HTML = [[
       var d = st.data;
       if(!d) return '<div class="tl-empty">Loading Compare…</div>';
       var users = Array.isArray(d.users) ? d.users : [];
+      var names = d.names || {};
       var weeks = d.weeks || {};
       var w = (st.week === "last" ? weeks.last : weeks.this) || { rows: [], days: [] };
       var days = Array.isArray(w.days) ? w.days : [];
@@ -22320,8 +22332,10 @@ local HTML = [[
         }
         html += '<div class="cmp-row' + (r.you ? ' cmp-you' : '') + '"><div class="cmp-grid">'
           + '<span class="cmp-rank">' + (n + 1) + '</span>'
-          + '<span class="cmp-who"><button class="cmp-name" data-cmp="open:' + esc(login) + '" title="Show the repos they wrote to">'
-          + esc(login) + '</button>'
+          + '<span class="cmp-who">'
+          + (st.editing === login ? '<input id="cmp-nick" class="cmp-nick" data-for="' + esc(login) + '" maxlength="30" placeholder="' + esc(login) + '">'
+             : '<button class="cmp-name" data-cmp="open:' + esc(login) + '" data-login="' + esc(login) + '" oncontextmenu="compareCtx(event)"'
+               + ' title="GitHub: ' + esc(login) + ' · click for the repos they wrote to · right-click to rename">' + esc(r.name || login) + '</button>')
           + (r.you ? '<span class="cmp-youtag">you</span>' : '')
           + (r.pending ? '<span class="cmp-pending">' + esc(r.pending) + ' still being counted</span>' : '')
           + '</span>'
@@ -22345,7 +22359,9 @@ local HTML = [[
       var full = users.length >= 5;
       html += '<div class="cmp-users"><span class="cmp-ulabel">Comparing with</span>';
       users.forEach(function(u){
-        html += '<span class="cmp-chip">' + esc(u) + '<button data-cmp="rm:' + esc(u) + '" title="Stop comparing with ' + esc(u) + '">×</button></span>';
+        html += '<span class="cmp-chip" data-login="' + esc(u) + '" oncontextmenu="compareCtx(event)" title="GitHub: ' + esc(u)
+          + ' · right-click to rename">' + esc(names[u.toLowerCase()] || u)
+          + '<button data-cmp="rm:' + esc(u) + '" title="Stop comparing with ' + esc(u) + '">×</button></span>';
       });
       html += '<input id="cmp-new" maxlength="39" placeholder="' + (full ? '5 is the most' : 'GitHub username') + '"' + (full ? ' disabled' : '') + '>'
         + '<button data-cmp="add"' + (full ? ' disabled' : '') + '>Add</button></div>'
@@ -22356,11 +22372,49 @@ local HTML = [[
       var box = document.getElementById("d-compare"); if(!box) return;
       var old = document.getElementById("cmp-new");
       if(old) COMPARE.draft = old.value;      // a repaint keeps what's being typed
+      // ...and a nickname half typed (a check repaints every few seconds) -- only into the same person's box
+      var oldNick = COMPARE.editing ? document.getElementById("cmp-nick") : null;
+      if(oldNick && !(oldNick.getAttribute && oldNick.getAttribute("data-for") === COMPARE.editing)) oldNick = null;
+      var nickFocused = !!(oldNick && document.activeElement === oldNick);
+      if(oldNick) COMPARE.nick = oldNick.value;
       box.innerHTML = compareHtml(COMPARE);
       var ni = document.getElementById("cmp-new");
       if(ni){
         ni.value = COMPARE.draft || "";
         ni.onkeydown = function(e){ if(e.key === "Enter"){ e.preventDefault(); compareAct({ target: box.querySelector('button[data-cmp="add"]') }); } };
+      }
+      var nn = COMPARE.editing ? document.getElementById("cmp-nick") : null;
+      if(nn){
+        nn.value = COMPARE.nick || "";
+        nn.onkeydown = compareNickKey;
+        if(nickFocused && nn.focus) nn.focus();
+      }
+    }
+    // right-click a name (on the board or its chip): a box in its place for a nickname
+    function compareCtx(ev){
+      var t = ev && ev.target;
+      var el = (t && t.closest) ? t.closest("[data-login]") : null;
+      if(!el) return;
+      if(ev.preventDefault) ev.preventDefault();
+      var login = el.getAttribute("data-login") || "";
+      var names = (COMPARE.data && COMPARE.data.names) || {};
+      COMPARE.editing = login;
+      COMPARE.nick = names[login.toLowerCase()] || "";
+      renderCompare();
+      var inp = document.getElementById("cmp-nick");
+      if(inp && inp.focus){ inp.focus(); if(inp.select) inp.select(); }
+    }
+    function compareNickKey(e){
+      if(e.key === "Enter"){
+        e.preventDefault();
+        var inp = document.getElementById("cmp-nick");
+        comparePost({ a:"compare-name", login: COMPARE.editing, name: inp ? String(inp.value || "") : "" });
+        COMPARE.editing = null; COMPARE.nick = "";
+        renderCompare();
+      } else if(e.key === "Escape"){
+        e.preventDefault();
+        COMPARE.editing = null; COMPARE.nick = "";
+        renderCompare();
       }
     }
     function comparePost(msg){

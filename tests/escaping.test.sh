@@ -63,7 +63,8 @@ assert_eq "an Inbox question's options are esc()'d" "yes" "$(has "inboxAct(event
 assert_eq "a Compare login is esc()'d"             "yes" "$(has 'esc(login)')"
 assert_eq "a Compare repo is esc()'d"              "yes" "$(has 'esc(rp.repo)')"
 assert_eq "a Compare error is esc()'d"             "yes" "$(has 'esc(d.error)')"
-assert_eq "a compared user's chip is esc()'d"      "yes" "$(has "'<span class=\"cmp-chip\">' + esc(u)")"
+assert_eq "a compared user's chip is esc()'d"      "yes" "$(has "esc(names[u.toLowerCase()] || u)")"
+assert_eq "a Compare nickname is esc()'d"          "yes" "$(has 'esc(r.name || login)')"
 # cross-repo tickets (2026-09-29): a ticket's title, body, replies, closing note and every name on the
 # board were written by sessions (cc-ticket.sh) -- ticketRowsHtml's `r.` fields; the card badge's
 # tooltip carries the oldest title (tests/tickets-view.test.js runs the real renderer)

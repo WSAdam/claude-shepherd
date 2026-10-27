@@ -143,9 +143,14 @@ local function ghAnswer(args)
     if cmd:find("author:WSAdam", 1, true) then return 0, "WSAdam/claude-shepherd\n", "" end
     return 0, "", ""
   end
-  if cmd:find("repos/Org/crm-sdk/commits?", 1, true) then return 0, A .. " 2026-10-26T15:00:00Z\n", "" end
-  if cmd:find("repos/Org/mail/commits?", 1, true) then return 0, B .. " 2026-10-27T13:00:00Z\n", "" end
-  if cmd:find("repos/WSAdam/claude-shepherd/commits?", 1, true) then return 0, C .. " 2026-10-26T20:00:00Z\n", "" end
+  -- 2026-10-27: GitHub's author filter dropped alejamef's notes-app commits, so the fake answers like the
+  -- real list does without it -- everyone's commits, each with its author's login -- and refuses the filter
+  if cmd:find("author=", 1, true) then return 0, "", "" end
+  if cmd:find("repos/Org/crm-sdk/commits?", 1, true) then
+    return 0, A .. " 2026-10-26T15:00:00Z jonkopp17\n" .. string.rep("9", 40) .. " 2026-10-26T16:00:00Z someoneElse\n", ""
+  end
+  if cmd:find("repos/Org/mail/commits?", 1, true) then return 0, B .. " 2026-10-27T13:00:00Z JonKopp17\n", "" end
+  if cmd:find("repos/WSAdam/claude-shepherd/commits?", 1, true) then return 0, C .. " 2026-10-26T20:00:00Z WSAdam\n", "" end
   if cmd:find("/commits/" .. A, 1, true) then return 0, '{"a":120,"d":20,"f":[{"n":"a.ts","a":20,"d":5},{"n":"yarn.lock","a":100,"d":15}]}', "" end
   if cmd:find("/commits/" .. B, 1, true) then return 0, '{"a":7,"d":2,"f":[{"n":"m.ts","a":7,"d":2}]}', "" end
   if cmd:find("/commits/" .. C, 1, true) then return 0, '{"a":300,"d":10,"f":[{"n":"x.lua","a":300,"d":10}]}', "" end
@@ -220,6 +225,19 @@ check("...and no hidden-contribution count, nor any GraphQL call for one", jon a
   for _, c in ipairs(asked) do if c:find("graphql", 1, true) then return false end end
   return true end)())
 check("...ranked above you", b3 and b3.weeks.this.rows[1].login == "jonkopp17")
+check("...and someone else's commit in their repo isn't theirs", (read(STORE) or ""):find(string.rep("9", 40), 1, true) == nil)
+
+-- 3b. a nickname (2026-10-27, Adam: "right click and re nickname a user so i don't have to go by their github names")
+js = {}
+post({ a = "compare-name", login = "jonkopp17", name = "  Jon  " })
+local bn = lastBoard()
+local jn = bn and rowOf(bn.weeks.this, "jonkopp17")
+check("a nickname from the panel is on the board", jn and jn.name == "Jon")
+check("...and saved", (read(STORE) or ""):find('"Jon"', 1, true) ~= nil)
+local n0 = #ghTasks()
+post({ a = "compare-name", login = "stranger", name = "X" })
+check("someone not on the board can't be named", not (read(STORE) or ""):find('"X"', 1, true))
+check("a nickname checks nothing on GitHub", #ghTasks() == n0)
 
 -- 4. once a day: the tick doesn't check again today, and does tomorrow
 local n = #ghTasks()

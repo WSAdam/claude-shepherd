@@ -37,6 +37,8 @@ const parts = {
   render: slice("    function renderCompare(){", "\n    }\n"),
   post: slice("    function comparePost(msg){", "\n    }\n"),
   act: slice("    function compareAct(ev){", "\n    }\n"),
+  ctx: slice("    function compareCtx(ev){", "\n    }\n"),
+  nickKey: slice("    function compareNickKey(e){", "\n    }\n"),
 };
 for (const k of Object.keys(parts)) check("the panel ships " + k, parts[k] !== null);
 check("the Compare panel exists, and takes its clicks", src.indexOf('<div class="d-panel" data-tab="compare">') >= 0
@@ -46,16 +48,16 @@ if (Object.values(parts).some((p) => p === null)) done();
 
 // ---- a stand-in DOM ----
 function el(id) { return { id, value: "", innerHTML: "", disabled: false, onkeydown: null }; }
-const els = { "d-compare": el("d-compare"), "cmp-new": el("cmp-new") };
+const els = { "d-compare": el("d-compare"), "cmp-new": el("cmp-new"), "cmp-nick": el("cmp-nick") };
 const posted = [];
 const env = {
   document: { getElementById: (id) => els[id] || null },
   window: { webkit: { messageHandlers: { cc: { postMessage: (s) => posted.push(JSON.parse(s)) } } } },
   console,
 };
-const COMPARE_INIT = 'var COMPARE = { data:null, week:"this", sort:"commits", open:{}, draft:"" };\n';
+const COMPARE_INIT = 'var COMPARE = { data:null, week:"this", sort:"commits", open:{}, draft:"", editing:null, nick:"" };\n';
 const body = COMPARE_INIT + Object.values(parts).join("\n")
-  + "\nreturn { get: function(){ return COMPARE; }, set: function(k, v){ COMPARE[k] = v; }, compareSorted, compareHtml, renderCompare, compareAct };";
+  + "\nreturn { get: function(){ return COMPARE; }, set: function(k, v){ COMPARE[k] = v; }, compareSorted, compareHtml, renderCompare, compareAct, compareCtx };";
 const api = new Function("document", "window", "console", body)(env.document, env.window, env.console);
 
 function target(dataCmp) {   // a clicked element inside [data-cmp]
@@ -159,5 +161,48 @@ api.set("data", evil);
 api.renderCompare();
 h = els["d-compare"].innerHTML;
 check("a login is escaped everywhere, attributes too", h.indexOf("<img") < 0 && h.indexOf("&lt;img") >= 0);
+
+
+// 8. nicknames (2026-10-27, Adam: "right click and re nickname a user so i don't have to go by their github names")
+function ctxTarget(login) {
+  const t = { getAttribute: (k) => (k === "data-login" ? login : null) };
+  t.closest = (sel) => (sel === "[data-login]" ? t : null);
+  return { target: t, preventDefault() {} };
+}
+const named = JSON.parse(JSON.stringify(data));
+named.weeks.this.rows[0].name = "Jon <3";
+named.names = { jonkopp17: "Jon <3" };
+api.set("data", named);
+api.renderCompare();
+h = els["d-compare"].innerHTML;
+check("a nickname shows instead of the login, escaped", h.indexOf(">Jon &lt;3<") >= 0 && h.indexOf(">jonkopp17<") < 0 && h.indexOf("Jon <3") < 0);
+check("...with the GitHub login on hover", h.indexOf('title="GitHub: jonkopp17') >= 0);
+check("every name on the board and every chip can be right-clicked", (h.match(/oncontextmenu="compareCtx\(event\)"/g) || []).length === 3);
+api.compareCtx(ctxTarget("jonkopp17"));
+h = els["d-compare"].innerHTML;
+check("right-click opens a nickname box in the name's place", api.get().editing === "jonkopp17" && h.indexOf('id="cmp-nick"') >= 0);
+check("...holding the current nickname", els["cmp-nick"].value === "Jon <3");
+posted.length = 0;
+els["cmp-nick"].value = "Jonny";
+els["cmp-nick"].onkeydown({ key: "Enter", preventDefault() {} });
+check("Enter posts the new nickname", posted.length === 1 && posted[0].a === "compare-name" && posted[0].login === "jonkopp17"
+      && posted[0].name === "Jonny");
+check("...and closes the box", api.get().editing === null && els["d-compare"].innerHTML.indexOf('id="cmp-nick"') < 0);
+api.compareCtx(ctxTarget("WSAdam"));
+check("a name with no nickname opens an empty box", els["cmp-nick"].value === "");
+posted.length = 0;
+els["cmp-nick"].onkeydown({ key: "Escape", preventDefault() {} });
+check("Escape closes it and posts nothing", posted.length === 0 && api.get().editing === null);
+
+// 2026-10-27: a half-typed nickname followed a second right-click into the next person's box (the
+// repaint kept whatever #cmp-nick held); it's kept only for the person the box was opened for
+api.compareCtx(ctxTarget("jonkopp17"));
+els["cmp-nick"].getAttribute = (k) => (k === "data-for" ? "jonkopp17" : null);
+els["cmp-nick"].value = "Jo";
+api.renderCompare();
+check("a repaint keeps a nickname half typed", els["cmp-nick"].value === "Jo");
+api.compareCtx(ctxTarget("WSAdam"));
+check("...but right-clicking someone else doesn't carry it into their box", els["cmp-nick"].value === "");
+delete els["cmp-nick"].getAttribute;
 
 done();

@@ -23,6 +23,13 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
   is ended after 120 s; a failed check says why and retries an hour later. State in
   `~/.claude/cc-compare.json` (`uninstall.sh --purge` removes it). Tests: `tests/compare.test.lua`,
   `tests/compare-view.test.js`, the `core.compare*` block in `tests/core.test.lua`.
+- Fixed: **Compare showed 0 for alejamef**, 37 commits in `mrg-keystone/notes-app` that day. GitHub's
+  `commits?author=alejamef&since=…` returned none of them (`author=` alone, or her noreply email with
+  `since=`, did). Compare now lists each repo since last Monday without the author filter and matches
+  every commit's author login itself, in any case; a teammate's commit in the same repo isn't counted.
+- Added: **nicknames.** Right-click a name on the board or its chip, type, Return; Escape cancels.
+  The GitHub login shows on hover, an empty nickname goes back to it, and a half-typed nickname
+  survives the check's repaints but never follows a second right-click into someone else's box.
 - Removed: the **Requirements** tab, its tile flag, its bridge handlers and `FX.mintReq`. A merge
   review's receipt still shows the `REQ-NNN` ids already in `~/.claude/cc-reqs.json`; nothing mints
   new ones.

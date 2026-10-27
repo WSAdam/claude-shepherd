@@ -16710,7 +16710,7 @@ do
   eq("compare: a search's argv", table.concat(core.compareArgs({ kind = "search", login = "jonkopp17" }, win), "|"),
      "api|--paginate|-X|GET|search/commits|-f|q=author:jonkopp17 author-date:>=2026-10-18|-f|per_page=100|-q|.items[].repository.full_name")
   eq("compare: a repo list's argv", table.concat(core.compareArgs({ kind = "list", login = "jonkopp17", repo = "Org/crm-sdk" }, win), "|"),
-     'api|--paginate|repos/Org/crm-sdk/commits?author=jonkopp17&since=2026-10-19T04:00:00Z&per_page=100|-q|.[] | "\\(.sha) \\(.commit.author.date)"')
+     'api|--paginate|repos/Org/crm-sdk/commits?since=2026-10-19T04:00:00Z&per_page=100|-q|.[] | "\\(.sha) \\(.commit.author.date) \\(.author.login // \"\")"')
   eq("compare: a commit's argv", table.concat(core.compareArgs({ kind = "stats", repo = "Org/crm-sdk", sha = A }, win), "|"),
      "api|repos/Org/crm-sdk/commits/" .. A .. "|-q|{a:.stats.additions,d:.stats.deletions,f:[.files[]?|{n:.filename,a:.additions,d:.deletions}]}")
 
@@ -16724,7 +16724,7 @@ do
 
   -- a repo's commit list is the truth: in the window, by that person; then their lines
   follow = core.compareApply(s, { kind = "list", login = "jonkopp17", repo = "Org/crm-sdk" }, 0,
-    A .. " 2026-10-26T15:00:00Z\n" .. B .. " 2026-10-20T10:00:00Z\n" .. C .. " 2026-10-10T10:00:00Z\nnot-a-sha 2026-10-26T15:00:00Z\n", "", win)
+    A .. " 2026-10-26T15:00:00Z jonkopp17\n" .. B .. " 2026-10-20T10:00:00Z jonkopp17\n" .. C .. " 2026-10-10T10:00:00Z\nnot-a-sha 2026-10-26T15:00:00Z jonkopp17\n", "", win)
   check("compare: a listed commit is stored for that person and repo",
         s.commits[A] and s.commits[A].login == "jonkopp17" and s.commits[A].repo == "Org/crm-sdk" and s.commits[A].at == iso("2026-10-26T15:00:00Z"))
   check("compare: ...one from before last Monday isn't", s.commits[C] == nil)
@@ -16737,21 +16737,35 @@ do
   core.compareApply(s, { kind = "stats", repo = "Org/crm-sdk", sha = B }, 1, "", "HTTP 403: API rate limit exceeded", win)
   check("compare: a commit whose lines couldn't be read (rate limit) stays pending", s.commits[B].add == nil)
   follow = core.compareApply(s, { kind = "list", login = "jonkopp17", repo = "Org/crm-sdk" }, 0,
-    A .. " 2026-10-26T15:00:00Z\n" .. B .. " 2026-10-20T10:00:00Z\n", "", win)
+    A .. " 2026-10-26T15:00:00Z jonkopp17\n" .. B .. " 2026-10-20T10:00:00Z jonkopp17\n", "", win)
   eq("compare: the next list asks again only for the pending one", #follow == 1 and follow[1].sha, B)
   core.compareApply(s, { kind = "stats", repo = "Org/crm-sdk", sha = B }, 1, "", "gh: Not Found (HTTP 404)", win)
   check("compare: a listed commit that 404s counts with no lines, and isn't asked again",
         s.commits[B].add == 0 and s.commits[B].del == 0 and #core.compareApply(s, { kind = "list", login = "jonkopp17",
-          repo = "Org/crm-sdk" }, 0, A .. " 2026-10-26T15:00:00Z\n" .. B .. " 2026-10-20T10:00:00Z\n", "", win) == 0)
+          repo = "Org/crm-sdk" }, 0, A .. " 2026-10-26T15:00:00Z jonkopp17\n" .. B .. " 2026-10-20T10:00:00Z jonkopp17\n", "", win) == 0)
   -- 2026-10-27: GitHub's search listed jonkopp17's crm-sdk commit 8dfaced, which the repo no longer had (404):
   -- rewritten history. Commits come from the repo's own list, and one that leaves it leaves the board.
-  core.compareApply(s, { kind = "list", login = "jonkopp17", repo = "Org/crm-sdk" }, 0, A .. " 2026-10-26T15:00:00Z\n", "", win)
+  core.compareApply(s, { kind = "list", login = "jonkopp17", repo = "Org/crm-sdk" }, 0, A .. " 2026-10-26T15:00:00Z jonkopp17\n", "", win)
   check("compare: a commit the repo no longer lists (rewritten history) leaves the count", s.commits[B] == nil and s.commits[A] ~= nil)
   core.compareApply(s, { kind = "list", login = "jonkopp17", repo = "Org/crm-sdk" }, 1, "", "HTTP 502", win)
   check("compare: ...but a list that failed drops nothing", s.commits[A] ~= nil)
-  core.compareApply(s, { kind = "list", login = "jonkopp17", repo = "Org/mail.v2" }, 0, D .. " 2026-10-27T13:00:00Z\n", "", win)
+  -- 2026-10-27: notes-app's commits?author=alejamef&since= returned 0 of alejamef's 37 commits (author= alone, or
+  -- her noreply email with since=, found them): GitHub's author filter can't be trusted, so a repo is listed
+  -- since last Monday and each commit's author login is matched here, in any case.
+  check("compare: a repo list never leans on GitHub's author filter",
+        not table.concat(core.compareArgs({ kind = "list", login = "alejamef", repo = "mrg-keystone/notes-app" }, win), "|"):find("author=", 1, true))
+  local s2 = core.parseCompareState(nil)
+  s2.self, s2.users = "WSAdam", { "alejamef" }
+  local AL, TG, AU, UN = string.rep("1", 40), string.rep("2", 40), string.rep("3", 40), string.rep("4", 40)
+  core.compareApply(s2, { kind = "list", login = "alejamef", repo = "mrg-keystone/notes-app" }, 0,
+    AL .. " 2026-10-27T12:38:10Z alejamef\n" .. TG .. " 2026-10-27T11:00:00Z theTechGoose\n"
+    .. AU .. " 2026-10-26T16:18:11Z AlejaMef\n" .. UN .. " 2026-10-26T10:00:00Z \n", "", win)
+  check("compare: ...that person's commits are theirs, in any case; a teammate's and an unlinked author's aren't",
+        s2.commits[AL] ~= nil and s2.commits[AU] ~= nil and s2.commits[TG] == nil and s2.commits[UN] == nil)
+  check("compare: ...and stored under the login as listed", s2.commits[AU] and s2.commits[AU].login == "alejamef")
+  core.compareApply(s, { kind = "list", login = "jonkopp17", repo = "Org/mail.v2" }, 0, D .. " 2026-10-27T13:00:00Z jonkopp17\n", "", win)
   core.compareApply(s, { kind = "stats", repo = "Org/mail.v2", sha = D }, 0, '{"a":7,"d":2,"f":[{"n":"m.ts","a":7,"d":2}]}', "", win)
-  core.compareApply(s, { kind = "list", login = "WSAdam", repo = "WSAdam/claude-shepherd" }, 0, C:gsub("c", "e") .. " 2026-10-21T12:00:00Z\n", "", win)
+  core.compareApply(s, { kind = "list", login = "WSAdam", repo = "WSAdam/claude-shepherd" }, 0, C:gsub("c", "e") .. " 2026-10-21T12:00:00Z WSAdam\n", "", win)
   core.compareApply(s, { kind = "stats", repo = "WSAdam/claude-shepherd", sha = C:gsub("c", "e") }, 0, '{"a":300,"d":10,"f":[]}', "", win)
   local e = core.compareApply(s, { kind = "search", login = "jonkopp17" }, 1, "", "gh: API rate limit exceeded (HTTP 403)\nmore", win)
   check("compare: a failed search records why, and asks nothing more", #e == 0 and tostring(s.error):find("rate limit", 1, true) ~= nil)
@@ -16773,6 +16787,24 @@ do
   s.commits[A].add, s.commits[A].del = nil, nil
   eq("compare: a commit whose lines aren't in yet counts, and says so", core.compareBoard(s, NOW, TZ).weeks.this.rows[1].pending, 1)
   s.commits[A].add, s.commits[A].del = 20, 5
+
+  -- nicknames (2026-10-27, Adam: "a way to right click and re nickname a user so i don't have to go by their
+  -- github names")
+  eq("compare: a nickname is trimmed, its control characters spaced out", core.compareNickname("  Aleja\tM\n "), "Aleja M")
+  eq("compare: ...and kept to 30 characters, never cut mid-character", utf8.len(core.compareNickname(string.rep("é", 40))), 30)
+  check("compare: ...nothing (or bad UTF-8) is no nickname", core.compareNickname("   ") == nil and core.compareNickname("\255x") == nil
+        and core.compareNickname(nil) == nil)
+  check("compare: anyone on the board can be renamed, in any case", core.compareSetName(s, "JONKOPP17", "Jon") == true
+        and core.compareSetName(s, "WSAdam", "Me") == true)
+  local okn, whyn = core.compareSetName(s, "stranger", "X")
+  check("compare: ...someone who isn't can't", okn == false and type(whyn) == "string")
+  local nb = core.compareBoard(s, NOW, TZ)
+  check("compare: the board carries each nickname", nb.weeks.this.rows[1].name == "Jon" and nb.weeks.this.rows[2].name == "Me"
+        and nb.weeks.last.rows[1].name == "Me")
+  local rt = core.parseCompareState(core.encodeCompareState(s))
+  check("compare: nicknames survive a write and a read", rt.names.jonkopp17 == "Jon" and rt.names.wsadam == "Me")
+  core.compareSetName(s, "WSAdam", "  ")
+  check("compare: an empty nickname goes back to the login", core.compareBoard(s, NOW, TZ).weeks.this.rows[2].name == nil)
 
   -- finishing a run: the day is done; only the two weeks and the people listed are kept
   s.commits[string.rep("f", 40)] = { login = "jonkopp17", repo = "Org/x", at = LAST - 60, add = 1, del = 1 }

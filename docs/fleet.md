@@ -315,12 +315,16 @@ counts commits in every repo that login can read, public or private:
 
 - **Which repos.** One commit search per person names the repos they wrote to; each repo's own
   commit list since last Monday is what counts (the search can still list a commit a force-push
-  removed). Only each repo's default branch is searched, so feature-branch work counts once it merges,
+  removed), matched to the person by each commit's GitHub login. GitHub's own author filter isn't
+  used: it returned none of one person's 37 commits in a repo where the list has them all. Only each repo's default branch is searched, so feature-branch work counts once it merges,
   under its original date.
 - **Lines** skip lockfiles and build output (the same list as the commit stats).
 - **Repos your login can't read don't count**, and there's no reliable way to say how much that
   leaves out: GitHub's private-contribution count also includes the private work Compare already
   counts, and it is 0 for anyone who doesn't share private counts on their profile.
+- **Right-click a name** (on the board or its chip) to give that person a nickname: type it and
+  press Return, or Escape to cancel. The GitHub login stays on hover; an empty nickname goes back
+  to it.
 - **Click a name** to see the repos they wrote to that week, busiest first. Click **Commits** or
   **Lines** to rank by it, and switch between **This week** and **Last week**.
 

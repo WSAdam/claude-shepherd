@@ -24929,7 +24929,9 @@ end
 -- Adam's commits and lines per day against up to 5 GitHub users, from a daily check of every repo
 -- his `gh` login can read -- nothing for them to set up. A check is a list of gh jobs: who you are
 -- (once), then per person a commit search (which repos they wrote to), each of those repos' commit
--- list since last Monday (the truth: GitHub's search still lists commits a rewrite removed), each
+-- list since last Monday (the truth: GitHub's search still lists commits a rewrite removed), matched
+-- to the person by each commit's author login here -- never by GitHub's author= filter, which
+-- returned 0 of alejamef's 37 notes-app commits when combined with since= (2026-10-27) -- each
 -- new commit's lines (lockfiles and build output skipped, as in the commit stats). (GraphQL's
 -- restrictedContributionsCount was tried and dropped the same day: it counts private work the login
 -- CAN see -- Adam's own row read +78 against 80 private commits already counted -- and is 0 for anyone
@@ -24942,7 +24944,7 @@ do
   M.COMPARE_TASK_TIMEOUT = 120     -- a gh call still going after this is ended (FX.stepCompare)
   M.COMPARE_PARALLEL = 4           -- gh calls at once
   local WEEK = 7 * 86400
-  local LIST_Q = '.[] | "\\(.sha) \\(.commit.author.date)"'
+  local LIST_Q = '.[] | "\\(.sha) \\(.commit.author.date) \\(.author.login // \"\")"'
   local STATS_Q = "{a:.stats.additions,d:.stats.deletions,f:[.files[]?|{n:.filename,a:.additions,d:.deletions}]}"
   local function iso(t) return os.date("!%Y-%m-%dT%H:%M:%SZ", t) end
   local function firstLine(s) return (tostring(s or ""):match("[^\n]+") or ""):sub(1, 200) end
@@ -24977,6 +24979,32 @@ do
     return out, bad
   end
 
+  -- A nickname (2026-10-27, Adam: "right click and re nickname a user so i don't have to go by their
+  -- github names"): trimmed, control characters as spaces, at most 30 characters, never cut mid-
+  -- character. nil for nothing, or for text that isn't UTF-8 (the name then goes back to the login).
+  M.COMPARE_NICK_MAX = 30
+  function M.compareNickname(raw)
+    if type(raw) ~= "string" or not utf8.len(raw) then return nil end
+    local s = raw:gsub("%c", " "):gsub("%s+", " "):gsub("^ ", ""):gsub(" $", "")
+    if s == "" then return nil end
+    if utf8.len(s) > M.COMPARE_NICK_MAX then s = s:sub(1, utf8.offset(s, M.COMPARE_NICK_MAX + 1) - 1):gsub(" $", "") end
+    return s
+  end
+
+  -- Name someone on the board (you or a listed person, any case); an empty name clears it.
+  -- -> true | false, why.
+  function M.compareSetName(st, login, raw)
+    local want = type(login) == "string" and login:lower() or nil
+    for _, l in ipairs(M.compareLogins(st)) do
+      if want and l:lower() == want then
+        st.names = type(st.names) == "table" and st.names or {}
+        st.names[want] = M.compareNickname(raw)
+        return true
+      end
+    end
+    return false, "not on the board"
+  end
+
   -- The two weeks a check covers: this one (Monday 00:00 local on) and the one before.
   function M.compareWindow(now, tz)
     local thisStart = M.localWeekStart(now, tz)
@@ -24992,7 +25020,7 @@ do
   -- runAt, runDay, triedAt, error }. Never nil: a missing
   -- file is empty, an unreadable one empty and `garbled` (FX never writes over it).
   function M.parseCompareState(raw)
-    local st = { v = 1, users = {}, commits = {} }
+    local st = { v = 1, users = {}, commits = {}, names = {} }
     if type(raw) ~= "string" or raw == "" then return st end
     local ok, t = pcall(function() return M.json.decode(raw) end)
     if not ok or type(t) ~= "table" then st.garbled = true; return st end
@@ -25004,6 +25032,10 @@ do
         st.commits[sha] = { login = c.login, repo = c.repo, at = tonumber(c.at), add = tonumber(c.add), del = tonumber(c.del) }
       end
     end
+    for login, nick in pairs(type(t.names) == "table" and t.names or {}) do
+      local n = M.compareNickname(nick)
+      if type(login) == "string" and M.compareLoginOk(login) and n then st.names[login:lower()] = n end
+    end
     st.runAt, st.runDay, st.triedAt = tonumber(t.runAt), tonumber(t.runDay), tonumber(t.triedAt)
     if type(t.error) == "string" and t.error ~= "" then st.error = t.error end
     return st
@@ -25012,7 +25044,7 @@ do
   function M.encodeCompareState(st)
     st = type(st) == "table" and st or {}
     return M.json.encode({ v = 1, users = st.users or {}, self = st.self, commits = st.commits or {},
-                           runAt = st.runAt, runDay = st.runDay,
+                           names = st.names or {}, runAt = st.runAt, runDay = st.runDay,
                            triedAt = st.triedAt, error = st.error })
   end
 
@@ -25051,8 +25083,7 @@ do
                "-f", "per_page=100", "-q", ".items[].repository.full_name" }
     end
     if k == "list" and M.compareLoginOk(job.login) and repoOk(job.repo) then
-      return { "api", "--paginate",
-               "repos/" .. job.repo .. "/commits?author=" .. job.login .. "&since=" .. win.sinceIso .. "&per_page=100",
+      return { "api", "--paginate", "repos/" .. job.repo .. "/commits?since=" .. win.sinceIso .. "&per_page=100",
                "-q", LIST_Q }
     end
     if k == "stats" and repoOk(job.repo) and type(job.sha) == "string" and #job.sha == 40 and job.sha:match("^%x+$") then
@@ -25090,11 +25121,11 @@ do
         end
       end
     elseif job.kind == "list" then
-      local listed = {}
+      local listed, me = {}, tostring(job.login or ""):lower()
       for line in tostring(out or ""):gmatch("[^\n]+") do
-        local sha, date = line:match("^(%x+)%s+(%S+)")
+        local sha, date, who = line:match("^(%x+)%s+(%S+)%s*(%S*)")
         local at = date and M.isoToEpoch(date)
-        if sha and #sha == 40 and at and at >= win.lastStart then
+        if sha and #sha == 40 and at and at >= win.lastStart and who and who:lower() == me then
           listed[sha] = true
           local c = st.commits[sha]
           if c then c.login, c.repo, c.at = job.login, job.repo, at
@@ -25149,6 +25180,7 @@ do
     local win = M.compareWindow(now, tz)
     local today = M.compareDay(now, tz)
     local logins = M.compareLogins(st)
+    local names = type(st.names) == "table" and st.names or {}
     local function busier(x, y)
       if x.commits ~= y.commits then return x.commits > y.commits end
       if x.add + x.del ~= y.add + y.del then return x.add + x.del > y.add + y.del end
@@ -25163,7 +25195,8 @@ do
       end
       local byLogin, reposOf = {}, {}
       for _, l in ipairs(logins) do
-        local row = { login = l, you = (l == st.self) or nil, commits = 0, add = 0, del = 0, pending = 0, days = {}, repos = {} }
+        local row = { login = l, name = names[l:lower()], you = (l == st.self) or nil, commits = 0, add = 0, del = 0,
+                      pending = 0, days = {}, repos = {} }
         for i = 1, 7 do row.days[i] = { commits = 0, add = 0, del = 0 } end
         byLogin[l], reposOf[l] = row, {}
         W.rows[#W.rows + 1] = row
@@ -25189,7 +25222,7 @@ do
       table.sort(W.rows, busier)
       return W
     end
-    return { self = st.self, users = st.users, runAt = st.runAt, error = st.error,
+    return { self = st.self, users = st.users, names = names, runAt = st.runAt, error = st.error,
              weeks = { this = week(win.thisStart), last = week(win.lastStart) } }
   end
 end
