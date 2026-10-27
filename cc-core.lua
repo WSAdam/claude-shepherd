@@ -24930,8 +24930,10 @@ end
 -- his `gh` login can read -- nothing for them to set up. A check is a list of gh jobs: who you are
 -- (once), then per person a commit search (which repos they wrote to), each of those repos' commit
 -- list since last Monday (the truth: GitHub's search still lists commits a rewrite removed), each
--- new commit's lines (lockfiles and build output skipped, as in the commit stats), and GraphQL's
--- count of their contributions his login can't see. FX runs the jobs as background tasks
+-- new commit's lines (lockfiles and build output skipped, as in the commit stats). (GraphQL's
+-- restrictedContributionsCount was tried and dropped the same day: it counts private work the login
+-- CAN see -- Adam's own row read +78 against 80 private commits already counted -- and is 0 for anyone
+-- who doesn't share private counts.) FX runs the jobs as background tasks
 -- (FX.compareStart); everything here is pure. Only default branches are searched, so feature-branch
 -- work counts once it merges, under its own author date (each check re-reads both weeks).
 do
@@ -24942,10 +24944,7 @@ do
   local WEEK = 7 * 86400
   local LIST_Q = '.[] | "\\(.sha) \\(.commit.author.date)"'
   local STATS_Q = "{a:.stats.additions,d:.stats.deletions,f:[.files[]?|{n:.filename,a:.additions,d:.deletions}]}"
-  local HIDDEN_Q = "query($login:String!,$from:DateTime!,$to:DateTime!){user(login:$login)"
-    .. "{contributionsCollection(from:$from,to:$to){restrictedContributionsCount}}}"
   local function iso(t) return os.date("!%Y-%m-%dT%H:%M:%SZ", t) end
-  local function wkKey(t) return string.format("%d", math.floor(tonumber(t) or 0)) end
   local function firstLine(s) return (tostring(s or ""):match("[^\n]+") or ""):sub(1, 200) end
   -- An owner/name a URL path can carry: no spaces, no "..", never just ".".
   local function repoOk(r)
@@ -24983,7 +24982,6 @@ do
     local thisStart = M.localWeekStart(now, tz)
     local lastStart = thisStart - WEEK
     return { now = now, tz = tz, thisStart = thisStart, lastStart = lastStart, sinceIso = iso(lastStart),
-             thisIso = iso(thisStart), nowIso = iso(now),
              searchDate = os.date("!%Y-%m-%d", lastStart - 86400) }   -- search dates carry no zone: a day early
   end
 
@@ -24991,10 +24989,10 @@ do
   function M.compareDay(now, tz) return math.floor(((tonumber(now) or 0) + (tonumber(tz) or 0)) / 86400) end
 
   -- ~/.claude/cc-compare.json: { users, self, commits = { sha = { login, repo, at, add, del } },
-  -- hidden = { login = { weekStart = n } }, runAt, runDay, triedAt, error }. Never nil: a missing
+  -- runAt, runDay, triedAt, error }. Never nil: a missing
   -- file is empty, an unreadable one empty and `garbled` (FX never writes over it).
   function M.parseCompareState(raw)
-    local st = { v = 1, users = {}, commits = {}, hidden = {} }
+    local st = { v = 1, users = {}, commits = {} }
     if type(raw) ~= "string" or raw == "" then return st end
     local ok, t = pcall(function() return M.json.decode(raw) end)
     if not ok or type(t) ~= "table" then st.garbled = true; return st end
@@ -25006,13 +25004,6 @@ do
         st.commits[sha] = { login = c.login, repo = c.repo, at = tonumber(c.at), add = tonumber(c.add), del = tonumber(c.del) }
       end
     end
-    for login, weeks in pairs(type(t.hidden) == "table" and t.hidden or {}) do
-      if type(login) == "string" and type(weeks) == "table" then
-        local w = {}
-        for k, n in pairs(weeks) do if tonumber(k) and tonumber(n) then w[wkKey(k)] = tonumber(n) end end
-        st.hidden[login] = w
-      end
-    end
     st.runAt, st.runDay, st.triedAt = tonumber(t.runAt), tonumber(t.runDay), tonumber(t.triedAt)
     if type(t.error) == "string" and t.error ~= "" then st.error = t.error end
     return st
@@ -25021,7 +25012,7 @@ do
   function M.encodeCompareState(st)
     st = type(st) == "table" and st or {}
     return M.json.encode({ v = 1, users = st.users or {}, self = st.self, commits = st.commits or {},
-                           hidden = st.hidden or {}, runAt = st.runAt, runDay = st.runDay,
+                           runAt = st.runAt, runDay = st.runDay,
                            triedAt = st.triedAt, error = st.error })
   end
 
@@ -25040,13 +25031,11 @@ do
     local jobs = {}
     for _, login in ipairs(M.compareLogins(st)) do
       jobs[#jobs + 1] = { kind = "search", login = login }
-      jobs[#jobs + 1] = { kind = "hidden", login = login, week = "this" }
-      jobs[#jobs + 1] = { kind = "hidden", login = login, week = "last" }
     end
     return jobs
   end
 
-  -- A check's first jobs: who you are, until gh has said; then each person's search + hidden counts.
+  -- A check's first jobs: who you are, until gh has said; then each person's search.
   function M.compareJobs(st, win)
     if not st.self then return { { kind = "self" } } end
     return personJobs(st)
@@ -25068,12 +25057,6 @@ do
     end
     if k == "stats" and repoOk(job.repo) and type(job.sha) == "string" and #job.sha == 40 and job.sha:match("^%x+$") then
       return { "api", "repos/" .. job.repo .. "/commits/" .. job.sha, "-q", STATS_Q }
-    end
-    if k == "hidden" and M.compareLoginOk(job.login) then
-      local from, to = win.thisIso, win.nowIso
-      if job.week == "last" then from, to = win.sinceIso, win.thisIso end
-      return { "api", "graphql", "-f", "login=" .. job.login, "-f", "from=" .. from, "-f", "to=" .. to,
-               "-f", "query=" .. HIDDEN_Q, "-q", ".data.user.contributionsCollection.restrictedContributionsCount" }
     end
     return nil
   end
@@ -25138,12 +25121,6 @@ do
         end
         c.add, c.del = math.max(0, add), math.max(0, del)
       end
-    elseif job.kind == "hidden" then
-      local n = tonumber(firstLine(out))
-      if n then
-        st.hidden[job.login] = st.hidden[job.login] or {}
-        st.hidden[job.login][wkKey(job.week == "last" and win.lastStart or win.thisStart)] = math.floor(n)
-      end
     end
     return follow
   end
@@ -25156,10 +25133,6 @@ do
     for sha, c in pairs(st.commits) do
       if c.at < win.lastStart or not keep[c.login] then st.commits[sha] = nil end
     end
-    for login, weeks in pairs(st.hidden) do
-      if not keep[login] then st.hidden[login] = nil
-      else for k in pairs(weeks) do if (tonumber(k) or 0) < win.lastStart then weeks[k] = nil end end end
-    end
     if not st.error then st.runAt, st.runDay = now, M.compareDay(now, tz) end
   end
 
@@ -25170,8 +25143,8 @@ do
   end
 
   -- The board both weeks: a row per person (you marked) with the week's commits and lines, a bucket
-  -- per day Monday first, their repos busiest first, commits whose lines aren't read yet (pending)
-  -- and GitHub's hidden count for that week. Rows by commits, then lines.
+  -- per day Monday first, their repos busiest first, and commits whose lines aren't read yet
+  -- (pending). Rows by commits, then lines.
   function M.compareBoard(st, now, tz)
     local win = M.compareWindow(now, tz)
     local today = M.compareDay(now, tz)
@@ -25192,8 +25165,6 @@ do
       for _, l in ipairs(logins) do
         local row = { login = l, you = (l == st.self) or nil, commits = 0, add = 0, del = 0, pending = 0, days = {}, repos = {} }
         for i = 1, 7 do row.days[i] = { commits = 0, add = 0, del = 0 } end
-        local h = st.hidden[l]
-        row.hidden = h and h[wkKey(start)] or nil
         byLogin[l], reposOf[l] = row, {}
         W.rows[#W.rows + 1] = row
       end

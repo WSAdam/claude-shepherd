@@ -215,7 +215,10 @@ local jon = b3 and rowOf(b3.weeks.this, "jonkopp17")
 check("their week is on the board: 2 commits, lockfiles skipped  (" .. tostring(jon and (jon.commits .. " +" .. jon.add .. " -" .. jon.del)) .. ")",
       jon and jon.commits == 2 and jon.add == 27 and jon.del == 7)
 check("...the repos they wrote to", jon and #jon.repos == 2 and jon.repos[1].repo == "Org/crm-sdk")
-check("...and what GitHub hides from you", jon and jon.hidden == 20)
+-- 2026-10-27: GitHub's restricted count included private work already counted (Adam's own row read +78)
+check("...and no hidden-contribution count, nor any GraphQL call for one", jon and jon.hidden == nil and (function()
+  for _, c in ipairs(asked) do if c:find("graphql", 1, true) then return false end end
+  return true end)())
 check("...ranked above you", b3 and b3.weeks.this.rows[1].login == "jonkopp17")
 
 -- 4. once a day: the tick doesn't check again today, and does tomorrow

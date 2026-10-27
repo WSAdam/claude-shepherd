@@ -18335,7 +18335,7 @@ local HTML = [[
                          cursor:pointer; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   #d-compare .cmp-name:hover { color:var(--accent-text); text-decoration:underline; }
   #d-compare .cmp-youtag { color:var(--accent-text); font-size:10px; }
-  #d-compare .cmp-hidden, #d-compare .cmp-pending { color:var(--muted); font-size:10px; }
+  #d-compare .cmp-pending { color:var(--muted); font-size:10px; }
   #d-compare .cmp-num { text-align:right; font-variant-numeric:tabular-nums; font-size:13px; color:var(--text); }
   #d-compare .cmp-lines { text-align:right; font-variant-numeric:tabular-nums; font-size:12px; white-space:nowrap; }
   #d-compare .cmp-add { color:var(--ok, #3fb950); }
@@ -22323,8 +22323,6 @@ local HTML = [[
           + '<span class="cmp-who"><button class="cmp-name" data-cmp="open:' + esc(login) + '" title="Show the repos they wrote to">'
           + esc(login) + '</button>'
           + (r.you ? '<span class="cmp-youtag">you</span>' : '')
-          + (r.hidden ? '<span class="cmp-hidden" title="Contributions GitHub counts in repos your login can\'t see (commits, PRs, issues): not ranked">+'
-                        + esc(r.hidden) + ' private elsewhere</span>' : '')
           + (r.pending ? '<span class="cmp-pending">' + esc(r.pending) + ' still being counted</span>' : '')
           + '</span>'
           + '<span class="cmp-num">' + esc(r.commits || 0) + '</span>'

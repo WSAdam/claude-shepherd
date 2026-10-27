@@ -318,8 +318,9 @@ counts commits in every repo that login can read, public or private:
   removed). Only each repo's default branch is searched, so feature-branch work counts once it merges,
   under its original date.
 - **Lines** skip lockfiles and build output (the same list as the commit stats).
-- **+N private elsewhere** under a name is GitHub's count of their contributions in repos your login
-  can't see. It mixes commits, PRs and issues, so it isn't ranked.
+- **Repos your login can't read don't count**, and there's no reliable way to say how much that
+  leaves out: GitHub's private-contribution count also includes the private work Compare already
+  counts, and it is 0 for anyone who doesn't share private counts on their profile.
 - **Click a name** to see the repos they wrote to that week, busiest first. Click **Commits** or
   **Lines** to rank by it, and switch between **This week** and **Last week**.
 

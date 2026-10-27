@@ -14,8 +14,10 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
   Nobody else sets anything up: Shepherd reads GitHub through your `gh` login, so it counts every repo
   that login can read. Per person, one commit search names the repos; each repo's own commit list
   since last Monday is what counts, because GitHub's search still listed a commit a force-push had
-  removed (jonkopp17's `8dfaced` in crm-sdk, a 404 when fetched). GitHub's count of their contributions
-  in repos you can't see shows as a grey "+N private elsewhere". Nothing calls GitHub until the tab is
+  removed (jonkopp17's `8dfaced` in crm-sdk, a 404 when fetched). A grey "+N private elsewhere" from
+  GraphQL's `restrictedContributionsCount` was dropped after the live check: Adam's own row read +78
+  against the 80 private commits Compare had already counted (the count includes private work your
+  login can see, and is 0 for anyone who doesn't share it). Nothing calls GitHub until the tab is
   first opened; then a check runs once a day, on Refresh and when the list changes, as background
   `gh` calls four at a time (`FX.compareStart`, `core.compareApply`), never on the tick. A hung call
   is ended after 120 s; a failed check says why and retries an hour later. State in

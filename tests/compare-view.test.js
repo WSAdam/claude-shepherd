@@ -95,7 +95,8 @@ let h = els["d-compare"].innerHTML;
 check("ranked by commits: jonkopp17 above you", order(h, ">jonkopp17<", ">WSAdam<"));
 check("your row is marked", /class="cmp-row[^"]*\bcmp-you\b/.test(h));
 check("lines show as +added / −deleted", h.indexOf("+27") >= 0 && h.indexOf("−7") >= 0);
-check("what GitHub hides from you is a grey note", h.indexOf("+20 private elsewhere") >= 0);
+// 2026-10-27: GitHub's restricted count included private work Compare already counts (Adam's own row read +78)
+check("no \"private elsewhere\" note, even on a row that carries a count", h.indexOf("private elsewhere") < 0);
 check("each row has a bar per day", (h.match(/class="cmp-bar/g) || []).length === 14);
 check("a name's repos stay folded until clicked", h.indexOf("Org/crm-sdk") < 0);
 
