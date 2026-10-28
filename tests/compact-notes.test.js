@@ -38,7 +38,10 @@ if (!(escSrc && ageSrc && badgeSrc && lineSrc)) {
   process.exit(1);
 }
 const lib = new Function(escSrc + "\n" + ageSrc + "\n" + badgeSrc + "\n" + lineSrc + "\nreturn { notesBadge, notesLine };")();
+// 2026-10-28: CI read "31s ago" for "30s ago" -- fmtAge reads the real clock, and a second ticked
+// between this line and the check. The clock is pinned so the ages are exact.
 const now = Math.floor(Date.now() / 1000);
+Date.now = () => now * 1000;
 
 // ---- the card's chip ----
 eq("no notes: no chip", lib.notesBadge({ key: "k1" }), "");
