@@ -19,7 +19,8 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      - uses: actions/checkout@v4
+      # v5 runs on Node 24; v4's Node 20 is retired on GitHub's runners (2026-10-28 warning).
+      - uses: actions/checkout@v5
         with:
           # A full checkout: tests/worktree-hygiene.test.sh runs `git ls-files` against
           # the real checkout to prove every file a clone needs is tracked.
