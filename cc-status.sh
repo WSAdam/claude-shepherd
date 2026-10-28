@@ -25,7 +25,8 @@
 #   stop           -> done      (clears pending; working when a mailbox message, a notes request
 #                                 or a Stop guard keeps the turn going)
 #   stopfailure     -> error     (+ error_kind, error_message: the turn ended on an API error)
-#   precompact      -> working   (the session is compacting; prints the notes line for the summary)
+#   precompact      -> working   (the session is compacting; prints the notes line for the summary;
+#                                 an auto one between turns keeps done/idle/error)
 #   sessionend      -> file removed
 # Every status but error drops error_kind/error_message.
 #
@@ -278,6 +279,13 @@ case "$EVENT" in
   precompact)
     # 2026-09-29: Claude Code is about to compact the session (auto or /compact): it is working.
     STATUS="working"
+    # 2026-10-28: but an auto compaction can run in the background between turns and land only at
+    # the next prompt -- no Stop follows it, so "working" stuck for 22h. Between turns it changes
+    # nothing; a typed /compact still reads working until SessionStart(compact) sets idle.
+    if [ "$(cc_get "$INPUT" '.trigger')" != "manual" ]; then
+      BETWEEN="$(cc_current_status "$KEY")"
+      case "$BETWEEN" in done|idle|error) STATUS="$BETWEEN" ;; esac
+    fi
     ;;
   stopfailure)
     # 2026-09-28: a turn that ends on an API error (a usage limit, an outage, an expired login)

@@ -4,6 +4,13 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-10-28 — A finished session no longer reads Working after a background compaction
+
+- Fixed: Claude Code 2.1.310 can prepare an auto-compaction in the background after a turn ends,
+  and apply it only at the next prompt. Its PreCompact hook set the card to working and no Stop
+  followed, so a finished session read Working for 22 hours. An auto PreCompact between turns now
+  leaves the card done, idle or error; a /compact you type still reads working until it finishes.
+
 ## 2026-10-27 — A Compare tab in the Requirements tab's place
 
 - Added: **Compare**, a weekly leaderboard in the detail panel. Adam: "i want to get rid of the

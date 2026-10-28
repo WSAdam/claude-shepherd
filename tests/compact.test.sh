@@ -144,6 +144,20 @@ assert_eq "...a cycle ends only when the context drops below due-at: a failed co
 got="$(evout precompact "{\"session_id\":\"p2\",\"cwd\":\"$CWD\",\"hook_event_name\":\"PreCompact\",\"trigger\":\"manual\"}")"
 assert_eq "precompact without notes says nothing" "" "$got"
 
+# ---- a background compaction between turns leaves the card alone (2026-10-28) ----
+# 2026-10-28: Claude Code 2.1.310 prepared an auto-compaction at 10:33 with no turn running and applied it at the next prompt 22h later; PreCompact set working and no Stop followed, so the card read Working all that time.
+evout userpromptsubmit "{\"session_id\":\"b1\",\"cwd\":\"$CWD\",\"prompt\":\"ship it\"}" >/dev/null
+evout stop "$(stop_json b1)" >/dev/null
+evout precompact "{\"session_id\":\"b1\",\"cwd\":\"$CWD\",\"hook_event_name\":\"PreCompact\",\"trigger\":\"auto\"}" >/dev/null
+assert_json "an auto compaction after the turn ended leaves the card done" "$CC_STATUS_DIR/b1.json" '.status' "done"
+evout sessionstart "{\"session_id\":\"b2\",\"cwd\":\"$CWD\",\"source\":\"startup\"}" >/dev/null
+evout precompact "{\"session_id\":\"b2\",\"cwd\":\"$CWD\",\"hook_event_name\":\"PreCompact\",\"trigger\":\"auto\"}" >/dev/null
+assert_json "...and an idle one idle" "$CC_STATUS_DIR/b2.json" '.status' "idle"
+evout precompact "{\"session_id\":\"b1\",\"cwd\":\"$CWD\",\"hook_event_name\":\"PreCompact\",\"trigger\":\"manual\"}" >/dev/null
+assert_json "a /compact Adam typed reads working while it runs" "$CC_STATUS_DIR/b1.json" '.status' "working"
+evout sessionstart "{\"session_id\":\"b1\",\"cwd\":\"$CWD\",\"source\":\"compact\"}" >/dev/null
+assert_json "...until SessionStart(compact) ends it" "$CC_STATUS_DIR/b1.json" '.status' "idle"
+
 # ---- SessionStart(compact): the notes come back ----
 printf '# Notes\nThe task: ship unit 16.\nNext: write the docs.\n' > "$CC_NOTES_DIR/s1.notes.md"
 got="$(evout sessionstart "{\"session_id\":\"s1\",\"cwd\":\"$CWD\",\"source\":\"compact\"}")"
