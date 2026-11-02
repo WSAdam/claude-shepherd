@@ -16734,9 +16734,33 @@ do
   follow = core.compareApply(s, { kind = "search", login = "jonkopp17" }, 0,
                              "Org/crm-sdk\nOrg/crm-sdk\nOrg/mail.v2\nnot a repo\n../x/y\nOrg/a b\n", "", win)
   local lists = {}
-  for _, j in ipairs(follow) do lists[#lists + 1] = j.kind .. ":" .. j.repo end
+  for _, j in ipairs(follow) do lists[#lists + 1] = j.kind .. ":" .. (j.repo or j.login) end
+  -- REQUIREMENT CHANGE 2026-11-02 (Adam: "why is my new pilot github repo not showing in my compare?"): a
+  -- search is now followed by one ask for that person's own repos (below), so it no longer leads to lists alone.
   eq("compare: a search lists each repo once, and nothing that isn't owner/name", table.concat(lists, " "),
-     "list:Org/crm-sdk list:Org/mail.v2")
+     "list:Org/crm-sdk list:Org/mail.v2 repos:jonkopp17")
+
+  -- 2026-11-02: WSAdam/pilot (a fork of lexmount/moli, made that day) never showed: GitHub's commit search skips
+  -- a fork with fewer stars than its parent, and a new repo until it's indexed. So after each search, that
+  -- person's own repos pushed since last Monday are asked for, and the ones the search missed are listed.
+  local sr = core.compareApply(s, { kind = "search", login = "WSAdam" }, 0, "WSAdam/claude-shepherd\n", "", win)
+  local rj = sr[#sr]
+  check("compare: after a search, that person's own repos are asked for, minus the ones it found",
+        rj.kind == "repos" and rj.login == "WSAdam" and rj.self == true and rj.skip["wsadam/claude-shepherd"] == true)
+  eq("compare: ...yours include your private ones", table.concat(core.compareArgs(rj, win), "|"),
+     'api|user/repos?affiliation=owner&sort=pushed&direction=desc&per_page=100|-q|.[] | "\\(.full_name) \\(.pushed_at)"')
+  eq("compare: ...anyone else's are their public ones",
+     table.concat(core.compareArgs({ kind = "repos", login = "jonkopp17", skip = {} }, win), "|"),
+     'api|users/jonkopp17/repos?type=owner&sort=pushed&direction=desc&per_page=100|-q|.[] | "\\(.full_name) \\(.pushed_at)"')
+  local rf = core.compareApply(s, rj, 0, "WSAdam/pilot 2026-10-27T17:11:47Z\nWSAdam/claude-shepherd 2026-10-27T13:36:20Z\n"
+    .. "WSAdam/Canary 2026-09-01T13:36:22Z\nWSAdam/empty null\nWSAdam/a b 2026-10-27T10:00:00Z\nWSAdam/pilot 2026-10-27T17:11:47Z\n", "", win)
+  local rl = {}
+  for _, j in ipairs(rf) do rl[#rl + 1] = j.kind .. ":" .. j.login .. ":" .. j.repo end
+  eq("compare: ...one pushed since last Monday that the search missed (a fork) is listed, once; the rest aren't",
+     table.concat(rl, " "), "list:WSAdam:WSAdam/pilot")
+  local rerr = core.compareApply(s, rj, 1, "", "HTTP 502", win)
+  check("compare: ...a repos ask that failed records why and asks nothing more", #rerr == 0 and tostring(s.error):find("502", 1, true) ~= nil)
+  s.error = nil
 
   -- a repo's commit list is the truth: in the window, by that person; then their lines
   follow = core.compareApply(s, { kind = "list", login = "jonkopp17", repo = "Org/crm-sdk" }, 0,

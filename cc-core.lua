@@ -24946,7 +24946,8 @@ end
 -- ---- Compare tab: a weekly GitHub leaderboard (2026-10-27) ----------------------------------
 -- Adam's commits and lines per day against up to 5 GitHub users, from a daily check of every repo
 -- his `gh` login can read -- nothing for them to set up. A check is a list of gh jobs: who you are
--- (once), then per person a commit search (which repos they wrote to), each of those repos' commit
+-- (once), then per person a commit search (which repos they wrote to) and their own repos pushed since
+-- last Monday (the forks and new repos the search can't see, 2026-11-02), each of those repos' commit
 -- list since last Monday (the truth: GitHub's search still lists commits a rewrite removed), matched
 -- to the person by each commit's author login here -- never by GitHub's author= filter, which
 -- returned 0 of alejamef's 37 notes-app commits when combined with since= (2026-10-27) -- each
@@ -24963,6 +24964,7 @@ do
   M.COMPARE_PARALLEL = 4           -- gh calls at once
   local WEEK = 7 * 86400
   local LIST_Q = '.[] | "\\(.sha) \\(.commit.author.date) \\(.author.login // \"\")"'
+  local REPOS_Q = '.[] | "\\(.full_name) \\(.pushed_at)"'
   local STATS_Q = "{a:.stats.additions,d:.stats.deletions,f:[.files[]?|{n:.filename,a:.additions,d:.deletions}]}"
   local function iso(t) return os.date("!%Y-%m-%dT%H:%M:%SZ", t) end
   local function firstLine(s) return (tostring(s or ""):match("[^\n]+") or ""):sub(1, 200) end
@@ -25100,6 +25102,12 @@ do
                "-f", "q=author:" .. job.login .. " author-date:>=" .. win.searchDate,
                "-f", "per_page=100", "-q", ".items[].repository.full_name" }
     end
+    -- the person's own repos, most recently pushed first (100 reach well past two weeks): yours through
+    -- your own list, so private ones too; anyone else's public ones
+    if k == "repos" and M.compareLoginOk(job.login) then
+      local path = job.self and "user/repos?affiliation=owner" or ("users/" .. job.login .. "/repos?type=owner")
+      return { "api", path .. "&sort=pushed&direction=desc&per_page=100", "-q", REPOS_Q }
+    end
     if k == "list" and M.compareLoginOk(job.login) and repoOk(job.repo) then
       return { "api", "--paginate", "repos/" .. job.repo .. "/commits?since=" .. win.sinceIso .. "&per_page=100",
                "-q", LIST_Q }
@@ -25134,6 +25142,22 @@ do
       for line in tostring(out or ""):gmatch("[^\n]+") do
         local r = line:gsub("%s+$", "")
         if repoOk(r) and not seen[r:lower()] then
+          seen[r:lower()] = true
+          follow[#follow + 1] = { kind = "list", login = job.login, repo = r }
+        end
+      end
+      -- 2026-11-02: the search never returned WSAdam/pilot, a fork of lexmount/moli -- GitHub's commit search
+      -- skips a fork with fewer stars than its parent, and a new repo until it's indexed -- so the person's own
+      -- repos are asked for next, and the ones this search didn't find are listed
+      local isSelf = st.self ~= nil and tostring(job.login):lower() == st.self:lower()
+      follow[#follow + 1] = { kind = "repos", login = job.login, self = isSelf or nil, skip = seen }
+    elseif job.kind == "repos" then
+      local skip = type(job.skip) == "table" and job.skip or {}
+      local seen = {}
+      for line in tostring(out or ""):gmatch("[^\n]+") do
+        local r, pushed = line:match("^(%S+)%s+(%S+)")
+        local at = pushed and M.isoToEpoch(pushed)
+        if r and at and at >= win.lastStart and repoOk(r) and not skip[r:lower()] and not seen[r:lower()] then
           seen[r:lower()] = true
           follow[#follow + 1] = { kind = "list", login = job.login, repo = r }
         end

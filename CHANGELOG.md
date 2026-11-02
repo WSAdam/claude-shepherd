@@ -4,6 +4,14 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-11-02 — Compare counts forks and new repos
+
+- Fixed: Compare found each person's repos only through GitHub's commit search, which skips a fork
+  with fewer stars than its parent and a new repo until it's indexed. A fork made that day
+  (WSAdam/pilot) never showed. After each search, Compare now also lists that person's own repos
+  pushed since last Monday (yours include private ones; anyone else's are public ones) and counts
+  the ones the search missed.
+
 ## 2026-11-02 — The usage footer shows the official weekly bar again
 
 - Fixed: Anthropic's usage endpoint began answering `five_hour: null`, with the weekly window still
