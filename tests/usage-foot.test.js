@@ -75,7 +75,10 @@ has("...both resets", html, "official · 5h resets in 2h");
 // ---- no official numbers: the approximation, saying why ----
 lib(usage("can't reach Anthropic"), null);
 html = els["uf-windows"].innerHTML;
-has("no official numbers: the approximation", html, "5h (approx)");
+// REQUIREMENT CHANGE 2026-11-02 (Adam: "5hr limits are gone now so we don't need to reflect that"): the
+// estimate shows the 7-day window only; it used to lead with a "5h (approx)" row.
+has("no official numbers: the approximation", html, "7d (approx)");
+hasNot("...with no 5-hour row (the 5-hour limit is gone)", html, "5h (approx)");
 has("...saying why", html, "official % unavailable (can&#39;t reach Anthropic)");
 hasNot("...and never blaming a token it has", html, "no Claude login token found");
 

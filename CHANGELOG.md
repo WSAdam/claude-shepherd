@@ -4,6 +4,11 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-11-02 — The usage estimate drops its 5-hour row
+
+- Changed: Anthropic no longer has a 5-hour limit, so when the official numbers can't be read the
+  footer's estimate shows the 7-day window only.
+
 ## 2026-11-02 — Compare counts forks and new repos
 
 - Fixed: Compare found each person's repos only through GitHub's commit search, which skips a fork

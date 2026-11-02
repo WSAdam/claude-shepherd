@@ -28374,7 +28374,8 @@ local HTML = [[
         // The reason is core.officialUsageWhy's (2026-11-02): it said "no Claude login token found"
         // for every miss, including a 200 that only lacked the 5-hour window.
         var why = LAST_USAGE.officialWhy ? " (" + esc(LAST_USAGE.officialWhy) + ")" : "";
-        winEl.innerHTML = winRow("5h (approx)", w.w5h) + winRow("7d (approx)", w.w7d)
+        // 2026-11-02 (Adam: "5hr limits are gone now"): the estimate shows the 7-day window only.
+        winEl.innerHTML = winRow("7d (approx)", w.w7d)
           + '<span class="uf-approx">approx from local transcripts — official % unavailable' + why + '</span>';
       }
     }

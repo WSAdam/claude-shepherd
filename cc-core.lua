@@ -27170,7 +27170,7 @@ M.FEATURES = {
     what = "Per-session and fleet token use and estimated dollar cost, plus a daily trend chart.",
     why = "See where the money goes so you can put cheap work on a cheaper model." },
   { key = "usage", cat = "See what's happening", title = "Plan usage meter",
-    what = "Your real Claude plan's 5-hour and 7-day usage windows, read live.",
+    what = "Your real Claude plan's weekly usage window, read live.",
     why = "Know how close you are to your plan limits at a glance." },
   { key = "commits", cat = "See what's happening", new = true, title = "Commits today and this week",
     what = "Under the usage bars: your commits today and this Mon–Sun week, with lines added and removed, a bar per day and how you're pacing against the same point last week. Click for each project and the latest commits. It counts your own commits (each repo's git user.email, plus commits.authorEmails) in every repo Claude worked in over the last two weeks, straight from local git -- unpushed and worktree branches included, lockfiles left out of the line counts. Each commit names the session that made it, found in the transcripts rather than the commit message; click a live one for its Transcript.",
