@@ -848,7 +848,9 @@ function FX.computeUsage()
   fleet.costUsd = cost.usd
   fleet.costPriced = cost.priced
   lastUsagePayload = { fleet = fleet, perSession = perSession, window = { w5h = w5h, w7d = w7d },
-    official = lastOfficialUsage, ts = now }
+    official = lastOfficialUsage, ts = now,
+    officialWhy = core.officialUsageWhy({ token = FX._officialToken, status = lastOfficialStatus,
+      official = lastOfficialUsage }) }
   if wv then
     pcall(function() wv:evaluateJavaScript("window.ccUsage(" .. hs.json.encode(lastUsagePayload) .. ")") end)
   end
@@ -956,6 +958,7 @@ function FX.fetchOfficialUsage(force)
   if not force and (now - lastOfficialFetch) < OFFICIAL_TTL then return end
   lastOfficialFetch = now
   local token = oauthToken()
+  FX._officialToken = token ~= nil   -- for the footer's reason (core.officialUsageWhy); never the token
   if not token then return end  -- no token -> stay on the local approximation
   local headers = {
     ["Authorization"] = "Bearer " .. token,
@@ -28337,10 +28340,12 @@ local HTML = [[
       totEl.title = "excl. cache reads · gross " + fmtTok(f.total||0) + " (incl. cache)"
                   + (dollars ? "\nest. API-equivalent cost at Anthropic list prices (your plan is flat-rate); gateway/local models excluded" : "");
       var o = LAST_OFFICIAL;
-      if(o && o.five_hour){
+      // 2026-11-02: Anthropic can answer five_hour: null with the weekly window still there, so
+      // either window draws the official bars, each row only when its window came back.
+      if(o && (o.five_hour || o.seven_day)){
         // OFFICIAL plan window — matches claude.ai/settings/usage exactly.
-        var rows = pctBarRow("Session (5h)", o.five_hour.utilization, Math.round(o.five_hour.utilization||0)+"%")
-          + pctBarRow("Weekly", (o.seven_day&&o.seven_day.utilization)||0, Math.round((o.seven_day&&o.seven_day.utilization)||0)+"%");
+        var rows = (o.five_hour ? pctBarRow("Session (5h)", o.five_hour.utilization, Math.round(o.five_hour.utilization||0)+"%") : "")
+          + (o.seven_day ? pctBarRow("Weekly", o.seven_day.utilization||0, Math.round(o.seven_day.utilization||0)+"%") : "");
         if(o.seven_day_sonnet && o.seven_day_sonnet.utilization != null){
           rows += pctBarRow("Weekly · Sonnet", o.seven_day_sonnet.utilization, Math.round(o.seven_day_sonnet.utilization)+"%");
         }
@@ -28355,7 +28360,7 @@ local HTML = [[
             rows += pctBarRow("Weekly · " + ml.model, ml.percent||0, Math.round(ml.percent||0)+"%");
           }
         }
-        var reset5 = resetsIn(o.five_hour.resets_at), reset7 = resetsIn(o.seven_day && o.seven_day.resets_at);
+        var reset5 = resetsIn(o.five_hour && o.five_hour.resets_at), reset7 = resetsIn(o.seven_day && o.seven_day.resets_at);
         winEl.innerHTML = rows + '<span class="uf-approx" style="font-style:normal;">official · '
           + (reset5 ? "5h "+reset5 : "") + (reset5&&reset7 ? " · " : "") + (reset7 ? "weekly "+reset7 : "") + '</span>';
       } else {
@@ -28366,8 +28371,11 @@ local HTML = [[
           var pct = Math.round(Math.min(1, (tokens||0)/max)*100);
           return '<div class="uf-win"><span class="lbl">'+lbl+'</span><span class="bar"><i style="width:'+pct+'%"></i></span><span class="val">'+fmtTok(tokens||0)+'</span></div>';
         }
+        // The reason is core.officialUsageWhy's (2026-11-02): it said "no Claude login token found"
+        // for every miss, including a 200 that only lacked the 5-hour window.
+        var why = LAST_USAGE.officialWhy ? " (" + esc(LAST_USAGE.officialWhy) + ")" : "";
         winEl.innerHTML = winRow("5h (approx)", w.w5h) + winRow("7d (approx)", w.w7d)
-          + '<span class="uf-approx">approx from local transcripts — official % unavailable (no Claude login token found)</span>';
+          + '<span class="uf-approx">approx from local transcripts — official % unavailable' + why + '</span>';
       }
     }
 

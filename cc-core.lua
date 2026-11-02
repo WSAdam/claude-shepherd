@@ -23743,6 +23743,24 @@ function M.officialUsageStep(prev, status, bodyOk)
   return false, false, prev
 end
 
+-- Why the footer has no official plan numbers (2026-11-02), or nil when it has them: s is
+-- { token = found?, status = the last fetch's HTTP status (-1 = no answer), official = the payload
+-- last kept }. The footer used to say "no Claude login token found" for every miss, including a
+-- 200 whose five_hour was null.
+function M.officialUsageWhy(s)
+  s = s or {}
+  if s.token == false then return "no Claude login token found" end
+  local st = tonumber(s.status)
+  if st == nil then return "checking Anthropic" end
+  if st == -1 then return "can't reach Anthropic" end
+  if st == 401 then return "Anthropic refused the login (HTTP 401)" end
+  if st == 429 then return "Anthropic is rate-limiting the check (HTTP 429)" end
+  if st ~= 200 then return "Anthropic answered HTTP " .. st end
+  local o = s.official
+  if type(o) == "table" and (type(o.five_hour) == "table" or type(o.seven_day) == "table") then return nil end
+  return "Anthropic's reply had no usage window"
+end
+
 -- Normalize the OAuth payload's model-scoped weekly `limits[]` (each carries
 -- scope.model.display_name, e.g. "Fable") to { model, percent, severity, resetsAt,
 -- active, show }, sorted by model; [] when there's no scoped weekly entry. Reads the

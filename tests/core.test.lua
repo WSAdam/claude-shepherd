@@ -6988,6 +6988,22 @@ do
   sl, rc, np = core.officialUsageStep(np, 200, true)
   check("usage: good 200 after a garbage 200 still recovers", rc == true and np == 200)
 
+  -- ---- why the official numbers are missing (2026-11-02) ----
+  -- 2026-11-02: the footer said "no Claude login token found" for every miss; the token was there and the fetch answered 200.
+  eq("usage why: no token", core.officialUsageWhy({ token = false }), "no Claude login token found")
+  eq("usage why: not asked yet", core.officialUsageWhy({ token = true }), "checking Anthropic")
+  eq("usage why: offline", core.officialUsageWhy({ token = true, status = -1 }), "can't reach Anthropic")
+  eq("usage why: refused login", core.officialUsageWhy({ token = true, status = 401 }),
+     "Anthropic refused the login (HTTP 401)")
+  eq("usage why: rate limited", core.officialUsageWhy({ token = true, status = 429 }),
+     "Anthropic is rate-limiting the check (HTTP 429)")
+  eq("usage why: another status", core.officialUsageWhy({ token = true, status = 503 }), "Anthropic answered HTTP 503")
+  eq("usage why: a 200 with no window in it", core.officialUsageWhy({ token = true, status = 200,
+     official = { limits = {} } }), "Anthropic's reply had no usage window")
+  eq("usage why: a 200 with only the weekly window is fine",
+     core.officialUsageWhy({ token = true, status = 200, official = { seven_day = { utilization = 20 } } }), nil)
+  eq("usage why: nothing known", core.officialUsageWhy(nil), "checking Anthropic")
+
   -- officialModelLimits: pull per-model WEEKLY limits out of the OAuth payload's
   -- `limits[]` (the model-scoped surface where Fable lives). Shape mirrors the live
   -- endpoint: a session entry, a weekly_all entry (scope null), and a weekly_scoped

@@ -4,6 +4,15 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-11-02 — The usage footer shows the official weekly bar again
+
+- Fixed: Anthropic's usage endpoint began answering `five_hour: null`, with the weekly window still
+  there. The footer drew the official bars only when `five_hour` was present, so it fell back to the
+  local estimate and said "no Claude login token found", though the token was there and the call
+  answered 200. Either window now draws the official bars (each row only when its window came back),
+  and the fallback says the real reason: no login token, can't reach Anthropic, an HTTP status, or a
+  reply with no usage window.
+
 ## 2026-10-28 — A finished session no longer reads Working after a background compaction
 
 - Fixed: Claude Code 2.1.310 can prepare an auto-compaction in the background after a turn ends,

@@ -5756,5 +5756,18 @@ do
   check("compare: uninstall --purge removes its file", unsrc:find("cc-compare.json", 1, true) ~= nil)
 end
 
+-- ---- The usage footer says why it has no official numbers (2026-11-02) ----
+-- 2026-11-02: it blamed a missing login token for a 200 whose five_hour was null. core.officialUsageWhy
+-- decides the reason and usage-foot.test.js runs the footer; these pin the Lua that feeds it.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("usage why: the fetch records whether a token was found, never the token",
+        src:find("FX._officialToken = token ~= nil", 1, true) ~= nil)
+  check("usage why: the usage payload carries the reason",
+        src:find("officialWhy = core.officialUsageWhy({ token = FX._officialToken, status = lastOfficialStatus,", 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)
