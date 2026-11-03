@@ -16695,8 +16695,12 @@ do
   local win = core.compareWindow(NOW, TZ)
   eq("compare: this week starts Monday 00:00 local", win.thisStart, THIS)
   eq("compare: last week is the Monday before", win.lastStart, LAST)
-  eq("compare: repos are listed from last Monday, exactly", win.sinceIso, "2026-10-19T04:00:00Z")
-  eq("compare: search asks from the day before (its dates carry no zone)", win.searchDate, "2026-10-18")
+  -- REQUIREMENT CHANGE 2026-11-03 (Adam: "add a 30 days tab for after last week ... a rolling last 30 days"):
+  -- a check reads the rolling 30 days, so repos are listed from 30 days back, not from last Monday.
+  local MONTH = iso("2026-09-28T04:00:00Z")          -- local midnight, 29 days before Tuesday the 27th
+  eq("compare: the 30 days start at local midnight 29 days before today", win.monthStart, MONTH)
+  eq("compare: repos are listed from the start of the 30 days, exactly", win.sinceIso, "2026-09-28T04:00:00Z")
+  eq("compare: search asks from the day before (its dates carry no zone)", win.searchDate, "2026-09-27")
 
   local empty = core.parseCompareState(nil)
   check("compare: no file is an empty state", type(empty) == "table" and #empty.users == 0 and next(empty.commits) == nil)
@@ -16723,10 +16727,11 @@ do
   eq("compare: then one search per person, you first, and no hidden-contribution count", table.concat(kinds, " "),
      "search:WSAdam search:jonkopp17")
   check("compare: ...nor any argv for one", core.compareArgs({ kind = "hidden", login = "jonkopp17", week = "this" }, win) == nil)
+  -- REQUIREMENT CHANGE 2026-11-03 (the 30 days tab): both read from the start of the 30 days, not last Monday
   eq("compare: a search's argv", table.concat(core.compareArgs({ kind = "search", login = "jonkopp17" }, win), "|"),
-     "api|--paginate|-X|GET|search/commits|-f|q=author:jonkopp17 author-date:>=2026-10-18|-f|per_page=100|-q|.items[].repository.full_name")
+     "api|--paginate|-X|GET|search/commits|-f|q=author:jonkopp17 author-date:>=2026-09-27|-f|per_page=100|-q|.items[].repository.full_name")
   eq("compare: a repo list's argv", table.concat(core.compareArgs({ kind = "list", login = "jonkopp17", repo = "Org/crm-sdk" }, win), "|"),
-     'api|--paginate|repos/Org/crm-sdk/commits?since=2026-10-19T04:00:00Z&per_page=100|-q|.[] | "\\(.sha) \\(.commit.author.date) \\(.author.login // \"\")"')
+     'api|--paginate|repos/Org/crm-sdk/commits?since=2026-09-28T04:00:00Z&per_page=100|-q|.[] | "\\(.sha) \\(.commit.author.date) \\(.author.login // \"\")"')
   eq("compare: a commit's argv", table.concat(core.compareArgs({ kind = "stats", repo = "Org/crm-sdk", sha = A }, win), "|"),
      "api|repos/Org/crm-sdk/commits/" .. A .. "|-q|{a:.stats.additions,d:.stats.deletions,f:[.files[]?|{n:.filename,a:.additions,d:.deletions}]}")
 
@@ -16764,10 +16769,11 @@ do
 
   -- a repo's commit list is the truth: in the window, by that person; then their lines
   follow = core.compareApply(s, { kind = "list", login = "jonkopp17", repo = "Org/crm-sdk" }, 0,
-    A .. " 2026-10-26T15:00:00Z jonkopp17\n" .. B .. " 2026-10-20T10:00:00Z jonkopp17\n" .. C .. " 2026-10-10T10:00:00Z\nnot-a-sha 2026-10-26T15:00:00Z jonkopp17\n", "", win)
+    A .. " 2026-10-26T15:00:00Z jonkopp17\n" .. B .. " 2026-10-20T10:00:00Z jonkopp17\n" .. C .. " 2026-09-20T10:00:00Z jonkopp17\nnot-a-sha 2026-10-26T15:00:00Z jonkopp17\n", "", win)
   check("compare: a listed commit is stored for that person and repo",
         s.commits[A] and s.commits[A].login == "jonkopp17" and s.commits[A].repo == "Org/crm-sdk" and s.commits[A].at == iso("2026-10-26T15:00:00Z"))
-  check("compare: ...one from before last Monday isn't", s.commits[C] == nil)
+  -- REQUIREMENT CHANGE 2026-11-03 (the 30 days tab): the cut-off is the start of the 30 days, not last Monday
+  check("compare: ...one from before the 30 days isn't", s.commits[C] == nil)
   local stats = {}
   for _, j in ipairs(follow) do stats[#stats + 1] = j.kind .. ":" .. j.sha:sub(1, 1) end
   eq("compare: ...and each new commit's lines are asked for", table.concat(stats, " "), "stats:a stats:b")
@@ -16828,6 +16834,21 @@ do
   eq("compare: a commit whose lines aren't in yet counts, and says so", core.compareBoard(s, NOW, TZ).weeks.this.rows[1].pending, 1)
   s.commits[A].add, s.commits[A].del = 20, 5
 
+  -- 2026-11-03, Adam: "can we make and add a 30 days tab for after last week here? can be a rolling last 30 days"
+  local G = string.rep("7", 40)
+  s.commits[G] = { login = "WSAdam", repo = "WSAdam/pilot", at = iso("2026-10-05T14:00:00Z"), add = 40, del = 4 }
+  local mw = core.compareBoard(s, NOW, TZ).weeks.month
+  check("compare: the 30 days are a board of their own, from 29 days before today", mw ~= nil and mw.start == MONTH)
+  eq("compare: ...a bucket per day, today last", #mw.days .. (mw.days[30].isToday and " today" or ""), "30 today")
+  eq("compare: ...a row adds up all 30 days, before last week too",
+     mw.rows[1].login .. ":" .. mw.rows[1].commits .. " +" .. mw.rows[1].add .. " -" .. mw.rows[1].del, "WSAdam:2 +340 -14")
+  eq("compare: ...per day", mw.rows[1].days[8].commits .. "," .. mw.rows[1].days[24].commits, "1,1")
+  eq("compare: ...with their repos, busiest first", mw.rows[1].repos[1].repo .. " " .. mw.rows[1].repos[2].repo,
+     "WSAdam/claude-shepherd WSAdam/pilot")
+  eq("compare: ...and everyone else's row", mw.rows[2].login .. ":" .. mw.rows[2].commits, "jonkopp17:2")
+  eq("compare: ...while the weeks leave it out", core.compareBoard(s, NOW, TZ).weeks.last.rows[1].commits, 1)
+  s.commits[G] = nil
+
   -- nicknames (2026-10-27, Adam: "a way to right click and re nickname a user so i don't have to go by their
   -- github names")
   eq("compare: a nickname is trimmed, its control characters spaced out", core.compareNickname("  Aleja\tM\n "), "Aleja M")
@@ -16847,12 +16868,16 @@ do
   check("compare: an empty nickname goes back to the login", core.compareBoard(s, NOW, TZ).weeks.this.rows[2].name == nil)
 
   -- finishing a run: the day is done; only the two weeks and the people listed are kept
-  s.commits[string.rep("f", 40)] = { login = "jonkopp17", repo = "Org/x", at = LAST - 60, add = 1, del = 1 }
+  -- REQUIREMENT CHANGE 2026-11-03 (the 30 days tab): a run keeps the 30 days, so a commit from just before
+  -- last Monday stays; one from before the 30 days goes.
+  s.commits[string.rep("f", 40)] = { login = "jonkopp17", repo = "Org/x", at = MONTH - 60, add = 1, del = 1 }
+  s.commits[string.rep("8", 40)] = { login = "jonkopp17", repo = "Org/x", at = LAST - 60, add = 1, del = 1 }
   s.commits[string.rep("9", 40)] = { login = "someoneRemoved", repo = "Org/x", at = THIS + 60, add = 1, del = 1 }
   check("compare: never run is due", core.compareDue(s, NOW, TZ))
   core.compareFinish(s, NOW, TZ)
-  check("compare: a finished run keeps two weeks and the people listed",
-        s.commits[string.rep("f", 40)] == nil and s.commits[string.rep("9", 40)] == nil and s.commits[A] ~= nil)
+  check("compare: a finished run keeps the 30 days and the people listed",
+        s.commits[string.rep("f", 40)] == nil and s.commits[string.rep("9", 40)] == nil and s.commits[A] ~= nil
+        and s.commits[string.rep("8", 40)] ~= nil)
   check("compare: ...and isn't due again today", not core.compareDue(s, NOW + 3 * 3600, TZ))
   check("compare: ...but is the next morning", core.compareDue(s, iso("2026-10-28T05:00:00Z"), TZ))
   local f = core.parseCompareState(nil)

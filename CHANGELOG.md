@@ -4,6 +4,12 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-11-03 — Compare has a 30 days tab
+
+- Added: a **30 days** tab after Last week: the rolling last 30 days (today and the 29 before),
+  with commits, lines, a thin bar per day and each person's repos. A check now reads 30 days of
+  commits instead of two weeks, so the first check after this change asks GitHub for more lines.
+
 ## 2026-11-03 — Clearing My List goes back to the cards
 
 - Changed: once "✓ Mark all done" is confirmed, or the Done section's "Clear" is clicked, My List

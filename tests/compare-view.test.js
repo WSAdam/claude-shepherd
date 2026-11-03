@@ -204,5 +204,34 @@ check("a repaint keeps a nickname half typed", els["cmp-nick"].value === "Jo");
 api.compareCtx(ctxTarget("WSAdam"));
 check("...but right-clicking someone else doesn't carry it into their box", els["cmp-nick"].value === "");
 delete els["cmp-nick"].getAttribute;
+els["cmp-nick"].onkeydown({ key: "Escape", preventDefault() {} });
+
+// 9. the 30 days (2026-11-03, Adam: "can we make and add a 30 days tab for after last week here? can be a
+// rolling last 30 days")
+const MDAYS = Array.from({ length: 30 }, (_, i) => ({ dayEpoch: 1790582400 + i * 86400, isToday: i === 29 ? true : undefined }));
+const month = JSON.parse(JSON.stringify(data));
+month.weeks.month = { start: 1790582400, days: MDAYS, rows: [
+  { login: "WSAdam", you: true, commits: 42, add: 4200, del: 420, pending: 0, days: MDAYS.map(() => day(1, 100, 10)),
+    repos: [{ repo: "WSAdam/pilot", commits: 42, add: 4200, del: 420 }] },
+  { login: "jonkopp17", commits: 5, add: 50, del: 5, pending: 0, days: MDAYS.map(() => day(0, 0, 0)), repos: [] },
+] };
+api.set("data", month);
+api.set("week", "this");
+api.renderCompare();
+h = els["d-compare"].innerHTML;
+check("a 30 days tab sits after Last week", order(h, 'data-cmp="week:last"', 'data-cmp="week:month"') && h.indexOf(">30 days<") >= 0);
+api.compareAct(target("week:month"));
+h = els["d-compare"].innerHTML;
+check("30 days shows the rolling 30 days' rows", api.get().week === "month" && order(h, ">WSAdam<", ">jonkopp17<") && h.indexOf(">42<") >= 0);
+check("...lit, and the weeks aren't", /data-cmp="week:month" class="on"/.test(h)
+      && !/data-cmp="week:this" class="on"/.test(h) && !/data-cmp="week:last" class="on"/.test(h));
+check("...a bar per day for each of the 30", (h.match(/class="cmp-bar/g) || []).length === 60);
+check("...drawn thin enough to fit the column", (h.match(/class="cmp-spark cmp-month"/g) || []).length === 2);
+check("...the day header names where the 30 days start and end", h.indexOf('class="cmp-dayh cmp-month"') >= 0);
+api.compareAct(target("open:WSAdam"));
+check("...and a name opens their repos over the 30 days", els["d-compare"].innerHTML.indexOf("WSAdam/pilot") >= 0);
+api.compareAct(target("open:WSAdam"));
+api.compareAct(target("week:this"));
+check("This week switches back", api.get().week === "this" && (els["d-compare"].innerHTML.match(/class="cmp-bar/g) || []).length === 14);
 
 done();

@@ -24946,9 +24946,10 @@ end
 -- ---- Compare tab: a weekly GitHub leaderboard (2026-10-27) ----------------------------------
 -- Adam's commits and lines per day against up to 5 GitHub users, from a daily check of every repo
 -- his `gh` login can read -- nothing for them to set up. A check is a list of gh jobs: who you are
--- (once), then per person a commit search (which repos they wrote to) and their own repos pushed since
--- last Monday (the forks and new repos the search can't see, 2026-11-02), each of those repos' commit
--- list since last Monday (the truth: GitHub's search still lists commits a rewrite removed), matched
+-- (once), then per person a commit search (which repos they wrote to) and their own repos pushed in
+-- the window (the forks and new repos the search can't see, 2026-11-02), each of those repos' commit
+-- list over the window -- the rolling 30 days, which covers both weeks (2026-11-03) -- (the truth:
+-- GitHub's search still lists commits a rewrite removed), matched
 -- to the person by each commit's author login here -- never by GitHub's author= filter, which
 -- returned 0 of alejamef's 37 notes-app commits when combined with since= (2026-10-27) -- each
 -- new commit's lines (lockfiles and build output skipped, as in the commit stats). (GraphQL's
@@ -24956,7 +24957,7 @@ end
 -- CAN see -- Adam's own row read +78 against 80 private commits already counted -- and is 0 for anyone
 -- who doesn't share private counts.) FX runs the jobs as background tasks
 -- (FX.compareStart); everything here is pure. Only default branches are searched, so feature-branch
--- work counts once it merges, under its own author date (each check re-reads both weeks).
+-- work counts once it merges, under its own author date (each check re-reads the whole window).
 do
   M.COMPARE_MAX_USERS = 5
   M.COMPARE_RETRY_SECONDS = 3600   -- a check that failed tries again after this, never every tick
@@ -25025,12 +25026,17 @@ do
     return false, "not on the board"
   end
 
-  -- The two weeks a check covers: this one (Monday 00:00 local on) and the one before.
+  -- What a check covers: this week (Monday 00:00 local on), the one before, and the rolling 30 days
+  -- (today and the 29 days before, 2026-11-03) -- `since`, the earliest, is where every read starts.
+  M.COMPARE_MONTH_DAYS = 30
   function M.compareWindow(now, tz)
     local thisStart = M.localWeekStart(now, tz)
     local lastStart = thisStart - WEEK
-    return { now = now, tz = tz, thisStart = thisStart, lastStart = lastStart, sinceIso = iso(lastStart),
-             searchDate = os.date("!%Y-%m-%d", lastStart - 86400) }   -- search dates carry no zone: a day early
+    local monthStart = (M.compareDay(now, tz) - (M.COMPARE_MONTH_DAYS - 1)) * 86400 - (tonumber(tz) or 0)
+    local since = math.min(lastStart, monthStart)
+    return { now = now, tz = tz, thisStart = thisStart, lastStart = lastStart, monthStart = monthStart, since = since,
+             sinceIso = iso(since),
+             searchDate = os.date("!%Y-%m-%d", since - 86400) }   -- search dates carry no zone: a day early
   end
 
   -- The local day number of `now` (the daily check's clock).
@@ -25102,7 +25108,7 @@ do
                "-f", "q=author:" .. job.login .. " author-date:>=" .. win.searchDate,
                "-f", "per_page=100", "-q", ".items[].repository.full_name" }
     end
-    -- the person's own repos, most recently pushed first (100 reach well past two weeks): yours through
+    -- the person's own repos, most recently pushed first (100 reach well past 30 days): yours through
     -- your own list, so private ones too; anyone else's public ones
     if k == "repos" and M.compareLoginOk(job.login) then
       local path = job.self and "user/repos?affiliation=owner" or ("users/" .. job.login .. "/repos?type=owner")
@@ -25157,7 +25163,7 @@ do
       for line in tostring(out or ""):gmatch("[^\n]+") do
         local r, pushed = line:match("^(%S+)%s+(%S+)")
         local at = pushed and M.isoToEpoch(pushed)
-        if r and at and at >= win.lastStart and repoOk(r) and not skip[r:lower()] and not seen[r:lower()] then
+        if r and at and at >= win.since and repoOk(r) and not skip[r:lower()] and not seen[r:lower()] then
           seen[r:lower()] = true
           follow[#follow + 1] = { kind = "list", login = job.login, repo = r }
         end
@@ -25167,7 +25173,7 @@ do
       for line in tostring(out or ""):gmatch("[^\n]+") do
         local sha, date, who = line:match("^(%x+)%s+(%S+)%s*(%S*)")
         local at = date and M.isoToEpoch(date)
-        if sha and #sha == 40 and at and at >= win.lastStart and who and who:lower() == me then
+        if sha and #sha == 40 and at and at >= win.since and who and who:lower() == me then
           listed[sha] = true
           local c = st.commits[sha]
           if c then c.login, c.repo, c.at = job.login, job.repo, at
@@ -25177,7 +25183,7 @@ do
       end
       -- the repo's own list is the truth: a commit it no longer has (a rewrite) leaves the count
       for sha, c in pairs(st.commits) do
-        if c.login == job.login and c.repo == job.repo and c.at >= win.lastStart and not listed[sha] then
+        if c.login == job.login and c.repo == job.repo and c.at >= win.since and not listed[sha] then
           st.commits[sha] = nil
         end
       end
@@ -25198,13 +25204,13 @@ do
     return follow
   end
 
-  -- A check is over: keep the two weeks and the people listed; a clean one marks today done.
+  -- A check is over: keep the 30 days and the people listed; a clean one marks today done.
   function M.compareFinish(st, now, tz)
     local win = M.compareWindow(now, tz)
     local keep = {}
     for _, l in ipairs(M.compareLogins(st)) do keep[l] = true end
     for sha, c in pairs(st.commits) do
-      if c.at < win.lastStart or not keep[c.login] then st.commits[sha] = nil end
+      if c.at < win.since or not keep[c.login] then st.commits[sha] = nil end
     end
     if not st.error then st.runAt, st.runDay = now, M.compareDay(now, tz) end
   end
@@ -25215,9 +25221,10 @@ do
     return (tonumber(now) or 0) - (tonumber(st.triedAt) or 0) >= M.COMPARE_RETRY_SECONDS
   end
 
-  -- The board both weeks: a row per person (you marked) with the week's commits and lines, a bucket
-  -- per day Monday first, their repos busiest first, and commits whose lines aren't read yet
-  -- (pending). Rows by commits, then lines.
+  -- The board both weeks and the rolling 30 days (weeks.month, 2026-11-03): a row per person (you
+  -- marked) with the period's commits and lines, a bucket per day (a week Monday first, the 30 days
+  -- today last), their repos busiest first, and commits whose lines aren't read yet (pending). Rows by
+  -- commits, then lines.
   function M.compareBoard(st, now, tz)
     local win = M.compareWindow(now, tz)
     local today = M.compareDay(now, tz)
@@ -25228,10 +25235,10 @@ do
       if x.add + x.del ~= y.add + y.del then return x.add + x.del > y.add + y.del end
       return tostring(x.login or x.repo) < tostring(y.login or y.repo)
     end
-    local function week(start)
+    local function period(start, ndays)
       local firstDay = M.compareDay(start, tz)
       local W = { start = start, days = {}, rows = {} }
-      for i = 1, 7 do
+      for i = 1, ndays do
         local dn = firstDay + i - 1
         W.days[i] = { dayEpoch = dn * 86400 - (tonumber(tz) or 0), isToday = (dn == today) or nil, future = (dn > today) or nil }
       end
@@ -25239,13 +25246,13 @@ do
       for _, l in ipairs(logins) do
         local row = { login = l, name = names[l:lower()], you = (l == st.self) or nil, commits = 0, add = 0, del = 0,
                       pending = 0, days = {}, repos = {} }
-        for i = 1, 7 do row.days[i] = { commits = 0, add = 0, del = 0 } end
+        for i = 1, ndays do row.days[i] = { commits = 0, add = 0, del = 0 } end
         byLogin[l], reposOf[l] = row, {}
         W.rows[#W.rows + 1] = row
       end
       for _, c in pairs(st.commits) do
         local row = byLogin[c.login]
-        if row and c.at >= start and c.at < start + WEEK then
+        if row and c.at >= start and c.at < start + ndays * 86400 then
           local a, d = c.add or 0, c.del or 0
           row.commits, row.add, row.del = row.commits + 1, row.add + a, row.del + d
           if c.add == nil then row.pending = row.pending + 1 end
@@ -25265,7 +25272,8 @@ do
       return W
     end
     return { self = st.self, users = st.users, names = names, runAt = st.runAt, error = st.error,
-             weeks = { this = week(win.thisStart), last = week(win.lastStart) } }
+             weeks = { this = period(win.thisStart, 7), last = period(win.lastStart, 7),
+                       month = period(win.monthStart, M.COMPARE_MONTH_DAYS) } }
   end
 end
 
@@ -27047,7 +27055,7 @@ M.FEATURES = {
     what = "Every merge review carries a receipt: the source (the batch, the REQ ids the request names, or the session's first prompt), the requester's words, the tests it changed by layer, the gate, red-first and checker evidence, and the known issues from cc-merge.sh request --known-issues. The receipt is display only.",
     why = "Each merge answers what was asked and what proves it's done, in one place, against an id that outlives the chat. (The Requirements tab that minted the ids gave its place to Compare on 2026-10-27; the ids already in ~/.claude/cc-reqs.json still show.)" },
   { key = "compare", cat = "Control", new = true, title = "Compare",
-    what = "A Compare tab ranks your week against up to 5 GitHub users: commits and lines (+added / -deleted, lockfiles skipped) per day and for the week, from every repo your gh login can read -- they set up nothing. Click a name for the repos they wrote to, a column to rank by it, and switch This week / Last week. Shepherd checks GitHub once a day in the background, on Refresh, and when the list changes.",
+    what = "A Compare tab ranks your week against up to 5 GitHub users: commits and lines (+added / -deleted, lockfiles skipped) per day and for the week, from every repo your gh login can read -- they set up nothing. Click a name for the repos they wrote to, a column to rank by it, and switch This week / Last week / 30 days (a rolling 30). Shepherd checks GitHub once a day in the background, on Refresh, and when the list changes.",
     why = "A weekly leaderboard against the people you work with, kept current without anyone reporting anything." },
   { key = "fleet", cat = "Control", new = true, title = "Claude drives a batch",
     what = "A Claude session proposes a batch of worktree units; you approve it once on its card (and choose whether it may merge them when green). It then opens each unit's tab through Shepherd and hands it its task. Stop batch ends it.",

@@ -18357,6 +18357,8 @@ local HTML = [[
   #d-compare .cmp-spark { display:flex; align-items:flex-end; justify-content:space-between; height:20px; }
   #d-compare .cmp-bar { width:10px; min-height:1px; background:var(--accent); border-radius:2px 2px 0 0; }
   #d-compare .cmp-bar.cmp-future { background:var(--border-weak); }
+  /* the 30 days (2026-11-03): 30 thin bars in the same 104px column */
+  #d-compare .cmp-spark.cmp-month .cmp-bar { width:2px; border-radius:1px 1px 0 0; }
   #d-compare .cmp-repos { margin:6px 0 0 28px; }
   #d-compare .cmp-repo { display:flex; gap:10px; align-items:baseline; font-size:12px; padding:2px 0; color:var(--text-2); }
   #d-compare .cmp-rname { flex:1; min-width:0; word-break:break-all; color:var(--text); }
@@ -22306,8 +22308,11 @@ local HTML = [[
       var users = Array.isArray(d.users) ? d.users : [];
       var names = d.names || {};
       var weeks = d.weeks || {};
-      var w = (st.week === "last" ? weeks.last : weeks.this) || { rows: [], days: [] };
+      // 2026-11-03 (Adam: "add a 30 days tab for after last week ... a rolling last 30 days"): weeks.month
+      var isMonth = st.week === "month";
+      var w = (st.week === "last" ? weeks.last : isMonth ? weeks.month : weeks.this) || { rows: [], days: [] };
       var days = Array.isArray(w.days) ? w.days : [];
+      var nDays = isMonth ? (days.length || 30) : 7;
       var rows = compareSorted(w.rows, st.sort);
       var max = 1;
       rows.forEach(function(r){ (r.days || []).forEach(function(x){ if((x.commits || 0) > max) max = x.commits; }); });
@@ -22315,23 +22320,31 @@ local HTML = [[
         : (d.runAt ? 'Checked ' + esc(new Date(d.runAt * 1000).toLocaleString([], { weekday:"short", hour:"numeric", minute:"2-digit" }))
                    : 'Not checked yet');
       var html = '<div class="cmp-head"><span class="cmp-seg">'
-        + '<button data-cmp="week:this" class="' + (st.week !== "last" ? 'on' : '') + '">This week</button>'
-        + '<button data-cmp="week:last" class="' + (st.week === "last" ? 'on' : '') + '">Last week</button></span>'
+        + '<button data-cmp="week:this" class="' + (st.week !== "last" && !isMonth ? 'on' : '') + '">This week</button>'
+        + '<button data-cmp="week:last" class="' + (st.week === "last" ? 'on' : '') + '">Last week</button>'
+        + '<button data-cmp="week:month" class="' + (isMonth ? 'on' : '') + '">30 days</button></span>'
         + '<span class="cmp-when">' + when + '</span>'
         + '<button class="cmp-refresh" data-cmp="refresh"' + (d.running ? ' disabled' : '') + '>Refresh</button></div>';
       if(d.error) html += '<div class="cmp-flash">⚠ ' + esc(d.error) + '</div>';
       if(Array.isArray(d.rejected) && d.rejected.length)
         html += '<div class="cmp-flash">⚠ Not added (not a GitHub username, or past 5): ' + esc(d.rejected.join(", ")) + '</div>';
       var letters = "MTWTFSS", dh = "";
-      for(var i = 0; i < 7; i++){ var dd = days[i] || {}; dh += '<span class="' + (dd.isToday ? 'today' : '') + '">' + letters.charAt(i) + '</span>'; }
+      if(isMonth){
+        // 30 bars don't take a letter each: the column says where the 30 days start, and today
+        var first = days[0] || {};
+        dh = '<span>' + (first.dayEpoch ? esc(new Date(first.dayEpoch * 1000).toLocaleDateString([], { month:"short", day:"numeric" })) : '') + '</span>'
+          + '<span class="today">today</span>';
+      } else {
+        for(var i = 0; i < 7; i++){ var dd = days[i] || {}; dh += '<span class="' + (dd.isToday ? 'today' : '') + '">' + letters.charAt(i) + '</span>'; }
+      }
       html += '<div class="cmp-grid cmp-cols"><span></span><span>Who</span>'
         + '<button data-cmp="sort:commits" class="cmp-sort' + (st.sort !== "lines" ? ' on' : '') + '">Commits</button>'
         + '<button data-cmp="sort:lines" class="cmp-sort' + (st.sort === "lines" ? ' on' : '') + '">Lines</button>'
-        + '<span class="cmp-dayh">' + dh + '</span></div>';
+        + '<span class="cmp-dayh' + (isMonth ? ' cmp-month' : '') + '">' + dh + '</span></div>';
       rows.forEach(function(r, n){
         var login = String(r.login == null ? "" : r.login);
         var spark = "";
-        for(var k = 0; k < 7; k++){
+        for(var k = 0; k < nDays; k++){
           var x = (r.days || [])[k] || {}, c = x.commits || 0, dy = days[k] || {};
           var hgt = c > 0 ? Math.max(3, Math.round(20 * c / max)) : 1;
           var label = (dy.dayEpoch ? new Date(dy.dayEpoch * 1000).toLocaleDateString([], { weekday:"short", month:"short", day:"numeric" }) : "")
@@ -22349,11 +22362,12 @@ local HTML = [[
           + '</span>'
           + '<span class="cmp-num">' + esc(r.commits || 0) + '</span>'
           + '<span class="cmp-lines"><span class="cmp-add">+' + esc(r.add || 0) + '</span> <span class="cmp-del">−' + esc(r.del || 0) + '</span></span>'
-          + '<span class="cmp-spark">' + spark + '</span></div>';
+          + '<span class="cmp-spark' + (isMonth ? ' cmp-month' : '') + '">' + spark + '</span></div>';
         if(st.open[login]){
           var repos = Array.isArray(r.repos) ? r.repos : [];
           html += '<div class="cmp-repos">';
-          if(!repos.length) html += '<div class="cmp-repo">No commits your login can see this week.</div>';
+          if(!repos.length) html += '<div class="cmp-repo">No commits your login can see '
+            + (isMonth ? 'in the last 30 days' : st.week === "last" ? 'last week' : 'this week') + '.</div>';
           repos.forEach(function(rp){
             html += '<div class="cmp-repo"><span class="cmp-rname">' + esc(rp.repo) + '</span><span>' + esc(rp.commits || 0)
               + ' commit' + (rp.commits === 1 ? '' : 's') + '</span><span class="cmp-add">+' + esc(rp.add || 0)
@@ -22437,7 +22451,7 @@ local HTML = [[
       var verb = at < 0 ? act : act.slice(0, at), arg = at < 0 ? "" : act.slice(at + 1);
       var d = COMPARE.data || {};
       var users = Array.isArray(d.users) ? d.users.slice() : [];
-      if(verb === "week"){ COMPARE.week = arg === "last" ? "last" : "this"; renderCompare(); }
+      if(verb === "week"){ COMPARE.week = (arg === "last" || arg === "month") ? arg : "this"; renderCompare(); }
       else if(verb === "sort"){ COMPARE.sort = arg === "lines" ? "lines" : "commits"; renderCompare(); }
       else if(verb === "open"){ COMPARE.open[arg] = !COMPARE.open[arg]; renderCompare(); }
       else if(verb === "rm"){ comparePost({ a:"compare-users", users: users.filter(function(u){ return u !== arg; }) }); }

@@ -313,9 +313,11 @@ The **Compare** tab ranks your week against up to 5 GitHub users: commits, and l
 one); they don't install or set up anything. Shepherd reads GitHub through your `gh` login, so it
 counts commits in every repo that login can read, public or private:
 
-- **Which repos.** One commit search per person names the repos they wrote to; each repo's own
-  commit list since last Monday is what counts (the search can still list a commit a force-push
-  removed), matched to the person by each commit's GitHub login. GitHub's own author filter isn't
+- **Which repos.** One commit search per person names the repos they wrote to, and their own repos
+  pushed in the last 30 days add the ones the search can't see (a fork with fewer stars than its
+  parent, a repo too new to be indexed). Each repo's own commit list over the last 30 days is what
+  counts (the search can still list a commit a force-push removed), matched to the person by each
+  commit's GitHub login. GitHub's own author filter isn't
   used: it returned none of one person's 37 commits in a repo where the list has them all. Only each repo's default branch is searched, so feature-branch work counts once it merges,
   under its original date.
 - **Lines** skip lockfiles and build output (the same list as the commit stats).
@@ -325,8 +327,9 @@ counts commits in every repo that login can read, public or private:
 - **Right-click a name** (on the board or its chip) to give that person a nickname: type it and
   press Return, or Escape to cancel. The GitHub login stays on hover; an empty nickname goes back
   to it.
-- **Click a name** to see the repos they wrote to that week, busiest first. Click **Commits** or
-  **Lines** to rank by it, and switch between **This week** and **Last week**.
+- **Click a name** to see the repos they wrote to in that period, busiest first. Click **Commits** or
+  **Lines** to rank by it, and switch between **This week**, **Last week** and **30 days** (today and
+  the 29 days before, with a thin bar per day).
 
 Nothing calls GitHub until you first open the tab. After that, Shepherd checks once a day in the
 background (a few `gh` calls at a time, never blocking the panel), again on **Refresh**, and at once
