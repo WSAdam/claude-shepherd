@@ -109,6 +109,7 @@ const payload = {
   check("...and the question says how many  (7)", String(declined.asked[0] || "").indexOf("7") >= 0);
   check("...saying no sends nothing", declined.sent.length === 0);
   check("...and changes nothing  (active=" + declined.active + ")", declined.active === 7);
+  check("...and leaves My List open", await page.evaluate(() => worklistMode === true));
 
   // Saying yes sends exactly one message, naming THIS tab.
   const accepted = await page.evaluate(() => {
@@ -121,6 +122,10 @@ const payload = {
   check("...and sends nothing else", accepted.sent.length === 1);
   // 2026-10-13: the message names the lane the tab shows; with no lane picked that's All.
   check("...naming the All lane  (" + (msg[0] && msg[0].text) + ")", msg.length === 1 && msg[0].text === "all");
+  // 2026-11-03, Adam: "after clearing my list items can we have it make it go back to the normal cards
+  // afterwards instead of back to the my list?" -- Mark all done and Clear close My List once sent.
+  const back = await page.evaluate(() => ({ mode: worklistMode, cls: document.body.classList.contains("worklist-mode") }));
+  check("...and My List closes, back to the cards", back.mode === false && back.cls === false);
 
   // Lua answers with the real count; the panel says what happened.
   const flashed = await page.evaluate((p) => {
@@ -130,8 +135,11 @@ const payload = {
     window.wlMarkedAll(7);
     return { active: document.querySelectorAll("#wl-active .wl-item").length,
              flash: (document.getElementById("wl-todoflash") || {}).textContent,
+             toasts: Array.prototype.map.call(document.querySelectorAll("#cc-toasts .cc-toast"), function (t) { return t.textContent; }),
              shown: document.getElementById("wl-markall").style.display !== "none" };
   }, payload);
+  check("...and, with My List closed, says it in a toast  (" + flashed.toasts.join(" | ") + ")",
+        flashed.toasts.some(function (t) { return t.indexOf("Marked 7 done") >= 0; }));
   check("the tab empties once Lua answers  (active=" + flashed.active + ")", flashed.active === 0);
   check("...the panel says how many were marked  (" + flashed.flash + ")",
         String(flashed.flash || "").indexOf("7") >= 0);
@@ -155,6 +163,20 @@ const payload = {
         /every project|all projects/i.test(String(master.asked[0] || "")));
   const mm = (master.sent || []).filter(function (m) { return m.a === "worklist-mark-all"; });
   check("...and it sends one mark-all for master", mm.length === 1 && mm[0].v === "master");
+
+  // The Done section's Clear goes back to the cards too.
+  const cleared = await page.evaluate((p) => {
+    window.ccWorklist(p);
+    worklistPick("P1");
+    if (!worklistMode) toggleWorklist();
+    window.__sent = [];
+    document.getElementById("wl-clearbtn").click();
+    return { sent: window.__sent.map(function (s) { try { return JSON.parse(s); } catch (e) { return {}; } }),
+             mode: worklistMode, cls: document.body.classList.contains("worklist-mode") };
+  }, payload);
+  const cm = (cleared.sent || []).filter(function (m) { return m.a === "worklist-clear-done"; });
+  check("Clear sends one clear-done for this tab", cm.length === 1 && cm[0].v === "P1");
+  check("...and My List closes, back to the cards", cleared.mode === false && cleared.cls === false);
 
   await browser.close();
   finish();

@@ -21673,18 +21673,23 @@ local HTML = [[
         : "Mark all " + items + " on this tab done?";
       if(!confirm(where)) return;
       send("worklist-mark-all", worklistScope, worklistLane);
+      worklistBackToCards();
     }
+    // 2026-11-03 (Adam: "after clearing my list items ... go back to the normal cards afterwards"):
+    // Mark all done and Clear close My List once they're sent; the count then comes as a toast.
+    function worklistBackToCards(){ if(worklistMode) toggleWorklist(); }
     window.wlMarkedAll = function(n){
       var el = document.getElementById("wl-todoflash"); if(!el) return;
       n = n | 0;
       el.textContent = n ? ("Marked " + n + " done") : "Nothing left to mark";
+      if(!worklistMode) ccToast(el.textContent);
       if(wlTodoFlashTimer) clearTimeout(wlTodoFlashTimer);
       wlTodoFlashTimer = setTimeout(function(){ el.textContent = ""; }, 6000);
     };
     function worklistPick(scope){ worklistScope = scope; renderWorklist(); }
     function worklistToggle(id){ send("worklist-toggle", worklistScope, id); }
     function worklistRemove(id){ send("worklist-remove", worklistScope, id); }
-    function worklistClearDone(){ send("worklist-clear-done", worklistScope); }
+    function worklistClearDone(){ send("worklist-clear-done", worklistScope); worklistBackToCards(); }
     function worklistToggleDone(){ worklistDoneOpen = !worklistDoneOpen; renderWorklist(); }
     // TODO.md import senders + the result toast. Import/sync NEVER checks items:
     // the file's [x] arrives as the "✓ auto" chip and the checkbox stays yours.
