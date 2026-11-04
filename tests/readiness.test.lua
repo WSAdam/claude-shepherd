@@ -65,12 +65,24 @@ local function beats()
 end
 -- kitty @ commands: recorded; ls says the window is there, get-text answers with `screenNow`
 local kittyCalls, screenNow = {}, ""
--- hs.task.new(path, callback, [streamCallback,] args), answering like the real one (measured
--- 2026-11-03): with a stream callback the output comes through it and the final callback gets "";
--- without one, an answer past the 64KB pipe buffer never comes back (the child blocks writing).
+local shellcmd = dofile(HERE .. "support/shellcmd.lua")
+-- hs.task.new(path, callback, [streamCallback,] args), answering like the real one (measured live):
+-- without a stream callback, an answer past the 64KB pipe buffer never comes back (the child blocks
+-- writing, 2026-11-03); with one, the output comes through it but its last chunk can land after the
+-- exit callback (2026-11-04). A program FX.taskToFiles runs (/bin/sh -c "'kitty' ... > 'out' 2> 'err'")
+-- writes its answer to its file before it exits.
 local function kittyTask(bin, cb, a3, a4)
   local stream, argv = nil, a3
   if type(a3) == "function" then stream, argv = a3, a4 end
+  local outFile
+  if bin == "/bin/sh" and argv and argv[1] == "-c" then
+    local words, o = shellcmd.parse(argv[2])
+    if words then
+      outFile = o
+      argv = {}
+      for i = 2, #words do argv[#argv + 1] = words[i] end
+    end
+  end
   local sub
   for _, a in ipairs(argv or {}) do
     if a == "ls" or a == "get-text" or a == "send-text" or a == "send-key" then sub = a; break end
@@ -79,9 +91,15 @@ local function kittyTask(bin, cb, a3, a4)
   t.start = function() kittyCalls[#kittyCalls + 1] = { sub = sub, argv = argv }; return true end
   t.waitUntilExit = function()
     local out = (sub == "ls" and '[{"tabs":[{"windows":[{"id":7}]}]}]') or (sub == "get-text" and screenNow) or ""
-    if stream then
-      for i = 1, #out, 16384 do stream(t, out:sub(i, i + 16383), "") end
+    if outFile then
+      shellcmd.write(outFile, out)
       if cb then cb(0, "", "") end
+    elseif stream then
+      local chunks = {}
+      for i = 1, #out, 16384 do chunks[#chunks + 1] = out:sub(i, i + 16383) end
+      for i = 1, #chunks - 1 do stream(t, chunks[i], "") end
+      if cb then cb(0, "", "") end
+      if #chunks > 0 then stream(t, chunks[#chunks], "") end   -- after the exit
     elseif #out <= 65536 and cb then
       cb(0, out, "")
     end
@@ -152,6 +170,9 @@ if not ok then print("       " .. tostring(err)); finish() end
 local dash = rawget(_G, "__ccDashboard")
 local core, fx = dash.core, dash.fx
 beatsDue = {}   -- nothing that load scheduled belongs to these checks
+-- the scratch dir a reader's answer files go in (FX.taskToFiles): a real one, since hs.fs.mkdir is a stub
+fx._scratchDir = T .. "/scratch"
+os.execute('mkdir -p "' .. fx._scratchDir .. '"')
 
 local ledger = {}
 fx.appendLedger = function(ev) ledger[#ledger + 1] = ev end

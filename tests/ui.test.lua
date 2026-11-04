@@ -3013,7 +3013,7 @@ do
   -- the 30-minute cap only stands in without an answer (bg-jobs-tail.test.lua runs both)
   check("...counted while its shell runs, once ps has answered",
         src:find("if starts then return core.liveJobsWithShells(c.list, starts) end", 1, true) ~= nil
-        and src:find('return FX.taskStreamed("/bin/ps", function(code, out)', 1, true) ~= nil)
+        and src:find('return FX.taskToFiles("/bin/ps", function(code, out)', 1, true) ~= nil)
   check("...and aged every tick, capped at subagents.jobMaxMinutes (30)",
         src:find("return core.liveBackgroundJobs(c.list, now, maxAge)", 1, true) ~= nil
         and src:find('it.bg_jobs = FX.backgroundJobsFor(it, now, 60 * (tonumber(core.config(cfg, "subagents.jobMaxMinutes", 30)) or 30))', 1, true) ~= nil)
@@ -5754,10 +5754,10 @@ do
   local block = src:match("\n(%-%- %-%-%-%- Compare tab: a weekly GitHub leaderboard.-)\nfunction FX%.stepCompare%(%)") or ""
   local step = src:match("\nfunction FX%.stepCompare%(%)(.-)\nend\n") or ""
   check("compare: the FX section is found", #block > 0 and #step > 0)
-  -- 2026-11-03: the background task is FX.taskStreamed's hs.task now (its own pins, below), so the
-  -- call reads FX.taskStreamed(R.gh, ...) where it read hs.task.new(R.gh, ...)
+  -- 2026-11-03: the background task is a helper's hs.task now (its own pins, below): since 2026-11-04
+  -- FX.taskToFiles, so the call reads FX.taskToFiles(R.gh, ...) where it read hs.task.new(R.gh, ...)
   check("compare: no synchronous shell anywhere in it -- every gh call is a background task",
-        not (block .. step):find("hs.execute", 1, true) and (block):find("FX.taskStreamed(R.gh,", 1, true) ~= nil)
+        not (block .. step):find("hs.execute", 1, true) and (block):find("FX.taskToFiles(R.gh,", 1, true) ~= nil)
   check("compare: its file is ~/.claude/cc-compare.json", src:find('"/.claude/cc-compare.json"', 1, true) ~= nil)
   local un = io.open(ROOT .. "uninstall.sh", "r")
   local unsrc = un and un:read("*a") or ""
@@ -5790,14 +5790,27 @@ do
   check("taskStreamed: the stream callback goes in at creation (setting it after doesn't drain)",
         helper:find("return hs.task.new(bin, function(code, out, err)", 1, true) ~= nil
         and helper:find("end, function(_, so, se)", 1, true) ~= nil and helper:find("end, args)", 1, true) ~= nil)
-  check("taskStreamed: Compare's gh calls are streamed",
-        src:find("return FX.taskStreamed(R.gh, function(code, out, errText) entry.settle(code, out, errText) end, args)", 1, true) ~= nil)
-  check("taskStreamed: a packet's cited-code read is streamed",
-        src:find('t = FX.taskStreamed("/bin/sh", function(code, out, stderr)', 1, true) ~= nil)
-  check("taskStreamed: kitty's screen read is streamed",
-        src:find("local t = FX.taskStreamed(bin, function(code, so) if code == 0 then out = so end end, argv)", 1, true) ~= nil)
+  -- 2026-11-04 REQUIREMENT CHANGE: a stream's last chunk can land after the exit callback (1 in 40
+  -- commit-stats calls lost its answer live, 33 in 40 once), so a task whose answer is READ sends it
+  -- to files (FX.taskToFiles); only a drained-never-read child (a kitty window) is streamed.
+  local files = src:match("\nfunction FX%.taskToFiles%(bin, cb, args%)(.-)\nend\n") or ""
+  check("taskToFiles: the program runs through /bin/sh with stdout and stderr sent to its files",
+        files:find('return hs.task.new("/bin/sh", function(code)', 1, true) ~= nil
+        and files:find('{ "-c", core.redirectedCommand(argv, outFile, errFile) })', 1, true) ~= nil
+        and files:find("os.remove(outFile); os.remove(errFile)", 1, true) ~= nil)
+  check("taskToFiles: Compare's gh calls write their answers to files",
+        src:find("return FX.taskToFiles(R.gh, function(code, out, errText) entry.settle(code, out, errText) end, args)", 1, true) ~= nil)
+  check("taskToFiles: a packet's cited-code read does",
+        src:find('t = FX.taskToFiles("/bin/sh", function(code, out, stderr)', 1, true) ~= nil)
+  check("taskToFiles: kitty's screen read does",
+        src:find("local t = FX.taskToFiles(bin, function(code, so) if code == 0 then out = so end end, argv)", 1, true) ~= nil)
+  check("taskToFiles: the background ps does", src:find('return FX.taskToFiles("/bin/ps", function(code, out)', 1, true) ~= nil)
   check("taskStreamed: a spawned kitty window's pipes are drained for its life",
         src:find("local t = FX.taskStreamed(spec.argv[1], nil, args)", 1, true) ~= nil)
+  local streamedUses = 0
+  for _ in src:gmatch("FX%.taskStreamed%(") do streamedUses = streamedUses + 1 end
+  if src:find("\nfunction FX.taskStreamed(", 1, true) then streamedUses = streamedUses - 1 end   -- its definition
+  check("taskStreamed: nothing else uses it (a reader would lose a late chunk)  (" .. streamedUses .. " uses)", streamedUses == 1)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

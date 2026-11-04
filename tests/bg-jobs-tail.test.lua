@@ -50,9 +50,9 @@ end } }
 local FX = {}
 local NOW = core.isoToEpoch("2026-11-04T16:53:00.000Z")
 FX.now = function() return NOW end
--- the background ps (FX.taskStreamed's hs.task): recorded, answered by hand
+-- the background ps (FX.taskToFiles' hs.task): recorded, answered by hand
 local probes = {}
-FX.taskStreamed = function(bin, cb, args)
+FX.taskToFiles = function(bin, cb, args)
   local t = { bin = bin, cb = cb, args = args }
   function t:start() probes[#probes + 1] = self; return true end
   function t:terminate() self.dead = true end

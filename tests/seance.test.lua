@@ -184,7 +184,9 @@ local function cmdOf(t) return tostring(t and t.args[3] or "") end
 local function runTasks()
   local n = 0
   for _, t in ipairs(TASKS) do
-    if not tostring(t.args[2] or ""):find("custom-title", 1, true) and t.bin ~= "/bin/ps" then n = n + 1 end
+    -- (the ps runs as /bin/sh -c "'/bin/ps' ... > 'out' 2> 'err'": FX.taskToFiles, 2026-11-04)
+    local line = tostring(t.args[2] or "")
+    if not line:find("custom-title", 1, true) and t.bin ~= "/bin/ps" and not line:find("'/bin/ps' ", 1, true) then n = n + 1 end
   end
   return n
 end

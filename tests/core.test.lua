@@ -16953,5 +16953,26 @@ do
   check("no ps answer is no answer (the caller falls back to the age cap)", core.liveJobsWithShells({ sweep }, nil) == nil)
 end
 
+-- ---- a task's answer goes to files, never through a pipe (2026-11-04) ----
+-- 2026-11-04: streaming fixed the 64KB pipe hang (2026-11-03) but its last chunk can land after
+-- hs.task's exit callback -- measured live, 1 in 40 commit-stats calls lost its whole answer, 33 in
+-- 40 once. FX.taskToFiles runs the program through /bin/sh with both outputs sent to files.
+do
+  local shellcmd = dofile(HERE .. "support/shellcmd.lua")
+  local cmd = core.redirectedCommand({ "/opt/homebrew/bin/gh", "api", "repos/WSAdam/pilot/commits?since=2026-10-05T04:00:00Z&per_page=100",
+    "-q", '.[] | "\\(.sha) \\(.author.login // \\"\\")"', "it's" }, "/Users/a/.claude/cc-scratch/task-out-1", "/Users/a/.claude/cc-scratch/task-err-2")
+  eq("redirect: every word single-quoted, stdout and stderr to their files", cmd:sub(1, 30), "'/opt/homebrew/bin/gh' 'api' '")
+  local ending = " > '/Users/a/.claude/cc-scratch/task-out-1' 2> '/Users/a/.claude/cc-scratch/task-err-2'"
+  check("...ending in both redirects", cmd:sub(-#ending) == ending)
+  local argv, out, err = shellcmd.parse(cmd)
+  check("...and reads back word for word, quotes and jq included",
+        argv and #argv == 6 and argv[3] == "repos/WSAdam/pilot/commits?since=2026-10-05T04:00:00Z&per_page=100"
+        and argv[5] == '.[] | "\\(.sha) \\(.author.login // \\"\\")"' and argv[6] == "it's"
+        and out == "/Users/a/.claude/cc-scratch/task-out-1" and err == "/Users/a/.claude/cc-scratch/task-err-2")
+  local p = io.popen("/bin/sh -c " .. "'" .. core.redirectedCommand({ "printf", "%s|%s", "a b", "it's" }, "/dev/stdout", "/dev/null"):gsub("'", "'\\''") .. "'")
+  local ran = p and p:read("*a"); if p then p:close() end
+  eq("...and a real sh runs it as those words", ran, "a b|it's")
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

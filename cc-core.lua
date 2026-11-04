@@ -16294,6 +16294,15 @@ function M.folderScanShellCommand(argv, outFile)
   return table.concat(parts, " ") .. " > " .. shquote(tostring(outFile)) .. " 2>/dev/null"
 end
 
+-- The same, keeping stderr: argv's stdout to outFile and stderr to errFile (FX.taskToFiles,
+-- 2026-11-04). A streamed answer's last chunk can land after hs.task's exit callback, so a task
+-- whose answer is read sends it to files instead.
+function M.redirectedCommand(argv, outFile, errFile)
+  local parts = {}
+  for _, a in ipairs(argv or {}) do parts[#parts + 1] = shquote(tostring(a)) end
+  return table.concat(parts, " ") .. " > " .. shquote(tostring(outFile)) .. " 2> " .. shquote(tostring(errFile))
+end
+
 -- Scanner stdout -> deduped list of normalized absolute dirs, capped (a runaway
 -- depth over a huge tree must not balloon the in-memory index). CRLF-tolerant.
 function M.parseDirList(stdout, cap)

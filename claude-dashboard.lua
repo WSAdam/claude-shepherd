@@ -431,6 +431,10 @@ end
 -- output in and hands cb(code, stdout, stderr) the whole of it; with no cb it only drains (a long-lived
 -- child like a kitty window). Output a `sh -c` line sends to a file needs none of this
 -- (core.folderScanShellCommand).
+-- 2026-11-04: only for a child whose output is DRAINED, never read (a kitty window). A streamed
+-- answer's last chunk can land after the exit callback -- measured live, 1 in 40 commit-stats calls
+-- lost its whole answer that way, and 33 in 40 once -- so a task whose answer is read uses
+-- FX.taskToFiles.
 function FX.taskStreamed(bin, cb, args)
   local outBuf, errBuf = {}, {}
   return hs.task.new(bin, function(code, out, err)
@@ -445,6 +449,22 @@ function FX.taskStreamed(bin, cb, args)
     end
     return true
   end, args)
+end
+
+-- hs.task.new for a program whose answer is READ (2026-11-04): it runs through /bin/sh with its
+-- stdout and stderr sent to two scratch files (core.redirectedCommand), and cb(code, stdout, stderr)
+-- gets both files whole, read once the child has exited. No pipe to fill past 64KB (2026-11-03) and
+-- no stream whose last chunk can land after the exit callback (FX.taskStreamed). The exit code is the
+-- program's (sh's last command); one sh can't start says 127 on stderr.
+function FX.taskToFiles(bin, cb, args)
+  local outFile, errFile = FX.scratchFile("task-out"), FX.scratchFile("task-err")
+  local argv = { bin }
+  for _, a in ipairs(args or {}) do argv[#argv + 1] = a end
+  return hs.task.new("/bin/sh", function(code)
+    local out, err = FX.readFile(outFile) or "", FX.readFile(errFile) or ""
+    os.remove(outFile); os.remove(errFile)
+    if cb then return cb(code, out, err) end
+  end, { "-c", core.redirectedCommand(argv, outFile, errFile) })
 end
 
 -- App-owned scratch path for a subprocess's redirected stdout (fleet search /
@@ -620,7 +640,7 @@ function FX.jobsTail(path, since)
   end
 end
 -- 2026-11-04 (Adam's call): a job counts while its shell runs (core.liveJobsWithShells). One ps of
--- every process, in the background (its answer passes 64KB: FX.taskStreamed), at most every
+-- every process, in the background (its answer passes 64KB: FX.taskToFiles), at most every
 -- FX.BG_SHELLS_TTL seconds, its answer kept for three of those; a probe that never answers is
 -- given up after a minute. No answer yet, or a stale one: nil, and the 30-minute cap stands in.
 FX.BG_SHELLS_TTL = 15
@@ -634,7 +654,7 @@ function FX.bgShellsFor(pid)
   if not S.running and (not S.at or now - S.at >= FX.BG_SHELLS_TTL) then
     local probe = { at = now }
     local ok, t = pcall(function()
-      return FX.taskStreamed("/bin/ps", function(code, out)
+      return FX.taskToFiles("/bin/ps", function(code, out)
         if S.running ~= probe then return end
         S.running = nil
         S.at = probe.at
@@ -1348,8 +1368,9 @@ end
 function FX.packetRead(root, cites, cb)
   local t
   local ok, err = pcall(function()
-    -- streamed: 8 cites of long lines can pass the 64KB pipe buffer (FX.taskStreamed, 2026-11-03)
-    t = FX.taskStreamed("/bin/sh", function(code, out, stderr)
+    -- to files: 8 cites of long lines can pass the 64KB pipe buffer (2026-11-03), and a stream's last
+    -- chunk can land after the exit (2026-11-04) -- FX.taskToFiles
+    t = FX.taskToFiles("/bin/sh", function(code, out, stderr)
       local read = (code == 0) and core.parsePacketRead(out, #cites) or nil
       local why = nil
       if not read then
@@ -7619,10 +7640,11 @@ function FX.compareLaunch(R, job, args)
     if FX.now() - (FX._compare.pushedAt or 0) >= 2 then FX.comparePush() end
     FX.comparePump()
   end
-  -- 2026-11-03: streamed (FX.taskStreamed). Without that, an answer past 64KB (WSAdam/pilot's
-  -- 30-day commit list, ~90KB) never arrived and timed out every check.
+  -- 2026-11-03: never through a pipe: an answer past 64KB (WSAdam/pilot's 30-day commit list, ~90KB)
+  -- never arrived and timed out every check. 2026-11-04: nor streamed -- a stream's last chunk can land
+  -- after the exit, which left commits without their lines. FX.taskToFiles.
   local ok, t = pcall(function()
-    return FX.taskStreamed(R.gh, function(code, out, errText) entry.settle(code, out, errText) end, args)
+    return FX.taskToFiles(R.gh, function(code, out, errText) entry.settle(code, out, errText) end, args)
   end)
   if ok and t and t:start() then
     entry.task = t
@@ -9700,9 +9722,10 @@ function FX.kittyScreen(target)
   local bin = resolveBin("kitty", core.config(loadConfig(), "spawn.kittyBin", nil))
   local out
   local ok = pcall(function()
-    -- streamed: a big window of colour-coded text passes the 64KB pipe buffer, and this waits on
-    -- the main thread, so an undrained pipe would freeze the panel (FX.taskStreamed, 2026-11-03)
-    local t = FX.taskStreamed(bin, function(code, so) if code == 0 then out = so end end, argv)
+    -- to files: a big window of colour-coded text passes the 64KB pipe buffer, and this waits on the
+    -- main thread, so an undrained pipe would freeze the panel (2026-11-03); and a stream's last chunk
+    -- -- the composer line, at the bottom -- can land after the exit (2026-11-04). FX.taskToFiles
+    local t = FX.taskToFiles(bin, function(code, so) if code == 0 then out = so end end, argv)
     if t then t:start(); t:waitUntilExit() end
   end)
   if not ok or not out then print("[cc-kitty] ⚠️ get-text failed for '" .. tostring(target.name) .. "'") end

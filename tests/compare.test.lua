@@ -102,12 +102,26 @@ rawset(hs.application, "applicationsForBundleID", function() return { fakeApp } 
 rawset(hs.application, "find", function() return fakeApp end)
 -- background tasks are recorders: the fake gh below answers them
 local TASKS = {}
--- hs.task.new(path, callback, [streamCallback,] args), like the real one
+local shellcmd = dofile(HERE .. "support/shellcmd.lua")
+-- hs.task.new(path, callback, [streamCallback,] args), like the real one. A reader's program runs
+-- through /bin/sh -c "'prog' 'arg' ... > 'out' 2> 'err'" (FX.taskToFiles): recorded as that program
+-- and its args, with the files its answer goes to.
 rawset(hs.task, "new", function(bin, cb, a3, a4)
   local stream, args = nil, a3
   if type(a3) == "function" then stream, args = a3, a4 end
-  -- (stream and stuck are set, false included: the metatable below answers any missing field)
-  local t = { bin = bin, cb = cb, stream = stream or false, stuck = false, args = args or {}, running = false, terminated = false }
+  args = args or {}
+  local outFile, errFile = false, false
+  if bin == "/bin/sh" and args[1] == "-c" then
+    local argv, o, e = shellcmd.parse(args[2])
+    if argv then
+      bin, outFile, errFile = argv[1], o, e
+      args = {}
+      for i = 2, #argv do args[#args + 1] = argv[i] end
+    end
+  end
+  -- (stream, stuck and the files are set, false included: the metatable below answers any missing field)
+  local t = { bin = bin, cb = cb, stream = stream or false, stuck = false, args = args, outFile = outFile, errFile = errFile,
+              running = false, terminated = false }
   function t:start() self.running = true; return self end
   function t:isRunning() return self.running end
   function t:terminate() self.terminated = true; self.running = false; return true end
@@ -126,6 +140,9 @@ check("the dashboard loads and runs its first refresh", ok)
 if not ok then print("       " .. tostring(err)); finish() end
 local dash = rawget(_G, "__ccDashboard")
 local fx, core = dash.fx, dash.core
+-- the scratch dir a reader's answer files go in (FX.taskToFiles): a real one, since hs.fs.mkdir is a stub
+fx._scratchDir = T .. "/scratch"
+os.execute('mkdir -p "' .. fx._scratchDir .. '"')
 local NOW = core.isoToEpoch("2026-10-27T18:00:00Z")
 fx.now = function() return NOW end
 local function tick() return quiet(function() fx._refreshBody() end) end
@@ -175,10 +192,12 @@ end
 local function ghTasks() local out = {} for _, t in ipairs(TASKS) do if t.bin == GH then out[#out + 1] = t end end return out end
 local function running() local n = 0 for _, t in ipairs(ghTasks()) do if t.running then n = n + 1 end end return n end
 local maxRunning = 0
--- How the real hs.task hands back output, measured in the live panel on 2026-11-03: with a stream
--- callback, stdout and stderr arrive through it in chunks and the final callback gets ""; without one,
--- an answer past the 64KB pipe buffer never arrives at all (30KB came back in 0.01s; 70KB and 100KB
--- never finished). A task stuck that way stays running, as the real one did until its deadline.
+-- How the real hs.task hands back output, measured in the live panel: without a stream callback, an
+-- answer past the 64KB pipe buffer never arrives at all (2026-11-03: 30KB came back in 0.01s; 70KB
+-- and 100KB never finished), and a task stuck that way stays running, as the real one did until its
+-- deadline. With one, the output comes through it -- but its last chunk can land after the exit
+-- callback (2026-11-04: 1 in 40 calls, 48 bytes, the whole answer). A program run through
+-- FX.taskToFiles writes its answer to its files and then exits: both are whole by the callback.
 local PIPE = 65536
 local function drain()   -- answer every running gh task until none is left (and note the most at once)
   for _ = 1, 500 do
@@ -187,11 +206,18 @@ local function drain()   -- answer every running gh task until none is left (and
     if not t then return end
     maxRunning = math.max(maxRunning, running())
     local code, out, errText = ghAnswer(t.args)
-    if t.stream then
+    if t.outFile then
       t.running = false
-      for i = 1, #out, 16384 do quiet(function() t.stream(t, out:sub(i, i + 16383), "") end) end
+      shellcmd.write(t.outFile, out); shellcmd.write(t.errFile, errText)
+      quiet(function() t.cb(code, "", "") end)
+    elseif t.stream then
+      t.running = false
+      local chunks = {}
+      for i = 1, #out, 16384 do chunks[#chunks + 1] = out:sub(i, i + 16383) end
+      for i = 1, #chunks - 1 do quiet(function() t.stream(t, chunks[i], "") end) end
       if errText ~= "" then quiet(function() t.stream(t, "", errText) end) end
       quiet(function() t.cb(code, "", "") end)
+      if #chunks > 0 then quiet(function() t.stream(t, chunks[#chunks], "") end) end   -- after the exit
     elseif #out > PIPE then
       t.stuck = true
     else

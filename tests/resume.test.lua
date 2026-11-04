@@ -320,10 +320,21 @@ local function beats()
 end
 local kittyCalls = {}
 -- hs.task.new(path, callback, [streamCallback,] args), like the real one: with a stream callback
--- the output comes through it and the final callback gets "" (measured 2026-11-03)
+-- the output comes through it and the final callback gets "" (measured 2026-11-03). A program
+-- FX.taskToFiles runs (/bin/sh -c "'kitty' ... > 'out' 2> 'err'", 2026-11-04) writes its file.
+local shellcmd = dofile(HERE .. "support/shellcmd.lua")
 local function kittyTask(bin, cb, a3, a4)
   local stream, argv = nil, a3
   if type(a3) == "function" then stream, argv = a3, a4 end
+  local outFile
+  if bin == "/bin/sh" and argv and argv[1] == "-c" then
+    local words, o = shellcmd.parse(argv[2])
+    if words then
+      outFile = o
+      argv = {}
+      for i = 2, #words do argv[#argv + 1] = words[i] end
+    end
+  end
   local sub
   for _, a in ipairs(argv or {}) do
     if a == "ls" or a == "get-text" or a == "send-text" or a == "send-key" then sub = a; break end
@@ -333,7 +344,8 @@ local function kittyTask(bin, cb, a3, a4)
   t.waitUntilExit = function()
     local out = (sub == "ls" and '[{"tabs":[{"windows":[{"id":7}]}]}]')
       or (sub == "get-text" and readFile(HERE .. "fixtures/kitty-screens/dim-suggestion.ansi")) or ""
-    if stream then stream(t, out, ""); if cb then cb(0, "", "") end
+    if outFile then shellcmd.write(outFile, out); if cb then cb(0, "", "") end
+    elseif stream then stream(t, out, ""); if cb then cb(0, "", "") end
     elseif cb then cb(0, out, "") end
   end
   t.terminationStatus = function() return 0 end
@@ -397,6 +409,9 @@ check("the dashboard loads and runs its first refresh", ok)
 if not ok then print("       " .. tostring(err)); finish() end
 local dash = rawget(_G, "__ccDashboard")
 local fx = dash.fx
+-- the scratch dir a reader's answer files go in (FX.taskToFiles): a real one, since hs.fs.mkdir is a stub
+fx._scratchDir = T .. "/scratch"
+os.execute('mkdir -p "' .. fx._scratchDir .. '"')
 beatsDue = {}
 
 local ledger = {}

@@ -251,9 +251,9 @@ local feedBody = src:match("\n(local function renderFeed%(task, item%).-\nend\n)
 check("the panel ships renderFeed", feedBody ~= nil)
 local openBody = src:match("\n(function FX%.fleetOpenTab%(b, slug, req%).-\nend\n)")
 check("the panel ships FX.fleetOpenTab", openBody ~= nil)
-local streamBody = src:match("\n(function FX%.taskStreamed%(bin, cb, args%).-\nend\n)")
-check("the panel ships FX.taskStreamed", streamBody ~= nil)
-if not (body and feedBody and openBody and streamBody) then finish() end
+local filesBody = src:match("\n(function FX%.taskToFiles%(bin, cb, args%).-\nend\n)")
+check("the panel ships FX.taskToFiles", filesBody ~= nil)
+if not (body and feedBody and openBody and filesBody) then finish() end
 
 local T
 do local p = io.popen("mktemp -d 2>/dev/null"); T = p and p:read("*l"); if p then p:close() end end
@@ -280,9 +280,10 @@ local function drain()
   while #pending > 0 do local cb = table.remove(pending, 1); cb() end
   return n
 end
--- hs.task.new(path, callback, [streamCallback,] args), answering like the real one (measured
--- 2026-11-03): with a stream callback the output comes through it and the final callback gets "";
--- without one, an answer past the 64KB pipe buffer never comes back (the child blocks writing).
+-- hs.task.new(path, callback, [streamCallback,] args), answering like the real one (measured live):
+-- without a stream callback, an answer past the 64KB pipe buffer never comes back (the child blocks
+-- writing, 2026-11-03); with one, the output comes through it but its last chunk can land after the
+-- exit callback (2026-11-04). A program FX.taskToFiles runs writes its own files (it runs for real).
 local hs = { task = { new = function(path, cb, a3, a4)
   local stream, argv = nil, a3
   if type(a3) == "function" then stream, argv = a3, a4 end
@@ -300,8 +301,11 @@ local hs = { task = { new = function(path, cb, a3, a4)
     if stream then
       pending[#pending + 1] = function()
         if self.dead then return end
-        for i = 1, #out, 16384 do stream(self, out:sub(i, i + 16383), "") end
+        local chunks = {}
+        for i = 1, #out, 16384 do chunks[#chunks + 1] = out:sub(i, i + 16383) end
+        for i = 1, #chunks - 1 do stream(self, chunks[i], "") end
         cb(code, "", "")
+        if #chunks > 0 then stream(self, chunks[#chunks], "") end   -- after the exit
       end
     elseif #out <= 65536 then
       pending[#pending + 1] = function() if not self.dead then cb(code, out, "") end end
@@ -328,7 +332,10 @@ FX.openClaudeTab = function() calls.opened = calls.opened + 1; return true end
 hs.timer = { doEvery = function() return { stop = function() end } end }
 local env = setmetatable({ FX = FX, core = core, hs = hs, QUEUE_DIR = QD,
   print = function(s) calls.logs[#calls.logs + 1] = tostring(s) end }, { __index = _G })
-assert(load(streamBody, "=taskStreamed", "t", env))()
+-- FX.taskToFiles' scratch files: a fresh path each time, inside the fixture dir
+local scratchN = 0
+FX.scratchFile = function(tag) scratchN = scratchN + 1; return T .. "/scratch-" .. tostring(tag) .. "-" .. scratchN end
+assert(load(filesBody, "=taskToFiles", "t", env))()
 assert(load(body, "=packets", "t", env))()
 local renderFeed = assert(load(feedBody .. "\nreturn renderFeed", "=renderFeed", "t", env))()
 assert(load(openBody, "=fleetOpenTab", "t", env))()

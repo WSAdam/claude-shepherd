@@ -4,6 +4,17 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-11-04 — A background task's answer is never lost
+
+- Fixed: yesterday's streaming fix (`FX.taskStreamed`) cured the 64KB pipe hang. But a streamed
+  answer's last chunk can land after hs.task's exit callback. Live, 1 in 40 commit-stats calls lost
+  its whole answer that way, and 33 in 40 once, which left two of today's commits on Compare without
+  their lines.
+- Every task whose answer is read now runs through `FX.taskToFiles`: stdout and stderr go to two
+  scratch files, which are read once the child has exited. That covers Compare's gh calls, a packet's
+  cited-code read, kitty's screen read and the background-jobs `ps`.
+- Only a spawned kitty window, whose output is drained and never read, is still streamed.
+
 ## 2026-11-04 — A session waiting on a background job reads Working
 
 - Fixed: a session that ends its turn to wait on a background job reads Working, but the job count
