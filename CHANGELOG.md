@@ -4,6 +4,13 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-11-03 — Compare reads big answers from GitHub
+
+- Fixed: Hammerspoon's `hs.task` never hands back output past the 64KB pipe buffer unless it is
+  read as it streams. WSAdam/pilot's 30-day commit list (a fork of a busy repo, ~90KB) never
+  arrived, so every check waited out the 120s deadline and the tab read "WSAdam: timed out". Each
+  gh answer is now read as it streams in.
+
 ## 2026-11-03 — Compare has a 30 days tab
 
 - Added: a **30 days** tab after Last week: the rolling last 30 days (today and the 29 before),

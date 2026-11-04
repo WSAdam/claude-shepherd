@@ -102,8 +102,12 @@ rawset(hs.application, "applicationsForBundleID", function() return { fakeApp } 
 rawset(hs.application, "find", function() return fakeApp end)
 -- background tasks are recorders: the fake gh below answers them
 local TASKS = {}
-rawset(hs.task, "new", function(bin, cb, args)
-  local t = { bin = bin, cb = cb, args = args or {}, running = false, terminated = false }
+-- hs.task.new(path, callback, [streamCallback,] args), like the real one
+rawset(hs.task, "new", function(bin, cb, a3, a4)
+  local stream, args = nil, a3
+  if type(a3) == "function" then stream, args = a3, a4 end
+  -- (stream and stuck are set, false included: the metatable below answers any missing field)
+  local t = { bin = bin, cb = cb, stream = stream or false, stuck = false, args = args or {}, running = false, terminated = false }
   function t:start() self.running = true; return self end
   function t:isRunning() return self.running end
   function t:terminate() self.terminated = true; self.running = false; return true end
@@ -131,12 +135,24 @@ check("the Compare check is wired", type(fx.stepCompare) == "function" and type(
 if type(PANEL_CB) ~= "function" or type(fx.stepCompare) ~= "function" then finish() end
 
 -- ---- the fake gh ----
-local A, B, C = string.rep("a", 40), string.rep("b", 40), string.rep("c", 40)
+local A, B, C, D = string.rep("a", 40), string.rep("b", 40), string.rep("c", 40), string.rep("d", 40)
 local asked = {}
+local BIG = false   -- 2026-11-03: from section 7b on, WSAdam also owns a fork with a busy upstream
 local function ghAnswer(args)
   local cmd = table.concat(args, " ")
   asked[#asked + 1] = cmd
   if cmd == "api user -q .login" then return 0, "WSAdam\n", "" end
+  if cmd:find("user/repos?", 1, true) or cmd:find("/repos?type=owner", 1, true) then
+    return 0, (BIG and cmd:find("api user/repos?", 1, true)) and "WSAdam/pilot 2026-10-27T12:00:00Z\n" or "", ""
+  end
+  if cmd:find("repos/WSAdam/pilot/commits?", 1, true) then
+    -- 1236 upstream commits by someone else and one of yours: ~82KB, past hs.task's 64KB pipe buffer
+    local lines = {}
+    for i = 1, 1236 do lines[i] = string.format("%040x", i) .. " 2026-10-26T06:45:31Z ldm0" end
+    lines[#lines + 1] = D .. " 2026-10-27T10:00:00Z WSAdam"
+    return 0, table.concat(lines, "\n") .. "\n", ""
+  end
+  if cmd:find("/commits/" .. D, 1, true) then return 0, '{"a":40,"d":4,"f":[{"n":"p.rs","a":40,"d":4}]}', "" end
   if args[2] == "graphql" then return 0, cmd:find("login=jonkopp17", 1, true) and "20\n" or "0\n", "" end
   if cmd:find("search/commits", 1, true) then
     if cmd:find("author:jonkopp17", 1, true) then return 0, "Org/crm-sdk\nOrg/crm-sdk\nOrg/mail\n", "" end
@@ -159,15 +175,29 @@ end
 local function ghTasks() local out = {} for _, t in ipairs(TASKS) do if t.bin == GH then out[#out + 1] = t end end return out end
 local function running() local n = 0 for _, t in ipairs(ghTasks()) do if t.running then n = n + 1 end end return n end
 local maxRunning = 0
+-- How the real hs.task hands back output, measured in the live panel on 2026-11-03: with a stream
+-- callback, stdout and stderr arrive through it in chunks and the final callback gets ""; without one,
+-- an answer past the 64KB pipe buffer never arrives at all (30KB came back in 0.01s; 70KB and 100KB
+-- never finished). A task stuck that way stays running, as the real one did until its deadline.
+local PIPE = 65536
 local function drain()   -- answer every running gh task until none is left (and note the most at once)
   for _ = 1, 500 do
     local t
-    for _, x in ipairs(ghTasks()) do if x.running then t = x; break end end
+    for _, x in ipairs(ghTasks()) do if x.running and not x.stuck then t = x; break end end
     if not t then return end
     maxRunning = math.max(maxRunning, running())
-    t.running = false
     local code, out, errText = ghAnswer(t.args)
-    quiet(function() t.cb(code, out, errText) end)
+    if t.stream then
+      t.running = false
+      for i = 1, #out, 16384 do quiet(function() t.stream(t, out:sub(i, i + 16383), "") end) end
+      if errText ~= "" then quiet(function() t.stream(t, "", errText) end) end
+      quiet(function() t.cb(code, "", "") end)
+    elseif #out > PIPE then
+      t.stuck = true
+    else
+      t.running = false
+      quiet(function() t.cb(code, out, errText) end)
+    end
   end
 end
 local function lastBoard()
@@ -271,6 +301,22 @@ local k = #ghTasks()
 post({ a = "compare-refresh" })
 check("Refresh when idle checks again", #ghTasks() > k)
 drain()
+
+-- 7b. an answer past 64KB (2026-11-03): WSAdam/pilot, a fork of a busy repo, has a 30-day commit list of
+-- ~90KB. hs.task never drained it, so the list waited out the 120s deadline on every check and the tab
+-- read "WSAdam: timed out"; gh's answer is now read as it streams in.
+BIG = true
+js = {}
+post({ a = "compare-refresh" })
+drain()
+local bb = lastBoard()
+local me = bb and rowOf(bb.weeks.this, "WSAdam")
+check("a gh answer past 64KB arrives: the fork's commit counts  (" .. tostring(me and me.commits) .. ")",
+      me and me.commits == 2 and me.add == 340)
+check("...the check finishes clean, nothing timed out  (" .. tostring(bb and bb.error) .. ")",
+      bb and bb.running == false and bb.error == nil)
+check("...and the other author's 1236 commits aren't yours", (read(STORE) or ""):find(string.format("%040x", 7), 1, true) == nil)
+BIG = false
 
 -- 8. no gh: the tab says so, and nothing runs
 fx._compare.gh = false

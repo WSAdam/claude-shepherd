@@ -7531,8 +7531,20 @@ function FX.compareLaunch(R, job, args)
     if FX.now() - (FX._compare.pushedAt or 0) >= 2 then FX.comparePush() end
     FX.comparePump()
   end
+  -- 2026-11-03: without a stream callback hs.task never drains the pipe, so an answer past 64KB
+  -- (WSAdam/pilot's 30-day commit list, ~90KB) never arrived and timed out every check. The answer
+  -- now streams in here; the final callback then carries only what's left (measured: nothing).
+  local outBuf, errBuf = {}, {}
   local ok, t = pcall(function()
-    return hs.task.new(R.gh, function(code, out, errText) entry.settle(code, out, errText) end, args)
+    return hs.task.new(R.gh, function(code, out, errText)
+      outBuf[#outBuf + 1] = out or ""
+      errBuf[#errBuf + 1] = errText or ""
+      entry.settle(code, table.concat(outBuf), table.concat(errBuf))
+    end, function(_, so, se)
+      if so and so ~= "" then outBuf[#outBuf + 1] = so end
+      if se and se ~= "" then errBuf[#errBuf + 1] = se end
+      return true
+    end, args)
   end)
   if ok and t and t:start() then
     entry.task = t
