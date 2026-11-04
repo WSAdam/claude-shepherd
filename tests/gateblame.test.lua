@@ -135,7 +135,11 @@ rawset(hs.application, "applicationsForBundleID", function() return { fakeApp } 
 rawset(hs.application, "find", function() return fakeApp end)
 -- Tasks and backstop timers are recorders: the test fires their callbacks itself.
 local TASKS, TIMERS = {}, {}
-rawset(hs.task, "new", function(bin, cb, args)
+-- hs.task.new(path, callback, [streamCallback,] args), like the real one (2026-11-04: the panel's
+-- background ps passes a stream callback)
+rawset(hs.task, "new", function(bin, cb, a3, a4)
+  local args = a3
+  if type(a3) == "function" then args = a4 end
   local t = { bin = bin, cb = cb, args = args or {}, dir = false, running = false, terminated = false }
   function t:start() self.running = true; return self end
   function t:setWorkingDirectory(d) self.dir = d; return true end

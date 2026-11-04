@@ -11,6 +11,12 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
   minutes of browser snapshots, so its card read Heads-up while the sweep ran. The count now reads
   back over the whole job window (30 minutes): it doubles the read until it reaches before the
   window, never past 16MB, and only when the transcript changes.
+- Changed (Adam's call): a background job counts for as long as its shell is still running, at any
+  age, instead of 30 minutes after it started. The sweep was still running at 43 minutes and its
+  card read Heads-up again. Every 15 seconds Shepherd runs one `ps` in the background and matches
+  each job to a Bash-tool shell of the session's `claude` process that started with it. A dev
+  server's shell can't keep a dead job counting, and a job whose shell is gone stops at once. The
+  30-minute cap only stands in until that check has answered.
 
 ## 2026-11-03 — Big output never stalls a background task
 

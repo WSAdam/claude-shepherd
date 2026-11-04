@@ -93,7 +93,11 @@ local hs = {
   autoLaunch = function() return false end,
   alert = { show = function() end },
   task = {
-    new = function(path, cb, args)
+    -- hs.task.new(path, callback, [streamCallback,] args), like the real one (2026-11-04: the
+    -- panel's background ps passes a stream callback)
+    new = function(path, cb, a3, a4)
+      local args = a3
+      if type(a3) == "function" then args = a4 end
       local t = { path = path, cb = cb, args = args }
       function t:start() self.started = true; return self end
       function t:terminate() self.terminated = true end

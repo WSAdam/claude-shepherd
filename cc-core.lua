@@ -25446,6 +25446,75 @@ function M.isServerCommand(cmd)
   return false
 end
 
+-- 2026-11-04 (Adam's call, replacing the 30-minute cap of 2026-09-28): a background job counts while
+-- a shell the session started for it is still alive, at any age -- Custom-browser's sweep was still
+-- running at 43 minutes and its card read Heads-up. Claude Code runs each Bash command (background
+-- ones included) in a `zsh -c source …/shell-snapshots/snapshot-…` child of the session's claude
+-- process; once the turn is over, any such child is a background job. A job matches a live shell
+-- that started within M.BG_SHELL_SLACK seconds of it, one shell per job, so a dev server's shell
+-- (never a job: M.isServerCommand) can't keep a job that died without a notice counting.
+M.BG_SHELL_MARK = "/shell-snapshots/snapshot-"
+M.BG_SHELL_SLACK = 30
+
+-- ps's etime ("[[dd-]hh:]mm:ss") in seconds; nil for anything else.
+function M.etimeSeconds(s)
+  if type(s) ~= "string" then return nil end
+  local d, rest = s:match("^(%d+)%-(.+)$")
+  local parts = {}
+  for n in (rest or s):gmatch("[^:]+") do
+    if not n:match("^%d+$") then return nil end
+    parts[#parts + 1] = tonumber(n)
+  end
+  if #parts < 2 or #parts > 3 then return nil end
+  local h, m, sec = 0, parts[#parts - 1], parts[#parts]
+  if #parts == 3 then h = parts[1] end
+  return (tonumber(d) or 0) * 86400 + h * 3600 + m * 60 + sec
+end
+
+-- `ps -axww -o pid=,ppid=,etime=,command=` asked at `at` -> { [ppid] = { start epoch, ... } }: the
+-- Bash-tool shells each process has running (pids as strings).
+function M.bgShellsPsArgs() return { "-axww", "-o", "pid=,ppid=,etime=,command=" } end
+function M.bgShellsFromPs(text, at)
+  local out = {}
+  if type(text) ~= "string" then return out end
+  at = tonumber(at) or 0
+  local pos = 1
+  while true do
+    local nl = text:find("\n", pos, true)
+    if not nl then break end
+    local line = text:sub(pos, nl - 1)
+    pos = nl + 1
+    if line:find(M.BG_SHELL_MARK, 1, true) then
+      local _, ppid, etime, cmd = line:match("^%s*(%d+)%s+(%d+)%s+(%S+)%s+(.*)$")
+      local age = M.etimeSeconds(etime)
+      local shell = cmd and (cmd:match("^%S+") or ""):match("[^/]+$")
+      if age and (shell == "zsh" or shell == "bash" or shell == "sh") and cmd:find(" -c source ", 1, true) then
+        out[ppid] = out[ppid] or {}
+        out[ppid][#out[ppid] + 1] = at - age
+      end
+    end
+  end
+  return out
+end
+
+-- How many of a job list still run, given the start times of the session's live Bash-tool shells:
+-- each job takes one unclaimed shell that started within M.BG_SHELL_SLACK of it. nil when there's no
+-- ps answer (`starts` nil): the caller falls back to the age cap.
+function M.liveJobsWithShells(list, starts, slack)
+  if type(starts) ~= "table" then return nil end
+  slack = tonumber(slack) or M.BG_SHELL_SLACK
+  local taken, n = {}, 0
+  for _, job in ipairs(type(list) == "table" and list or {}) do
+    local at = tonumber(job.at)
+    if at then
+      for i, s in ipairs(starts) do
+        if not taken[i] and math.abs(s - at) <= slack then taken[i] = true; n = n + 1; break end
+      end
+    end
+  end
+  return n
+end
+
 -- Does this transcript tail reach back to `since`? Its first stamped record -- the oldest, a
 -- transcript being written in order -- is from `since` or before. A record's own "timestamp" key is
 -- the first plain `"timestamp":"` in its line (one quoted inside a tool result is escaped). No stamp

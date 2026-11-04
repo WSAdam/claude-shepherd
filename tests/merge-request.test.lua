@@ -161,7 +161,11 @@ rawset(hs.window, "focusedWindow", function() focusCalls = focusCalls + 1; retur
 -- recorders now: each keeps the argv it was launched with, its working directory and its exit
 -- callback, and the test fires that callback itself. Same for the backstop timers.
 local TASKS, TIMERS = {}, {}
-rawset(hs.task, "new", function(bin, cb, args)
+-- hs.task.new(path, callback, [streamCallback,] args), like the real one (2026-11-04: the panel's
+-- background ps passes a stream callback)
+rawset(hs.task, "new", function(bin, cb, a3, a4)
+  local args = a3
+  if type(a3) == "function" then args = a4 end
   local t = { bin = bin, cb = cb, args = args or {}, dir = false, running = false, terminated = false }
   function t:start() self.running = true; return self end
   function t:setWorkingDirectory(d) self.dir = d; return true end

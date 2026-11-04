@@ -619,6 +619,40 @@ function FX.jobsTail(path, since)
     n = math.min(n * 2, FX.JOBS_TAIL_MAX)
   end
 end
+-- 2026-11-04 (Adam's call): a job counts while its shell runs (core.liveJobsWithShells). One ps of
+-- every process, in the background (its answer passes 64KB: FX.taskStreamed), at most every
+-- FX.BG_SHELLS_TTL seconds, its answer kept for three of those; a probe that never answers is
+-- given up after a minute. No answer yet, or a stale one: nil, and the 30-minute cap stands in.
+FX.BG_SHELLS_TTL = 15
+FX._bgShells = { at = nil, byPpid = nil, running = nil }
+function FX.bgShellsFor(pid)
+  local S, now = FX._bgShells, FX.now()
+  if S.running and now - S.running.at > 60 then
+    pcall(function() S.running.task:terminate() end)
+    S.running = nil
+  end
+  if not S.running and (not S.at or now - S.at >= FX.BG_SHELLS_TTL) then
+    local probe = { at = now }
+    local ok, t = pcall(function()
+      return FX.taskStreamed("/bin/ps", function(code, out)
+        if S.running ~= probe then return end
+        S.running = nil
+        S.at = probe.at
+        S.byPpid = (tonumber(code) == 0) and core.bgShellsFromPs(out, probe.at) or nil
+      end, core.bgShellsPsArgs())
+    end)
+    if ok and t then
+      probe.task = t
+      S.running = probe
+      if not t:start() then S.running, S.at = nil, now end
+    else
+      S.at = now
+    end
+  end
+  local d = tostring(pid or ""):match("^%d+$")
+  if not d or not S.byPpid or not S.at or now - S.at > 3 * FX.BG_SHELLS_TTL then return nil end
+  return S.byPpid[d] or {}
+end
 function FX.backgroundJobsFor(it, now, maxAge)
   local key, path = it and it.key, it and it.transcript_path
   if not key then return 0 end
@@ -626,15 +660,26 @@ function FX.backgroundJobsFor(it, now, maxAge)
     FX._bgJobs[key] = nil
     return 0
   end
+  -- the live shells, when ps has answered: a job counts while its shell runs, at any age, so the read
+  -- reaches back to the oldest one; else a job counts for maxAge after its start (no cap: always)
+  local starts = FX.bgShellsFor(it.session_pid)
+  local since
+  if starts then
+    if #starts == 0 then return 0 end
+    since = math.huge
+    for _, s in ipairs(starts) do if s < since then since = s end end
+    since = since - core.BG_SHELL_SLACK
+  else
+    local window = tonumber(maxAge)
+    since = (window and window > 0) and (now - window) or -math.huge
+  end
   local mt = hs.fs.attributes(path, "modification")
   local c = FX._bgJobs[key]
-  if not (c and c.mt == mt) then
-    -- a job counts for maxAge after its start (no cap: always), so the read reaches back that far
-    local window = tonumber(maxAge)
-    local since = (window and window > 0) and (now - window) or -math.huge
-    c = { mt = mt, list = core.backgroundJobList(FX.jobsTail(path, since)) }
+  if not (c and c.mt == mt and c.since <= since) then
+    c = { mt = mt, since = since, list = core.backgroundJobList(FX.jobsTail(path, since)) }
     FX._bgJobs[key] = c
   end
+  if starts then return core.liveJobsWithShells(c.list, starts) end
   return core.liveBackgroundJobs(c.list, now, maxAge)
 end
 

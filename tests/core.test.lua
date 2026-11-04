@@ -16909,5 +16909,49 @@ do
   check("nothing doesn't", not core.tailReachesBack(nil, since) and not core.tailReachesBack("", since))
 end
 
+-- ---- a background job counts while its shell runs (2026-11-04) ----
+-- 2026-11-04 (Adam's call, replacing the 30-minute cap of 2026-09-28): the sweep was still running at
+-- 43 minutes and its card read Heads-up. A job counts while a shell the session started for it is
+-- alive, at any age: a job matches a live Bash-tool shell of the session's claude process that
+-- started within a few seconds of it, one shell per job, so a dev server's shell never keeps a dead
+-- job counting. The ps fixture is the real tree from that day.
+do
+  eq("etime: mm:ss", core.etimeSeconds("42:56"), 42 * 60 + 56)
+  eq("etime: hh:mm:ss", core.etimeSeconds("01:02:03"), 3723)
+  eq("etime: dd-hh:mm:ss", core.etimeSeconds("2-01:00:00"), 2 * 86400 + 3600)
+  check("etime: anything else is nothing", core.etimeSeconds("soon") == nil and core.etimeSeconds(nil) == nil)
+  local AT = core.isoToEpoch("2026-11-04T17:19:00Z")
+  local PS = table.concat({
+    "53746 51675 01:57:41 /Users/adam/.vscode/extensions/anthropic.claude-code-2.1.317-darwin-arm64/resources/native-binary/claude --output-format stream-json",
+    "75709 53746    42:56 /bin/zsh -c source /Users/adam/.claude/shell-snapshots/snapshot-zsh-1793799417311-yfikxj.sh 2>/dev/null || true && eval 'npm run open-web > /tmp/l 2>&1'",
+    "75714 75709    42:56 npm run open-web",
+    "75846 75714    42:56 node sweep/open-web.mjs",
+    "5741  53746 01:57:13 node /Users/adam/.npm/_npx/9833c18b2d85bc59/node_modules/.bin/playwright-mcp --headless --isolated",
+    "88556  3012    03:23 /bin/zsh -c source /Users/adam/.claude/shell-snapshots/snapshot-zsh-1793642414418-wzqkid.sh 2>/dev/null || true",
+    "  612     1 01-02:00:00 /bin/zsh -l",
+  }, "\n") .. "\n"
+  local shells = core.bgShellsFromPs(PS, AT)
+  local s1 = shells["53746"]
+  check("ps: a session's Bash-tool shell is found under its claude process, with when it started",
+        s1 ~= nil and #s1 == 1 and s1[1] == AT - (42 * 60 + 56))
+  check("...an MCP server it runs is not a shell", s1 ~= nil and #s1 == 1)
+  check("...another session's shell is that session's", shells["3012"] ~= nil and #shells["3012"] == 1)
+  check("...and a login shell with no snapshot is nobody's job", shells["1"] == nil)
+
+  local sweep = { id = "bizs84957", at = core.isoToEpoch("2026-11-04T16:36:03.483Z"), command = "npm run open-web" }
+  eq("a job 43 minutes old whose shell still runs counts", core.liveJobsWithShells({ sweep }, s1), 1)
+  eq("...and stops the moment its shell is gone", core.liveJobsWithShells({ sweep }, {}), 0)
+  local dead = { id = "bdead", at = AT - 3600, command = "make test" }
+  eq("a job whose shell is gone (no notice ever came) doesn't count beside a live one",
+     core.liveJobsWithShells({ dead, sweep }, s1), 1)
+  local server = AT - 7200
+  eq("a dev server's long-lived shell never keeps a dead job counting",
+     core.liveJobsWithShells({ dead }, { server }), 0)
+  local twin = { id = "btwin", at = sweep.at + 1, command = "npm test" }
+  eq("one shell answers for one job", core.liveJobsWithShells({ sweep, twin }, s1), 1)
+  eq("...two shells for two", core.liveJobsWithShells({ sweep, twin }, { s1[1], s1[1] + 1 }), 2)
+  check("no ps answer is no answer (the caller falls back to the age cap)", core.liveJobsWithShells({ sweep }, nil) == nil)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

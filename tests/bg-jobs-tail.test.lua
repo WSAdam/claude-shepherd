@@ -48,6 +48,16 @@ local hs = { fs = { attributes = function(path, what)
   return { size = n, modification = n }
 end } }
 local FX = {}
+local NOW = core.isoToEpoch("2026-11-04T16:53:00.000Z")
+FX.now = function() return NOW end
+-- the background ps (FX.taskStreamed's hs.task): recorded, answered by hand
+local probes = {}
+FX.taskStreamed = function(bin, cb, args)
+  local t = { bin = bin, cb = cb, args = args }
+  function t:start() probes[#probes + 1] = self; return true end
+  function t:terminate() self.dead = true end
+  return t
+end
 local env = setmetatable({ FX = FX, core = core, hs = hs }, { __index = _G })
 assert(load(tailBody, "=readTail", "t", env))()
 assert(load(jobsBody, "=jobs", "t", env))()
@@ -58,7 +68,6 @@ FX.readTail = function(path, n) asked[#asked + 1] = n; return realTail(path, n) 
 
 local function iso(t) return os.date("!%Y-%m-%dT%H:%M:%S.000Z", t) end
 local function J(t) return core.json.encode(t) end
-local NOW = core.isoToEpoch("2026-11-04T16:53:00.000Z")
 local SNAP = string.rep("- generic [ref=e12]: a browser snapshot line ", 220)   -- ~10KB, like pilot's tool results
 local function sweepStart(at)
   return J({ type = "assistant", timestamp = iso(at), message = { role = "assistant", content = {
@@ -78,9 +87,9 @@ local function snapshots(from, to, n)
   return table.concat(out, "\n")
 end
 local function write(path, s) local fh = io.open(path, "w"); fh:write(s); fh:close() end
-local function count(path, status)
+local function count(path, status, pid)
   asked = {}
-  return FX.backgroundJobsFor({ key = path, transcript_path = path, status = status or "done" }, NOW, 1800)
+  return FX.backgroundJobsFor({ key = path, transcript_path = path, status = status or "done", session_pid = pid }, NOW, 1800)
 end
 
 -- 1. the case that read Heads-up: the sweep started 17 minutes ago, 35 snapshots (~354KB) after it
@@ -113,6 +122,53 @@ FX.JOBS_TAIL_MAX = cap
 
 -- 4. a working session is working anyway: no read at all
 check("a working session counts no jobs and reads nothing", count(P1, "working") == 0 and #asked == 0)
+
+-- 5. 2026-11-04 (Adam's call): a job counts while its shell runs, at any age. The sweep, still running
+-- at 43 minutes, read Heads-up under the 30-minute cap. ps is asked in the background; until it
+-- answers, the cap stands in.
+local P5 = T .. "/sweep-43min.jsonl"
+local SWEEP_AT = NOW - 2580
+write(P5, snapshots(NOW - 7200, NOW - 2700, 150) .. "\n" .. sweepStart(SWEEP_AT) .. "\n"
+  .. snapshots(SWEEP_AT + 20, NOW - 15, 60) .. "\n")
+local function psWith(shellAge)
+  local rows = {
+    "53746 51675 01:57:41 /Users/adam/.vscode/extensions/anthropic.claude-code-2.1.317-darwin-arm64/resources/native-binary/claude --output-format stream-json",
+    " 5741 53746 01:57:13 node /Users/adam/.npm/_npx/9833c18b2d85bc59/node_modules/.bin/playwright-mcp --headless --isolated",
+  }
+  if shellAge then
+    rows[#rows + 1] = "75709 53746 " .. shellAge .. " /bin/zsh -c source /Users/adam/.claude/shell-snapshots/snapshot-zsh-1793799417311-yfikxj.sh 2>/dev/null || true && eval 'npm run open-web'"
+    rows[#rows + 1] = "75714 75709 " .. shellAge .. " npm run open-web"
+  end
+  return table.concat(rows, "\n") .. "\n"
+end
+probes = {}
+FX._bgShells = { at = nil, byPpid = nil, running = nil }
+local before = count(P5, "done", 53746)
+check("before ps answers, the 30-minute cap stands in: the 43-minute sweep doesn't count yet", before == 0)
+check("...and one ps of every process runs in the background", #probes == 1 and probes[1].bin == "/bin/ps"
+      and table.concat(probes[1].args, " ") == "-axww -o pid=,ppid=,etime=,command=")
+count(P5, "done", 53746)
+check("...never a second one while it runs", #probes == 1)
+if probes[1] then probes[1].cb(0, psWith("43:00"), "") end
+check("a job 43 minutes old whose shell still runs counts: the card reads Working", count(P5, "done", 53746) == 1)
+check("...read back to its shell's start, not the whole file", asked[#asked] < fileSize(P5))
+check("...and another session's pid has no shell of its own", count(P5, "done", 99999) == 0)
+NOW = NOW + 10
+count(P5, "done", 53746)
+check("ps isn't asked again inside 15 seconds", #probes == 1)
+NOW = NOW + 6
+count(P5, "done", 53746)
+check("...and is after", #probes == 2)
+if probes[2] then probes[2].cb(0, psWith(nil), "") end
+check("the moment the shell is gone, the job stops counting", count(P5, "done", 53746) == 0)
+NOW = NOW + 16
+count(P5, "done", 53746)
+local hung = probes[#probes]
+NOW = NOW + 61
+count(P5, "done", 53746)
+check("a ps that never answers is ended after a minute, and asked again", hung.dead == true and probes[#probes] ~= hung)
+NOW = NOW + 200
+check("an answer older than three probes' time is no answer: the cap stands in again", count(P5, "done", 53746) == 0)
 
 os.execute('rm -r "' .. T .. '"')
 finish()

@@ -3008,7 +3008,12 @@ do
   -- not a fixed 256KB: Custom-browser's sweep started 354KB back and its card read Heads-up
   check("...counted from the transcript, re-read only when it changes",
         src:find("function FX.backgroundJobsFor(it, now, maxAge)", 1, true) ~= nil
-        and src:find("c = { mt = mt, list = core.backgroundJobList(FX.jobsTail(path, since)) }", 1, true) ~= nil)
+        and src:find("c = { mt = mt, since = since, list = core.backgroundJobList(FX.jobsTail(path, since)) }", 1, true) ~= nil)
+  -- 2026-11-04 (Adam's call): while ps has answered, a job counts while its shell runs, at any age;
+  -- the 30-minute cap only stands in without an answer (bg-jobs-tail.test.lua runs both)
+  check("...counted while its shell runs, once ps has answered",
+        src:find("if starts then return core.liveJobsWithShells(c.list, starts) end", 1, true) ~= nil
+        and src:find('return FX.taskStreamed("/bin/ps", function(code, out)', 1, true) ~= nil)
   check("...and aged every tick, capped at subagents.jobMaxMinutes (30)",
         src:find("return core.liveBackgroundJobs(c.list, now, maxAge)", 1, true) ~= nil
         and src:find('it.bg_jobs = FX.backgroundJobsFor(it, now, 60 * (tonumber(core.config(cfg, "subagents.jobMaxMinutes", 30)) or 30))', 1, true) ~= nil)
