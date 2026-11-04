@@ -5747,8 +5747,10 @@ do
   local block = src:match("\n(%-%- %-%-%-%- Compare tab: a weekly GitHub leaderboard.-)\nfunction FX%.stepCompare%(%)") or ""
   local step = src:match("\nfunction FX%.stepCompare%(%)(.-)\nend\n") or ""
   check("compare: the FX section is found", #block > 0 and #step > 0)
+  -- 2026-11-03: the background task is FX.taskStreamed's hs.task now (its own pins, below), so the
+  -- call reads FX.taskStreamed(R.gh, ...) where it read hs.task.new(R.gh, ...)
   check("compare: no synchronous shell anywhere in it -- every gh call is a background task",
-        not (block .. step):find("hs.execute", 1, true) and (block):find("hs.task.new(R.gh,", 1, true) ~= nil)
+        not (block .. step):find("hs.execute", 1, true) and (block):find("FX.taskStreamed(R.gh,", 1, true) ~= nil)
   check("compare: its file is ~/.claude/cc-compare.json", src:find('"/.claude/cc-compare.json"', 1, true) ~= nil)
   local un = io.open(ROOT .. "uninstall.sh", "r")
   local unsrc = un and un:read("*a") or ""
@@ -5767,6 +5769,28 @@ do
         src:find("FX._officialToken = token ~= nil", 1, true) ~= nil)
   check("usage why: the usage payload carries the reason",
         src:find("officialWhy = core.officialUsageWhy({ token = FX._officialToken, status = lastOfficialStatus,", 1, true) ~= nil)
+end
+
+-- ---- Output that can pass 64KB is streamed off hs.task's pipes (2026-11-03) ----
+-- 2026-11-03: hs.task never drains a pipe without a stream callback, so a child writing past 64KB
+-- blocks and its callback never fires (measured live: 30KB back in 0.01s, 70KB/100KB never). Compare's
+-- fork list timed out every check; kitty's screen read (on the main thread) could freeze the panel.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local helper = src:match("\nfunction FX%.taskStreamed%(bin, cb, args%)(.-)\nend\n") or ""
+  check("taskStreamed: the stream callback goes in at creation (setting it after doesn't drain)",
+        helper:find("return hs.task.new(bin, function(code, out, err)", 1, true) ~= nil
+        and helper:find("end, function(_, so, se)", 1, true) ~= nil and helper:find("end, args)", 1, true) ~= nil)
+  check("taskStreamed: Compare's gh calls are streamed",
+        src:find("return FX.taskStreamed(R.gh, function(code, out, errText) entry.settle(code, out, errText) end, args)", 1, true) ~= nil)
+  check("taskStreamed: a packet's cited-code read is streamed",
+        src:find('t = FX.taskStreamed("/bin/sh", function(code, out, stderr)', 1, true) ~= nil)
+  check("taskStreamed: kitty's screen read is streamed",
+        src:find("local t = FX.taskStreamed(bin, function(code, so) if code == 0 then out = so end end, argv)", 1, true) ~= nil)
+  check("taskStreamed: a spawned kitty window's pipes are drained for its life",
+        src:find("local t = FX.taskStreamed(spec.argv[1], nil, args)", 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

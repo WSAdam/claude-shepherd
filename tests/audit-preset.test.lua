@@ -120,7 +120,11 @@ for _, ns in ipairs({ "eventtap", "streamdeck", "urlevent", "mouse", "applicatio
   "keycodes", "canvas", "image", "sound", "notify", "osascript", "dialog", "http", "task", "base", "console" }) do
   hs[ns] = mkstub()
 end
-rawset(hs.task, "new", function(bin, _, args)
+-- hs.task.new(path, callback, [streamCallback,] args), like the real one (2026-11-03: the kitty
+-- spawn passes a stream callback so the window's pipes are drained)
+rawset(hs.task, "new", function(bin, _, a3, a4)
+  local args = a3
+  if type(a3) == "function" then args = a4 end
   tasks[#tasks + 1] = { bin = bin, args = args }
   return { start = function() end }
 end)

@@ -65,21 +65,29 @@ local function beats()
 end
 -- kitty @ commands: recorded; ls says the window is there, get-text answers with `screenNow`
 local kittyCalls, screenNow = {}, ""
-local function kittyTask(bin, cb, argv)
+-- hs.task.new(path, callback, [streamCallback,] args), answering like the real one (measured
+-- 2026-11-03): with a stream callback the output comes through it and the final callback gets "";
+-- without one, an answer past the 64KB pipe buffer never comes back (the child blocks writing).
+local function kittyTask(bin, cb, a3, a4)
+  local stream, argv = nil, a3
+  if type(a3) == "function" then stream, argv = a3, a4 end
   local sub
   for _, a in ipairs(argv or {}) do
     if a == "ls" or a == "get-text" or a == "send-text" or a == "send-key" then sub = a; break end
   end
-  return {
-    start = function() kittyCalls[#kittyCalls + 1] = { sub = sub, argv = argv }; return true end,
-    waitUntilExit = function()
-      if cb then
-        local out = (sub == "ls" and '[{"tabs":[{"windows":[{"id":7}]}]}]') or (sub == "get-text" and screenNow) or ""
-        cb(0, out, "")
-      end
-    end,
-    terminationStatus = function() return 0 end,
-  }
+  local t = {}
+  t.start = function() kittyCalls[#kittyCalls + 1] = { sub = sub, argv = argv }; return true end
+  t.waitUntilExit = function()
+    local out = (sub == "ls" and '[{"tabs":[{"windows":[{"id":7}]}]}]') or (sub == "get-text" and screenNow) or ""
+    if stream then
+      for i = 1, #out, 16384 do stream(t, out:sub(i, i + 16383), "") end
+      if cb then cb(0, "", "") end
+    elseif #out <= 65536 and cb then
+      cb(0, out, "")
+    end
+  end
+  t.terminationStatus = function() return 0 end
+  return t
 end
 local settingsStore, frame = {}, { x = 0, y = 0, w = 1920, h = 1080 }
 local taps = 0
@@ -278,6 +286,15 @@ screenNow = fixture("dim-suggestion")
 quietly(function() fx.typeWhenReady(kitMoved, "autofeed", function() typed.kit1 = true end) end)
 quietly(beats)
 check("kitty: an empty composer (a dim suggestion in it) is typed into", typed.kit1 == true)
+
+-- 2026-11-03: kitty's screen came back through hs.task with no stream callback, so a screen past the
+-- 64KB pipe buffer (a big window of colour-coded diff: every cell's colour is its own escape code)
+-- never would -- and FX.kittyScreen waits for it on the main thread, which would freeze the panel
+local bigScreen = string.rep("\27[38;2;120;200;80m+ added line of a syntax-coloured diff\27[0m\n", 1200) .. fixture("dim-suggestion")
+screenNow = bigScreen
+local readBig = select(2, quietly(function() return fx.kittyScreen(fx.targetFor(byK.kit1)) end))
+check("kitty: a screen past 64KB is read whole  (" .. #bigScreen .. " bytes, got " .. tostring(readBig and #readBig) .. ")",
+      readBig == bigScreen)
 
 -- kitty: the text and its Return are two writes, the Return after the text has landed
 kittyCalls = {}

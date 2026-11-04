@@ -319,22 +319,25 @@ local function beats()
   return n
 end
 local kittyCalls = {}
-local function kittyTask(bin, cb, argv)
+-- hs.task.new(path, callback, [streamCallback,] args), like the real one: with a stream callback
+-- the output comes through it and the final callback gets "" (measured 2026-11-03)
+local function kittyTask(bin, cb, a3, a4)
+  local stream, argv = nil, a3
+  if type(a3) == "function" then stream, argv = a3, a4 end
   local sub
   for _, a in ipairs(argv or {}) do
     if a == "ls" or a == "get-text" or a == "send-text" or a == "send-key" then sub = a; break end
   end
-  return {
-    start = function() kittyCalls[#kittyCalls + 1] = { sub = sub, argv = argv }; return true end,
-    waitUntilExit = function()
-      if cb then
-        local out = (sub == "ls" and '[{"tabs":[{"windows":[{"id":7}]}]}]')
-          or (sub == "get-text" and readFile(HERE .. "fixtures/kitty-screens/dim-suggestion.ansi")) or ""
-        cb(0, out, "")
-      end
-    end,
-    terminationStatus = function() return 0 end,
-  }
+  local t = {}
+  t.start = function() kittyCalls[#kittyCalls + 1] = { sub = sub, argv = argv }; return true end
+  t.waitUntilExit = function()
+    local out = (sub == "ls" and '[{"tabs":[{"windows":[{"id":7}]}]}]')
+      or (sub == "get-text" and readFile(HERE .. "fixtures/kitty-screens/dim-suggestion.ansi")) or ""
+    if stream then stream(t, out, ""); if cb then cb(0, "", "") end
+    elseif cb then cb(0, out, "") end
+  end
+  t.terminationStatus = function() return 0 end
+  return t
 end
 local settingsStore, frame = {}, { x = 0, y = 0, w = 1920, h = 1080 }
 local hs = {

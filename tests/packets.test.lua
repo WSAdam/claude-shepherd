@@ -251,7 +251,9 @@ local feedBody = src:match("\n(local function renderFeed%(task, item%).-\nend\n)
 check("the panel ships renderFeed", feedBody ~= nil)
 local openBody = src:match("\n(function FX%.fleetOpenTab%(b, slug, req%).-\nend\n)")
 check("the panel ships FX.fleetOpenTab", openBody ~= nil)
-if not (body and feedBody and openBody) then finish() end
+local streamBody = src:match("\n(function FX%.taskStreamed%(bin, cb, args%).-\nend\n)")
+check("the panel ships FX.taskStreamed", streamBody ~= nil)
+if not (body and feedBody and openBody and streamBody) then finish() end
 
 local T
 do local p = io.popen("mktemp -d 2>/dev/null"); T = p and p:read("*l"); if p then p:close() end end
@@ -278,7 +280,12 @@ local function drain()
   while #pending > 0 do local cb = table.remove(pending, 1); cb() end
   return n
 end
-local hs = { task = { new = function(path, cb, argv)
+-- hs.task.new(path, callback, [streamCallback,] args), answering like the real one (measured
+-- 2026-11-03): with a stream callback the output comes through it and the final callback gets "";
+-- without one, an answer past the 64KB pipe buffer never comes back (the child blocks writing).
+local hs = { task = { new = function(path, cb, a3, a4)
+  local stream, argv = nil, a3
+  if type(a3) == "function" then stream, argv = a3, a4 end
   local t = { path = path, argv = argv or {} }
   function t:setWorkingDirectory(d) self.dir = d end
   function t:terminate() self.dead = true end
@@ -290,7 +297,15 @@ local hs = { task = { new = function(path, cb, argv)
     local out = p:read("*a"); p:close()
     local code = tonumber(out:match("__code=(%d+)\n?$")) or 1
     out = out:gsub("__code=%d+\n?$", "")
-    pending[#pending + 1] = function() if not self.dead then cb(code, out, "") end end
+    if stream then
+      pending[#pending + 1] = function()
+        if self.dead then return end
+        for i = 1, #out, 16384 do stream(self, out:sub(i, i + 16383), "") end
+        cb(code, "", "")
+      end
+    elseif #out <= 65536 then
+      pending[#pending + 1] = function() if not self.dead then cb(code, out, "") end end
+    end
     return self
   end
   return t
@@ -313,6 +328,7 @@ FX.openClaudeTab = function() calls.opened = calls.opened + 1; return true end
 hs.timer = { doEvery = function() return { stop = function() end } end }
 local env = setmetatable({ FX = FX, core = core, hs = hs, QUEUE_DIR = QD,
   print = function(s) calls.logs[#calls.logs + 1] = tostring(s) end }, { __index = _G })
+assert(load(streamBody, "=taskStreamed", "t", env))()
 assert(load(body, "=packets", "t", env))()
 local renderFeed = assert(load(feedBody .. "\nreturn renderFeed", "=renderFeed", "t", env))()
 assert(load(openBody, "=fleetOpenTab", "t", env))()
@@ -442,6 +458,25 @@ local s2 = FX.readPackets(QK)
 check("store: an undecodable file reads as empty", s2 and next(s2.packets) == nil)
 local bak = io.popen('ls "' .. QD .. '" | grep -cF ".packets.json.bad." || true'):read("*l")
 eq("store: ...after it was backed up", bak, "1")
+
+-- 2026-11-03: the cited code came back through hs.task with no stream callback, so a read past the
+-- 64KB pipe buffer (cites into a file of long lines: minified code, JSON, a lockfile) never came back
+-- and the form waited on "Reading the cited code…" for good
+do
+  local wide = {}
+  for i = 1, 80 do wide[i] = "local w" .. i .. " = \"" .. string.rep("x", 1000) .. "\"" end
+  local wf = io.open(MAIN .. "/src/wide.lua", "w"); wf:write(table.concat(wide, "\n") .. "\n"); wf:close()
+  check("a committed file of 80 lines of 1KB each",
+    sh(('cd "%s" && git add -A && git -c user.email=t@t -c user.name=t commit -q -m wide'):format(MAIN)))
+  local wideSaved
+  FX.packetCapture(item, QK, { task = "Shrink the wide table", cites = "src/wide.lua:1-80" },
+    function(ok, a) wideSaved = { ok = ok, a = a } end)
+  drain()
+  check("capture: a cite read past 64KB comes back and is saved", wideSaved and wideSaved.ok == true)
+  local ws = core.parsePackets(readAll(QD .. "/" .. core.packetsFileName(QK)))
+  local wp = ws and wideSaved and ws.packets[wideSaved.a]
+  check("...with all 80 lines", wp and wp.cites[1] and select(2, tostring(wp.cites[1].text or ""):gsub("\n", "")) >= 79)
+end
 
 os.execute('rm -r "' .. T .. '"')
 finish()

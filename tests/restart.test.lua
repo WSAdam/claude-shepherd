@@ -604,7 +604,11 @@ local hs = {
     end
     return table.concat(out, "\n") .. "\n"
   end,
-  task = { new = function(bin, cb, args)
+  -- hs.task.new(path, callback, [streamCallback,] args), like the real one (2026-11-03: the kitty
+  -- spawn passes a stream callback so the window's pipes are drained)
+  task = { new = function(bin, cb, a3, a4)
+    local args = a3
+    if type(a3) == "function" then args = a4 end
     local t = { bin = bin, cb = cb, args = args }
     t.start = function(self)
       tasks[#tasks + 1] = self

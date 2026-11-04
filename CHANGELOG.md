@@ -4,6 +4,17 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-11-03 — Big output never stalls a background task
+
+- Fixed: the three other tasks whose output reaches hs.task's pipes and can pass 64KB now stream it
+  through one helper, `FX.taskStreamed`, like Compare:
+  - A kitty session's screen read before typing (`FX.kittyScreen`). It waits on the main thread, so a
+    big window of colour-coded text would have frozen the panel.
+  - A task packet's cited-code read (`FX.packetRead`). Cites into long lines would leave the form on
+    "Reading the cited code…" for good.
+  - A spawned kitty window. Its own log lines would eventually block the window.
+- Every other task sends its output to a file, or prints a line or two.
+
 ## 2026-11-03 — Compare reads big answers from GitHub
 
 - Fixed: Hammerspoon's `hs.task` never hands back output past the 64KB pipe buffer unless it is

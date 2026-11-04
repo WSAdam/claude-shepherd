@@ -424,6 +424,29 @@ function FX.readFile(path)
   local c = f:read("*a"); f:close(); return c
 end
 
+-- hs.task.new for a child whose output reaches the task's own pipes (2026-11-03). Without a stream
+-- callback hs.task never drains them: past the 64KB pipe buffer the child blocks writing, never exits,
+-- and the callback never fires -- measured in the live panel, 30KB came back in 0.01s and 70KB/100KB
+-- never did, and setting the stream callback after creating the task doesn't help. This streams the
+-- output in and hands cb(code, stdout, stderr) the whole of it; with no cb it only drains (a long-lived
+-- child like a kitty window). Output a `sh -c` line sends to a file needs none of this
+-- (core.folderScanShellCommand).
+function FX.taskStreamed(bin, cb, args)
+  local outBuf, errBuf = {}, {}
+  return hs.task.new(bin, function(code, out, err)
+    if not cb then return end
+    outBuf[#outBuf + 1] = out or ""
+    errBuf[#errBuf + 1] = err or ""
+    return cb(code, table.concat(outBuf), table.concat(errBuf))
+  end, function(_, so, se)
+    if cb then
+      if so and so ~= "" then outBuf[#outBuf + 1] = so end
+      if se and se ~= "" then errBuf[#errBuf + 1] = se end
+    end
+    return true
+  end, args)
+end
+
 -- App-owned scratch path for a subprocess's redirected stdout (fleet search /
 -- folder scan). os.tmpname() hands back a predictable name in world-writable /tmp
 -- and does NOT create the file, so between the name and the shell's `>` open a
@@ -1261,7 +1284,8 @@ end
 function FX.packetRead(root, cites, cb)
   local t
   local ok, err = pcall(function()
-    t = hs.task.new("/bin/sh", function(code, out, stderr)
+    -- streamed: 8 cites of long lines can pass the 64KB pipe buffer (FX.taskStreamed, 2026-11-03)
+    t = FX.taskStreamed("/bin/sh", function(code, out, stderr)
       local read = (code == 0) and core.parsePacketRead(out, #cites) or nil
       local why = nil
       if not read then
@@ -7531,20 +7555,10 @@ function FX.compareLaunch(R, job, args)
     if FX.now() - (FX._compare.pushedAt or 0) >= 2 then FX.comparePush() end
     FX.comparePump()
   end
-  -- 2026-11-03: without a stream callback hs.task never drains the pipe, so an answer past 64KB
-  -- (WSAdam/pilot's 30-day commit list, ~90KB) never arrived and timed out every check. The answer
-  -- now streams in here; the final callback then carries only what's left (measured: nothing).
-  local outBuf, errBuf = {}, {}
+  -- 2026-11-03: streamed (FX.taskStreamed). Without that, an answer past 64KB (WSAdam/pilot's
+  -- 30-day commit list, ~90KB) never arrived and timed out every check.
   local ok, t = pcall(function()
-    return hs.task.new(R.gh, function(code, out, errText)
-      outBuf[#outBuf + 1] = out or ""
-      errBuf[#errBuf + 1] = errText or ""
-      entry.settle(code, table.concat(outBuf), table.concat(errBuf))
-    end, function(_, so, se)
-      if so and so ~= "" then outBuf[#outBuf + 1] = so end
-      if se and se ~= "" then errBuf[#errBuf + 1] = se end
-      return true
-    end, args)
+    return FX.taskStreamed(R.gh, function(code, out, errText) entry.settle(code, out, errText) end, args)
   end)
   if ok and t and t:start() then
     entry.task = t
@@ -9622,7 +9636,9 @@ function FX.kittyScreen(target)
   local bin = resolveBin("kitty", core.config(loadConfig(), "spawn.kittyBin", nil))
   local out
   local ok = pcall(function()
-    local t = hs.task.new(bin, function(code, so) if code == 0 then out = so end end, argv)
+    -- streamed: a big window of colour-coded text passes the 64KB pipe buffer, and this waits on
+    -- the main thread, so an undrained pipe would freeze the panel (FX.taskStreamed, 2026-11-03)
+    local t = FX.taskStreamed(bin, function(code, so) if code == 0 then out = so end end, argv)
     if t then t:start(); t:waitUntilExit() end
   end)
   if not ok or not out then print("[cc-kitty] ⚠️ get-text failed for '" .. tostring(target.name) .. "'") end
@@ -12502,7 +12518,9 @@ function FX.spawnSession(editor, project, task, permissionMode, providerId, agen
     print("[cc-orch] kitty spawn: " .. table.concat(spec.argv, " "))
     local args = {}
     for i = 2, #spec.argv do args[#args + 1] = spec.argv[i] end
-    local t = hs.task.new(spec.argv[1], nil, args)
+    -- drained for the window's whole life: kitty's own log lines would otherwise fill the 64KB
+    -- pipe and block the window (FX.taskStreamed, 2026-11-03)
+    local t = FX.taskStreamed(spec.argv[1], nil, args)
     if t then t:start() else print("[cc-orch] kitty task failed to build") end
     FX.alert("Claude Shepherd: spawning kitty in " .. tostring(project))
   elseif spec.kind == "vscode" then
