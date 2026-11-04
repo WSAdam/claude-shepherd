@@ -602,7 +602,23 @@ end
 -- Servers never count, and a job stops counting maxAge seconds after it started (Adam's call), so
 -- the cached job list is aged against the clock on every call.
 FX.JOBS_TAIL_BYTES = 262144
+FX.JOBS_TAIL_MAX = 16777216   -- the reach-back's cap
 FX._bgJobs = {}   -- key -> { mt, list }
+-- 2026-11-04: the tail a count reads reaches back over the job window. A fixed 256KB missed
+-- Custom-browser's sweep, started 354KB back behind browser snapshots, so its finished turn read
+-- Heads-up while the sweep ran. 256KB, doubled until its oldest record is from `since` or before
+-- (core.tailReachesBack), the whole file, or FX.JOBS_TAIL_MAX. Read only when the transcript
+-- changes, and a session waiting on a job writes nothing.
+function FX.jobsTail(path, since)
+  -- (one value: a missing file gives nil + a message, and tonumber(nil, msg) throws)
+  local size = tonumber((hs.fs.attributes(path, "size"))) or 0
+  local n = FX.JOBS_TAIL_BYTES
+  while true do
+    local text = FX.readTail(path, n) or ""
+    if n >= size or n >= FX.JOBS_TAIL_MAX or core.tailReachesBack(text, since) then return text end
+    n = math.min(n * 2, FX.JOBS_TAIL_MAX)
+  end
+end
 function FX.backgroundJobsFor(it, now, maxAge)
   local key, path = it and it.key, it and it.transcript_path
   if not key then return 0 end
@@ -613,7 +629,10 @@ function FX.backgroundJobsFor(it, now, maxAge)
   local mt = hs.fs.attributes(path, "modification")
   local c = FX._bgJobs[key]
   if not (c and c.mt == mt) then
-    c = { mt = mt, list = core.backgroundJobList(FX.readTail(path, FX.JOBS_TAIL_BYTES) or "") }
+    -- a job counts for maxAge after its start (no cap: always), so the read reaches back that far
+    local window = tonumber(maxAge)
+    local since = (window and window > 0) and (now - window) or -math.huge
+    c = { mt = mt, list = core.backgroundJobList(FX.jobsTail(path, since)) }
     FX._bgJobs[key] = c
   end
   return core.liveBackgroundJobs(c.list, now, maxAge)

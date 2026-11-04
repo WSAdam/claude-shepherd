@@ -16887,5 +16887,27 @@ do
         not core.compareDue(f, NOW + 600, TZ) and core.compareDue(f, NOW + 3601, TZ))
 end
 
+-- ---- a background job read far enough back (2026-11-04) ----
+-- Adam, 2026-11-04: "find out why this isn't saying working and make it say working". Custom-browser's
+-- open-web sweep was still running, but its start was 354KB back in a transcript of browser snapshots,
+-- past the 256KB the job count read, so its finished turn read Heads-up. The read grows until its
+-- oldest record is from before the job window opened: core.tailReachesBack says when it has.
+do
+  local function rec(ts) return '{"type":"assistant","timestamp":"' .. ts .. '","message":{"content":[]}}' end
+  local since = core.isoToEpoch("2026-11-04T16:10:00.000Z")
+  check("a tail whose oldest record is before the window reaches back",
+        core.tailReachesBack(rec("2026-11-04T16:05:00.000Z") .. "\n" .. rec("2026-11-04T16:40:00.000Z") .. "\n", since))
+  check("...one exactly at the window's start does too", core.tailReachesBack(rec("2026-11-04T16:10:00.000Z") .. "\n", since))
+  check("a tail that starts inside the window doesn't",
+        not core.tailReachesBack(rec("2026-11-04T16:36:03.483Z") .. "\n" .. rec("2026-11-04T16:40:45.963Z") .. "\n", since))
+  check("...the first stamped record decides: unstamped records before it are skipped",
+        core.tailReachesBack('{"type":"last-prompt"}\n{"type":"ai-title"}\n' .. rec("2026-11-04T16:00:00.000Z") .. "\n", since))
+  check("...and a timestamp quoted inside a tool result is not a record's own",
+        not core.tailReachesBack('{"type":"user","message":{"content":"{\\"timestamp\\":\\"2026-11-04T15:00:00.000Z\\"}"},'
+          .. '"timestamp":"2026-11-04T16:30:00.000Z"}\n', since))
+  check("a tail with no timestamp at all doesn't (read further)", not core.tailReachesBack('{"type":"mode"}\n', since))
+  check("nothing doesn't", not core.tailReachesBack(nil, since) and not core.tailReachesBack("", since))
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

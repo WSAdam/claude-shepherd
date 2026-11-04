@@ -4,6 +4,14 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-11-04 — A session waiting on a background job reads Working
+
+- Fixed: a session that ends its turn to wait on a background job reads Working, but the job count
+  read only the transcript's last 256KB. Custom-browser's sweep started 354KB back, behind 17
+  minutes of browser snapshots, so its card read Heads-up while the sweep ran. The count now reads
+  back over the whole job window (30 minutes): it doubles the read until it reaches before the
+  window, never past 16MB, and only when the transcript changes.
+
 ## 2026-11-03 — Big output never stalls a background task
 
 - Fixed: the three other tasks whose output reaches hs.task's pipes and can pass 64KB now stream it

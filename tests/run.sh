@@ -428,6 +428,9 @@ echo ""
 echo "== node: the usage footer -- Anthropic's plan bars when either window comes back, else the local estimate saying why (behavioral, runs the shipped renderUsageFoot) =="
 node "$DIR/usage-foot.test.js" || fail=1
 echo ""
+echo "== lua: a finished session's background job keeps it Working however far back it started -- the read reaches back over the job window, never past its cap (behavioral, runs the shipped FX.jobsTail / FX.backgroundJobsFor on real files) =="
+lua "$DIR/bg-jobs-tail.test.lua" || fail=1
+echo ""
 echo "== bash: pinned links -- up to 8 per worktree, http(s) or a file under the git root, no shell metacharacters (cc-pin.sh) =="
 bash "$DIR/pin.test.sh" || fail=1
 echo ""

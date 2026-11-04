@@ -25446,6 +25446,19 @@ function M.isServerCommand(cmd)
   return false
 end
 
+-- Does this transcript tail reach back to `since`? Its first stamped record -- the oldest, a
+-- transcript being written in order -- is from `since` or before. A record's own "timestamp" key is
+-- the first plain `"timestamp":"` in its line (one quoted inside a tool result is escaped). No stamp
+-- at all is no: read further. 2026-11-04: the job count read a fixed 256KB, and Custom-browser's
+-- sweep started 354KB back -- its finished turn read Heads-up while the sweep ran (FX.jobsTail).
+function M.tailReachesBack(text, since)
+  if type(text) ~= "string" or text == "" then return false end
+  local at = text:find('"timestamp":"', 1, true)
+  if not at then return false end
+  local stamp = M.isoToEpoch(text:sub(at + 13, at + 36):match("^[^\"]+"))
+  return stamp ~= nil and stamp <= (tonumber(since) or 0)
+end
+
 -- The background jobs a transcript tail still has running, servers left out: { id, at, command }
 -- per job in start order, `at` the epoch seconds its start was written (nil if unstamped).
 function M.backgroundJobList(text)

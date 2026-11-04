@@ -3004,9 +3004,11 @@ do
   -- 2026-09-28 requirement change (Adam's call): servers are left out and a job stops counting
   -- subagents.jobMaxMinutes after it started, so the cache holds the job LIST (re-read only when
   -- the transcript changes) and ages it against the clock every tick.
+  -- 2026-11-04: from a tail that reaches back over the job window (FX.jobsTail, bg-jobs-tail.test.lua),
+  -- not a fixed 256KB: Custom-browser's sweep started 354KB back and its card read Heads-up
   check("...counted from the transcript, re-read only when it changes",
         src:find("function FX.backgroundJobsFor(it, now, maxAge)", 1, true) ~= nil
-        and src:find("core.backgroundJobList(FX.readTail(path, FX.JOBS_TAIL_BYTES)", 1, true) ~= nil)
+        and src:find("c = { mt = mt, list = core.backgroundJobList(FX.jobsTail(path, since)) }", 1, true) ~= nil)
   check("...and aged every tick, capped at subagents.jobMaxMinutes (30)",
         src:find("return core.liveBackgroundJobs(c.list, now, maxAge)", 1, true) ~= nil
         and src:find('it.bg_jobs = FX.backgroundJobsFor(it, now, 60 * (tonumber(core.config(cfg, "subagents.jobMaxMinutes", 30)) or 30))', 1, true) ~= nil)
