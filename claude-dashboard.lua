@@ -18552,14 +18552,14 @@ local HTML = [[
   #d-ask .ask-opt.on { background:var(--accent-text); color:var(--surface); border-color:var(--accent-text); }
   #d-ask .ask-other { display:block; width:100%; box-sizing:border-box; margin-top:6px; font-size:11px; font-family:inherit;
     color:var(--text-2); background:var(--surface); border:1px solid #3a4a66; border-radius:6px; padding:3px 8px; }
-  /* 2026-11-09: Submit answers is a full-width bar under the options, readable before a pick;
-     Answer in the tab instead sits on its own line below it. */
-  #d-ask .ask-acts { display:flex; flex-direction:column; align-items:flex-start; gap:6px; margin-top:8px; }
-  #d-ask .ask-send { align-self:stretch; font-size:13px; font-weight:600; color:var(--surface); background:var(--st-approval); border:0;
-    border-radius:8px; padding:7px 12px; cursor:pointer; font-family:inherit; }
+  /* 2026-11-09: Submit answers and Answer in the tab instead are two equal halves of one row under
+     the options (Adam's call), the same height and text size; Submit is readable before a pick. */
+  #d-ask .ask-acts { display:flex; gap:6px; margin-top:8px; }
+  #d-ask .ask-send, #d-ask .ask-release { flex:1 1 0; min-width:0; box-sizing:border-box; font-size:13px; border-radius:8px;
+    padding:6px 12px; cursor:pointer; font-family:inherit; line-height:1.3; }
+  #d-ask .ask-send { font-weight:600; color:var(--surface); background:var(--st-approval); border:1px solid var(--st-approval); }
   #d-ask .ask-send:disabled { opacity:.65; cursor:default; }
-  #d-ask .ask-release { font-size:11px; color:var(--muted); background:none; border:1px solid #3a4a66; border-radius:8px;
-    padding:3px 10px; cursor:pointer; font-family:inherit; }
+  #d-ask .ask-release { color:var(--muted); background:none; border:1px solid #3a4a66; }
   .tile.needs { animation:askglow 1.2s ease-in-out infinite; }
   @keyframes askglow { 0%,100% { box-shadow:0 0 0 3px var(--st-approval); } 50% { box-shadow:0 0 0 3px var(--st-approval), 0 0 22px var(--st-approval); } }
   .tile.needs .meta { color:var(--st-approval); font-weight:600; }

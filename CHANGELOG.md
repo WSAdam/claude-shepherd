@@ -8,9 +8,9 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
 
 - Fixed: on Chargeback Sentinel's multi-select question, Adam picked his options on the card, found
   no way to submit and handed the question back to the tab. The submit was an 11px chip reading
-  "Send", at 40% opacity until a pick. It is now a full-width **Submit answers** bar under the
-  options (**Submit** on a one-click question), readable before anything is picked. **Answer in the
-  tab instead** moved to its own line below it.
+  "Send", at 40% opacity until a pick. It is now a **Submit answers** button under the options
+  (**Submit** on a one-click question), readable before anything is picked. It shares one row with
+  **Answer in the tab instead**: two equal halves, the same height and text size (Adam's call).
 - "Answer in the tab instead" now logs what the form held, such as "(2 picked, Submit was on)", so a
   hand-back after a missed Submit shows in Shepherd's console.
 

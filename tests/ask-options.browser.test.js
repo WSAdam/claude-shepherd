@@ -151,22 +151,32 @@ multi.ask_nonce = "100.2";
     const opts = box.querySelectorAll(".ask-opt"), last = opts[opts.length - 1];
     if (!s) return null;
     const r = s.getBoundingClientRect(), cs = getComputedStyle(s), bcs = getComputedStyle(box);
+    const rr = rel ? rel.getBoundingClientRect() : null;
     const inner = box.clientWidth - parseFloat(bcs.paddingLeft) - parseFloat(bcs.paddingRight);
     return { text: s.textContent, w: r.width, inner: inner, h: r.height, fontPx: parseFloat(cs.fontSize),
-             op: parseFloat(cs.opacity), disabled: s.disabled, top: r.top,
-             lastBottom: last ? last.getBoundingClientRect().bottom : 0, relTop: rel ? rel.getBoundingClientRect().top : 0 };
+             op: parseFloat(cs.opacity), disabled: s.disabled, top: r.top, left: r.left,
+             lastBottom: last ? last.getBoundingClientRect().bottom : 0,
+             rel: rr ? { top: rr.top, left: rr.left, w: rr.width, h: rr.height, fontPx: parseFloat(getComputedStyle(rel).fontSize) } : null };
   });
   const before = await measure();
   check("a held multi-select question has a submit", before !== null);
   if (before) {
     check("...that says Submit answers  (got=" + JSON.stringify(before.text) + ")", before.text === "Submit answers");
-    check("...as a bar across the whole form  (got=" + Math.round(before.w) + " of " + Math.round(before.inner) + "px)",
-          before.w >= before.inner * 0.95);
+    // 2026-11-09 REQUIREMENT CHANGE (Adam: "make submit and answer in this tab instead next to each
+    // other, should both be about half of what the submit button now looks like"): the full-width
+    // bar with the hand-back on its own line below became two half-width buttons side by side.
+    check("...about half the form's width  (got=" + Math.round(before.w) + " of " + Math.round(before.inner) + "px)",
+          before.w >= before.inner * 0.4 && before.w <= before.inner * 0.55);
     check("...tall and large enough to read as the way to send  (got=" + Math.round(before.h) + "px, " + before.fontPx + "px text)",
           before.h >= 26 && before.fontPx >= 12);
     check("...readable before anything is picked  (got opacity " + before.op + ")", before.disabled && before.op >= 0.6);
-    check("...right under the options, above Answer in the tab instead",
-          before.top >= before.lastBottom && (before.relTop === 0 || before.relTop >= before.top + before.h - 1));
+    check("...right under the options", before.top >= before.lastBottom);
+    const rel = before.rel;
+    check("Answer in the tab instead sits beside Submit answers, on its right  (got=" + JSON.stringify(rel) + ")",
+          !!rel && Math.abs(rel.top - before.top) < 2 && rel.left > before.left + before.w - 1);
+    check("...the same size as Submit answers  (got=" + (rel ? Math.round(rel.w) + "x" + Math.round(rel.h) : "none") + " vs "
+          + Math.round(before.w) + "x" + Math.round(before.h) + ")",
+          !!rel && Math.abs(rel.w - before.w) < 2 && Math.abs(rel.h - before.h) < 2 && rel.fontPx === before.fontPx);
   }
   await page.locator("#d-ask .ask-opt").nth(0).click();
   await page.locator("#d-ask .ask-opt").nth(1).click();

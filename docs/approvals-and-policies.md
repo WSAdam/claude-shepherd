@@ -332,7 +332,7 @@ the tab:
 - **The answers are buttons** in its detail panel and on its Instances row, **each with its
   explanation written out under its label**: the same text the tab shows, in full, not a hover
   tooltip. One click on a single-choice question answers it. With several parts or multi-select,
-  pick per part (or type your own answer under **Other…**) and press the **Submit answers** bar
+  pick per part (or type your own answer under **Other…**) and press **Submit answers**
   under the options. Either way
   the answer goes straight to the session as the tool's own answer: no tab to find, no keystrokes.
   The hook looks for your answer every 0.1 seconds.
