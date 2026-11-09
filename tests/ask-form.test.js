@@ -67,7 +67,9 @@ const render = slice("    function renderAsk(it){", "\n    }\n") || "";
 check("renderAsk extracted", render.length > 0);
 check("renderAsk never writes innerHTML (session text goes in as textContent)", render.indexOf("innerHTML") < 0);
 check("renderAsk sends the form as JSON picks", render.indexOf('send("answer-ask", ASKF.key, JSON.stringify(ASKF.picks))') >= 0);
-check("renderAsk offers Answer in the tab instead", render.indexOf('send("release-ask", ASKF.key)') >= 0);
+// 2026-11-09 REQUIREMENT CHANGE: the hand-back now carries what was picked (askReleaseNote), so
+// the pin follows the call's new shape.
+check("renderAsk offers Answer in the tab instead", render.indexOf('send("release-ask", ASKF.key') >= 0);
 check("renderAsk keeps picks across the 1Hz refresh (signature guard)", render.indexOf("if(ASKF.sig === sig) return;") >= 0);
 
 // ---- an option's description is visible text, not only a tooltip (2026-09-18) ----
@@ -127,6 +129,37 @@ if (optEls.length === 4) {
   optEls[0].onclick();
   check("...and a second click on a multi-select pick clears it", !optEls[0].hasClass("on"));
 }
+
+// ---- the held form's submit reads as one (2026-11-09) ----
+// 2026-11-09: on Chargeback Sentinel's multi-select question Adam picked his options, found "no
+// submit answers option" and handed it back to the tab. The button was an 11px chip reading
+// "Send", dimmed to 40% until a pick; the tab's own picker calls it "Submit answers".
+const TRX = [{ question: "Which fixes should I build?", header: "TRX run fix", multiSelect: true, options: [
+  { label: "Record 'running' at start", description: "A killed run then reads as failed." },
+  { label: "Stop rematch at its limit", description: "Keeps the scheduled run short." },
+  { label: "Neither for now", description: "Leave both on TODO.md." }] }];
+dom.renderAsk({ key: "k2", askHeld: true, ask_nonce: "200.1", pending: { ask: TRX } });
+const sub = dAsk.all("ask-send");
+eq("a held multi-select question's submit says Submit answers, the tab picker's own words",
+   sub.length ? sub[0].textContent : null, "Submit answers");
+dom.renderAsk({ key: "k3", askHeld: true, ask_nonce: "300.1", pending: { ask: [
+  { question: "Rebase first?", multiSelect: false, options: [{ label: "Yes" }, { label: "No" }] }] } });
+const sub1 = dAsk.all("ask-send");
+eq("a one-click question's submit (for typed answers) says Submit", sub1.length ? sub1[0].textContent : null, "Submit");
+
+// what a hand-back says about the form: how many were picked, and whether Submit was on
+dom.renderAsk({ key: "k4", askHeld: true, ask_nonce: "400.1", pending: { ask: TRX } });
+const trxOpts = dAsk.all("ask-opt");
+if (trxOpts.length === 3) { trxOpts[0].onclick(); trxOpts[1].onclick(); }
+sentMsgs.length = 0;
+const rel = dAsk.all("ask-release");
+if (rel.length) rel[0].onclick();
+const relMsg = sentMsgs.filter((m) => m[0] === "release-ask")[0] || null;
+let relNote = null;
+try { relNote = relMsg ? JSON.parse(relMsg[2]) : null; } catch (e) { relNote = null; }
+check("Answer in the tab instead hands back the session's key", !!relMsg && relMsg[1] === "k4");
+check("...with how many options were picked and that Submit was on  (got=" + JSON.stringify(relNote) + ")",
+      !!relNote && relNote.picked === 2 && relNote.submitOn === true);
 
 console.log("-- ask-form.test.js: " + run + " run, " + failed + " failed --");
 process.exit(failed === 0 ? 0 : 1);

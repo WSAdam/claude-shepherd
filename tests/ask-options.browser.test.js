@@ -135,6 +135,45 @@ multi.ask_nonce = "100.2";
   check("multi-part: the clicked option lights up, and only it  (got=" + JSON.stringify(on) + ")",
         on.length === 4 && on[0] === false && on[1] === true && on[2] === false && on[3] === false);
 
+  // ---- the submit is a bar you can't miss (2026-11-09) ----
+  // 2026-11-09: on Chargeback Sentinel's multi-select question Adam picked his options and saw "no
+  // submit answers option", so he handed it back to the tab. The submit was an 11px chip reading
+  // "Send", at 40% opacity until a pick, beside "Answer in the tab instead".
+  const trx = held([{ question: "Which fixes should I build (test-first, committed locally, no push)?",
+    header: "TRX run fix", multiSelect: true, options: [
+      { label: "Record 'running' at start", description: "A run that is killed then reads as failed on the Health page." },
+      { label: "Stop rematch at its limit", description: "The cron's rematch pass doesn't start a draft past its limit." },
+      { label: "Neither for now", description: "Leave both on TODO.md and keep working the queue." }] }]);
+  trx.ask_nonce = "100.3";
+  await page.evaluate((it) => { renderAsk(it); }, trx);
+  const measure = () => page.evaluate(() => {
+    const box = document.getElementById("d-ask"), s = box.querySelector(".ask-send"), rel = box.querySelector(".ask-release");
+    const opts = box.querySelectorAll(".ask-opt"), last = opts[opts.length - 1];
+    if (!s) return null;
+    const r = s.getBoundingClientRect(), cs = getComputedStyle(s), bcs = getComputedStyle(box);
+    const inner = box.clientWidth - parseFloat(bcs.paddingLeft) - parseFloat(bcs.paddingRight);
+    return { text: s.textContent, w: r.width, inner: inner, h: r.height, fontPx: parseFloat(cs.fontSize),
+             op: parseFloat(cs.opacity), disabled: s.disabled, top: r.top,
+             lastBottom: last ? last.getBoundingClientRect().bottom : 0, relTop: rel ? rel.getBoundingClientRect().top : 0 };
+  });
+  const before = await measure();
+  check("a held multi-select question has a submit", before !== null);
+  if (before) {
+    check("...that says Submit answers  (got=" + JSON.stringify(before.text) + ")", before.text === "Submit answers");
+    check("...as a bar across the whole form  (got=" + Math.round(before.w) + " of " + Math.round(before.inner) + "px)",
+          before.w >= before.inner * 0.95);
+    check("...tall and large enough to read as the way to send  (got=" + Math.round(before.h) + "px, " + before.fontPx + "px text)",
+          before.h >= 26 && before.fontPx >= 12);
+    check("...readable before anything is picked  (got opacity " + before.op + ")", before.disabled && before.op >= 0.6);
+    check("...right under the options, above Answer in the tab instead",
+          before.top >= before.lastBottom && (before.relTop === 0 || before.relTop >= before.top + before.h - 1));
+  }
+  await page.locator("#d-ask .ask-opt").nth(0).click();
+  await page.locator("#d-ask .ask-opt").nth(1).click();
+  const after = await measure();
+  check("two picks turn the Submit answers bar on, at full strength  (got=" + JSON.stringify(after && { d: after.disabled, op: after.op }) + ")",
+        !!after && after.disabled === false && after.op === 1);
+
   // ---- answering in Shepherd has a real checkbox (2026-09-18) ----
   // It used to be ON with no way to turn it off short of editing JSON. It was briefly made
   // opt-in the same day, then put back ON once the freeze behind that (a quadratic transcript

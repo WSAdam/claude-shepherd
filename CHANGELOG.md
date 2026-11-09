@@ -4,6 +4,16 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-11-09 — Submit answers on a held question's card
+
+- Fixed: on Chargeback Sentinel's multi-select question, Adam picked his options on the card, found
+  no way to submit and handed the question back to the tab. The submit was an 11px chip reading
+  "Send", at 40% opacity until a pick. It is now a full-width **Submit answers** bar under the
+  options (**Submit** on a one-click question), readable before anything is picked. **Answer in the
+  tab instead** moved to its own line below it.
+- "Answer in the tab instead" now logs what the form held, such as "(2 picked, Submit was on)", so a
+  hand-back after a missed Submit shows in Shepherd's console.
+
 ## 2026-11-04 — A background task's answer is never lost
 
 - Fixed: yesterday's streaming fix (`FX.taskStreamed`) cured the 64KB pipe hang. But a streamed

@@ -190,6 +190,32 @@ os.remove(ANS)
 click("answer", "s1", "0")
 check("...after which Shepherd doesn't answer it", not exists(ANS))
 
+-- ---- a hand-back says what the form held (2026-11-09) ----
+-- 2026-11-09: Adam handed Chargeback Sentinel's multi-select question back to the tab, having seen
+-- "no submit answers option"; the console said only "question handed back", so nothing showed
+-- whether his picks had registered or Submit had been on.
+check("the note reads the picks and the Submit state", core.askReleaseNote('{"picked":2,"submitOn":true}') == "2 picked, Submit was on")
+check("...one pick, Submit off (a part still unanswered)", core.askReleaseNote('{"picked":1,"submitOn":false}') == "1 picked, Submit was off")
+check("...nothing picked", core.askReleaseNote('{"picked":0,"submitOn":false}') == "nothing picked")
+check("...no note from an older panel: nothing to add", core.askReleaseNote("") == "")
+check("...garbage: nothing to add", core.askReleaseNote("{nope") == "" and core.askReleaseNote('{"picked":"lots"}') == "")
+do
+  session("450.4", Q2)
+  tick()
+  local lines = {}
+  local prev = print
+  print = function(...) local t = {} for i = 1, select("#", ...) do t[#t + 1] = tostring((select(i, ...))) end lines[#lines + 1] = table.concat(t, " ") end
+  pcall(panelCb, { body = json.encode({ a = "release-ask", v = "s1", text = '{"picked":2,"submitOn":true}' }) })
+  print = prev
+  local said
+  for _, l in ipairs(lines) do if l:find("handed back", 1, true) then said = l end end
+  check("the console line says what was picked when it's handed back  (got=" .. tostring(said) .. ")",
+        said ~= nil and said:find("(2 picked, Submit was on)", 1, true) ~= nil)
+  body = json.decode(read(ANS) or "null")
+  check("...and it is still handed back", body and body.nonce == "450.4" and body.release == true)
+  os.remove(ANS)
+end
+
 -- ---- a new question reaches the panel at once (2026-09-18) ----
 -- 2026-09-18 measured live: a held question took 626-1127ms to show. The status dir's watcher is
 -- slowed by the panel's own 1Hz heartbeat writes there (12-1443ms to deliver); a watcher on the

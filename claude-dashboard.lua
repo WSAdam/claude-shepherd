@@ -6723,14 +6723,17 @@ function FX.answerAskFromPanel(key, text)
 end
 
 -- Answer in the tab instead: the hook lets go and the tab shows its own picker.
-function FX.releaseAsk(key)
+function FX.releaseAsk(key, formNote)
   local it = byKey[key]
   if not core.askHeld(it, FX.now()) then return false end
   local nonce = FX.askNonceOnDisk(key)
   if not nonce or FX._askSent[nonce] then return false end
   if not FX.writeFileAtomic(FX.ASK_DIR .. "/" .. key .. ".answer", core.json.encode({ nonce = nonce, release = true })) then return false end
   FX._askSent[nonce] = true
-  print("[cc-dashboard] ↩️ question handed back to the tab of " .. tostring(it.label or it.name or key))
+  -- 2026-11-09: what the form held (core.askReleaseNote), so a missed Submit shows here
+  local held = core.askReleaseNote(formNote)
+  print("[cc-dashboard] ↩️ question handed back to the tab of " .. tostring(it.label or it.name or key)
+    .. (held ~= "" and (" (" .. held .. ")") or ""))
   -- then take Adam to that tab, where its picker is about to appear
   pcall(function() dispatchSerialized(it, "focus", function() core.handleAction(FX, it, "focus") end) end)
   FX.askRepaint()
@@ -15836,7 +15839,7 @@ local function handleBridgeMsg(msg)
   if a == "cross-decide" then FX.crossDecide(tostring(payload.v or ""), tostring(payload.text or "")); return end
   if a == "ticket-tab-card" then FX.openTicketTabFor(tostring(payload.v or "")); return end
   if a == "tickets-open" then pcall(FX.pushTickets); return end
-  if a == "release-ask" then FX.releaseAsk(tostring(payload.v or "")); return end
+  if a == "release-ask" then FX.releaseAsk(tostring(payload.v or ""), tostring(payload.text or "")); return end
   -- Batch driving (2026-09-11): v = the driver's key, text = JSON {id, grantMerge, note}
   if a == "batch-approve" then FX.batchApprove(tostring(payload.v or ""), tostring(payload.text or "")); return end
   if a == "batch-deny" then FX.batchDeny(tostring(payload.v or ""), tostring(payload.text or "")); return end
@@ -18549,10 +18552,12 @@ local HTML = [[
   #d-ask .ask-opt.on { background:var(--accent-text); color:var(--surface); border-color:var(--accent-text); }
   #d-ask .ask-other { display:block; width:100%; box-sizing:border-box; margin-top:6px; font-size:11px; font-family:inherit;
     color:var(--text-2); background:var(--surface); border:1px solid #3a4a66; border-radius:6px; padding:3px 8px; }
-  #d-ask .ask-acts { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
-  #d-ask .ask-send { font-size:11px; font-weight:600; color:var(--surface); background:var(--st-approval); border:0;
-    border-radius:8px; padding:4px 12px; cursor:pointer; font-family:inherit; }
-  #d-ask .ask-send:disabled { opacity:.4; cursor:default; }
+  /* 2026-11-09: Submit answers is a full-width bar under the options, readable before a pick;
+     Answer in the tab instead sits on its own line below it. */
+  #d-ask .ask-acts { display:flex; flex-direction:column; align-items:flex-start; gap:6px; margin-top:8px; }
+  #d-ask .ask-send { align-self:stretch; font-size:13px; font-weight:600; color:var(--surface); background:var(--st-approval); border:0;
+    border-radius:8px; padding:7px 12px; cursor:pointer; font-family:inherit; }
+  #d-ask .ask-send:disabled { opacity:.65; cursor:default; }
   #d-ask .ask-release { font-size:11px; color:var(--muted); background:none; border:1px solid #3a4a66; border-radius:8px;
     padding:3px 10px; cursor:pointer; font-family:inherit; }
   .tile.needs { animation:askglow 1.2s ease-in-out infinite; }
@@ -24505,20 +24510,27 @@ local HTML = [[
         }
       });
       if(held){
+        // 2026-11-09: a full-width bar in the tab picker's own words. It was an 11px "Send" chip at
+        // 40% until a pick, and on a multi-select question Adam found "no submit answers option".
         var acts = askEl("div", "ask-acts");
-        send1 = askEl("button", "ask-send", ask.length > 1 ? "Send answers" : "Send");
+        send1 = askEl("button", "ask-send", simple ? "Submit" : "Submit answers");
         send1.disabled = true;
         send1.onclick = function(){
           if(!askComplete(ASKF.ask, ASKF.picks)) return;
           send("answer-ask", ASKF.key, JSON.stringify(ASKF.picks));
         };
         var rel = askEl("button", "ask-release", "Answer in the tab instead");
-        rel.onclick = function(){ send("release-ask", ASKF.key); };
+        // the hand-back says what the form held (core.askReleaseNote), so a missed Submit shows
+        rel.onclick = function(){
+          var n = 0;
+          ASKF.picks.forEach(function(p){ n += p.labels.length + (String(p.other || "").trim() !== "" ? 1 : 0); });
+          send("release-ask", ASKF.key, JSON.stringify({ picked: n, submitOn: !!(send1 && !send1.disabled) }));
+        };
         acts.appendChild(send1); acts.appendChild(rel);
         el.appendChild(acts);
       }
       el.appendChild(askEl("div", "ask-hint", held
-        ? (simple ? "Click an answer — it goes straight to the session, no tab needed" : "Pick an answer for each part, then Send answers — it goes straight to the session")
+        ? (simple ? "Click an answer — it goes straight to the session, no tab needed" : "Pick your answers, then Submit answers — it goes straight to the session")
         : "Click an option — auto-selects on Kitty for a single-question ask; otherwise jumps to the picker (VS Code is mouse-only; multi-question asks are finished by hand)"));
       el.classList.toggle("held", held);
       el.style.display = "block";

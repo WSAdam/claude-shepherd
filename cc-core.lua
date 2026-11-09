@@ -530,12 +530,24 @@ function M.askAnswerPayload(ask, picks, nonce)
   return { nonce = nonce, answers = answers }
 end
 
--- The panel's Send answers: picks JSON (the list above) for a question still held.
+-- The panel's Submit answers: picks JSON (the list above) for a question still held.
 function M.askAnswerFromPanel(item, text, now)
   if not M.askHeld(item, now) then return nil, "that question isn't waiting in Shepherd any more" end
   local ok, picks = pcall(M.json.decode, tostring(text or ""))
   if not ok or type(picks) ~= "table" then return nil, "unreadable answer" end
   return M.askAnswerPayload(item.pending.ask, picks, item.ask_nonce)
+end
+
+-- What the form held when Adam handed a question back to the tab ("Answer in the tab instead"),
+-- for the console line: "2 picked, Submit was on". "" when the panel sent nothing readable.
+-- 2026-11-09: he handed back a multi-select question having seen "no submit answers option",
+-- and the console couldn't say whether his picks had registered.
+function M.askReleaseNote(text)
+  local ok, n = pcall(M.json.decode, tostring(text or ""))
+  if not ok or type(n) ~= "table" or type(n.picked) ~= "number" then return "" end
+  local picked = math.max(0, math.floor(n.picked))
+  if picked == 0 then return "nothing picked" end
+  return picked .. " picked, Submit was " .. (n.submitOn == true and "on" or "off")
 end
 
 -- What the card and the Instances row show for a held question. simple = one single-choice
@@ -27167,7 +27179,7 @@ M.FEATURES = {
     what = "Each worktree Shepherd starts a session for -- a New worktree tab, a batch unit, Instances Open -- gets its own port and database path (lease.portFrom-portTo, lease.dbDir). The session is told them in its prompt and at every start, /clear or compaction, and they are in $(git rev-parse --git-dir)/shepherd-lease.env for a project to source. The card shows :PORT. Once the worktree is gone the lease is freed, and the database file Shepherd named goes with it.",
     why = "Parallel units that run dev servers or databases never fight over one port or one file." },
   { key = "answers", cat = "Control", new = true, title = "Answer questions from Shepherd",
-    what = "When a session asks you something, its card pulses with the question and you get one alert; its answers are buttons right there (and on its Instances row). Your click goes straight to the session -- no tab to find. Several parts or free text: pick per part, then Send answers. Answer in the tab instead hands it back to the tab.",
+    what = "When a session asks you something, its card pulses with the question and you get one alert; its answers are buttons right there (and on its Instances row). Your click goes straight to the session -- no tab to find. Several parts, multi-select or free text: pick per part, then the Submit answers bar. Answer in the tab instead hands it back to the tab.",
     why = "A session waiting on you shouldn't wait for you to find its tab -- and you always know when one is." },
   { key = "stopguards", cat = "Control", new = true, title = "Questions asked in prose come back",
     what = "A turn that ends by asking you something in prose (\"Want me to push?\", \"A or B?\") is sent back once, to ask it with the question tool instead, so it lands on the card as buttons. Code, quotes and a question answered in the same breath don't count. Off in plan mode, in Shepherd's own runs and where Shepherd isn't running. stopGuards.question in ~/.claude/cc-config.json, on by default.",
