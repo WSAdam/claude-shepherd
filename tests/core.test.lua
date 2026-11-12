@@ -9682,6 +9682,34 @@ do
         core.mergeReadiness(r, f, { key = "s1", wtRoot = "/r/main" }).ready == true)
   check("ready: main having moved on is not a problem (the session rebases)", core.mergeReadiness(r, with({ behind = 9 }), item).ready)
 
+  -- ---- a request whose branch landed outside Shepherd (2026-11-12) ----
+  -- 2026-11-12: Chargeback Sentinel's fix/alert-split-payments was fast-forwarded into master
+  -- (8ff19d0) by its batch driver while Adam was on Remote Control, and the worktree removed.
+  -- The request stayed "requested": a red Needs you, Merge greyed out ("the worktree isn't one
+  -- of this repo's worktrees any more ... 0 commits ahead"), Dismiss refused -- nothing to press.
+  check("landed: the facts read the base's reflog", cmd:find("reflog show", 1, true) ~= nil
+        and cmd:find("refs/heads/main", 1, true) ~= nil and cmd:find("@@landed", 1, true) ~= nil)
+  local at = tonumber(r.at) or 0
+  local function landedOut(lines) return "@@listed\n@@head\n@@ahead\n0\n@@landed\n" .. table.concat(lines, "\n") .. "\n" end
+  local lf = core.parseMergeFacts(landedOut({
+    "8ff19d00304526f097b6f6136e45c80488b6f406\tmain@{" .. (at + 900) .. "}\tmerge fix/demo: Fast-forward",
+    "4f7fe91aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tmain@{" .. (at + 60) .. "}\tcommit: TODO: something else" }), r)
+  check("landed: base's reflog has 'merge <branch>' after the request -> landed, with the merged sha  ("
+        .. tostring(lf.landed and lf.landed.sha) .. ")", lf.landed ~= nil and lf.landed.sha == "8ff19d0" and lf.landed.at == at + 900)
+  check("landed: a merge of the same branch name from BEFORE the request doesn't count",
+        core.parseMergeFacts(landedOut({ "8ff19d00304526f097b6f6136e45c80488b6f406\tmain@{" .. (at - 5) .. "}\tmerge fix/demo: Fast-forward" }), r).landed == nil)
+  check("landed: another branch whose name starts the same doesn't count",
+        core.parseMergeFacts(landedOut({ "8ff19d00304526f097b6f6136e45c80488b6f406\tmain@{" .. (at + 9) .. "}\tmerge fix/demo-2: Fast-forward" }), r).landed == nil)
+  check("landed: no reflog section (an older command) -> not landed", f.landed == nil)
+  local lv = core.mergeView(r, core.mergeReadiness(r, lf, item), lf, {})
+  check("landed: the review says so", lv.landed ~= nil and lv.landed.sha == "8ff19d0")
+  check("landed: the card line says it's already merged, not a readiness problem  (" .. tostring(lv.line) .. ")",
+        tostring(lv.line):find("already merged", 1, true) ~= nil and tostring(lv.line):find("8ff19d0", 1, true) ~= nil)
+  local lk, lsrc, lwhy = core.needsYouKind({ status = "done", merge = { phase = "requested", landed = lv.landed, needsYou = lv.needsYou,
+                                                                        waiterAlive = true } }, os.time())
+  check("landed: a heads-up to Dismiss, never a red Needs you  (" .. tostring(lk) .. "/" .. tostring(lsrc) .. ")",
+        lk == "fyi" and lsrc == "merge" and tostring(lwhy):find("Dismiss", 1, true) ~= nil)
+
   -- the queue: one merge per repo at a time, in click order
   local function req(key, repo, phase, extra)
     local t = { key = key, nonce = "n-" .. key, commonDir = repo, phase = phase or "requested", at = 100 }

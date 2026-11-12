@@ -4,6 +4,18 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-11-12 — A merge that happened outside Shepherd can be dismissed
+
+- Fixed: Chargeback Sentinel's batch driver fast-forwarded `fix/alert-split-payments` into master
+  (8ff19d0) while Adam was on Remote Control, and removed its worktree. The merge request stayed
+  "requested": a red Needs you, Merge greyed out with "Not ready: the worktree isn't one of this
+  repo's worktrees any more … 0 commits ahead", and Dismiss refused. Nothing on the card could
+  clear it.
+- The merge check now reads the base's reflog. A request whose branch shows up there as
+  "merge <branch>: …", after the request was made, reads **already merged** as a heads-up with
+  Dismiss. It runs no test gate or checker. Dismiss re-checks git first, and the unit's waiting
+  `cc-merge.sh request` exits as withdrawn.
+
 ## 2026-11-09 — Submit answers on a held question's card
 
 - Fixed: on Chargeback Sentinel's multi-select question, Adam picked his options on the card, found

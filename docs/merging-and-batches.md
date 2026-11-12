@@ -79,6 +79,12 @@ A unit that came back **blocked** stays Needs you. The affordance isn't the Dism
 the stalled tab and the branch, and a blocked unit going quiet is how parallel work gets silently
 lost.
 
+A request whose branch is already in its base reads **already merged** as a heads-up, with
+**Dismiss**. That happens when the branch was fast-forwarded outside Shepherd, by a batch driver or
+by hand. Shepherd reads the base's own reflog for "merge <branch>: …" after the request was made,
+so a rebased branch counts too. Dismiss re-checks git before it clears the request, and the
+unit's waiting `cc-merge.sh request` then exits as withdrawn.
+
 Shepherd checks the request with **its own git** first: the worktree is one of the repo's, on the
 requested branch, clean and ahead of main, and its changes add **no conflict markers**. Otherwise it
 says what's wrong.

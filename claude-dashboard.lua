@@ -7805,7 +7805,14 @@ end
 function FX.mergeDismiss(key)
   local r = core.parseMergeRequest(FX.readFile(FX.MERGE_DIR .. "/" .. key .. ".json"))
   if not r then return false end
-  if r.phase == "requested" or r.phase == "approved" then
+  -- 2026-11-12: a request whose branch is already in its base (merged outside Shepherd) clears
+  -- too -- re-read with Shepherd's own git, never the card's word. Removing the request is what
+  -- its waiting cc-merge.sh reads as "withdrawn" (exit 5).
+  local landed = r.phase == "requested" and (function()
+    local f = FX.mergeFacts(r, true)
+    return type(f) == "table" and type(f.landed) == "table"
+  end)()
+  if (r.phase == "requested" or r.phase == "approved") and not landed then
     FX.mergeAlert("⚠️ That merge is still waiting -- use Merge or Not yet")
     return false
   end
@@ -7912,10 +7919,15 @@ function FX.annotateMerges(list, cfg, bannerOn)
       FX._coach.noted[r.nonce] = true
       pcall(FX.coachNote, r.commonDir, { kind = "blocked", id = "blocked|" .. tostring(r.nonce), branch = r.branch, note = r.note })
     end
+    if r.phase == "requested" then facts = FX.mergeFacts(r) end
+    -- 2026-11-12: already in its base (merged outside Shepherd): no gate, checker or proof to run
+    -- for a merge that has happened -- the review offers Dismiss (core.mergeView's v.landed)
+    local landed = r.phase == "requested" and type(facts) == "table" and type(facts.landed) == "table"
+    if r.phase == "requested" and not landed then gate = FX.mergeGate(r, facts, cfg) end
     if r.phase == "requested" then
-      facts = FX.mergeFacts(r)
-      gate = FX.mergeGate(r, facts, cfg)
       rd = core.mergeReadiness(r, facts, it, gate, FX.fleetMergeWaits(r))   -- 2026-09-29: + blockedBy
+    end
+    if r.phase == "requested" and not landed then
       -- 2026-09-29: the red-first proof, once the gate passed -- shown in the review, read by nothing else
       redFirst = FX.redFirst(r, facts, gate, cfg)
       -- 2026-10-03 (E1a): a red gate's failures split into main's and the branch's -- information only
@@ -24894,7 +24906,9 @@ local HTML = [[
       var m = it && it.merge;
       if(!m || !m.phase){ box.style.display = "none"; return; }
       box.style.display = "block";
-      var asking = m.phase === "requested" && !m.sent;
+      // 2026-11-12: a request whose branch is already in its base (core.mergeView's m.landed) asks
+      // nothing: no Merge / Not yet / Not ready list -- it gets Dismiss, like a finished merge
+      var asking = m.phase === "requested" && !m.sent && !m.landed;
       document.getElementById("dm-head").textContent = m.line || "";
       var facts = mergeFactsLine(m);
       document.getElementById("dm-sub").textContent = (m.summary ? m.summary : "") + (facts ? (m.summary ? "\n" : "") + facts : "");
@@ -24980,7 +24994,7 @@ local HTML = [[
       mergeFillList(document.getElementById("dm-commits"), asking ? commits : [], function(c){ return (c.h || "") + "  " + (c.s || ""); });
       mergeFillList(document.getElementById("dm-files"), asking ? files : [], function(f){ return (f.st || "") + "  " + (f.path || ""); });
       document.getElementById("dm-acts").style.display = asking ? "flex" : "none";
-      document.getElementById("dm-done").style.display = (!asking && (m.needsYou || m.closeNote || m.phase === "merged-dirty")) ? "flex" : "none";
+      document.getElementById("dm-done").style.display = (!asking && (m.needsYou || m.closeNote || m.phase === "merged-dirty" || m.landed)) ? "flex" : "none";
       document.getElementById("dm-closetab").style.display = (m.phase === "merged" && m.canCloseTab) ? "" : "none";
       var bm = document.getElementById("dm-merge");
       bm.disabled = !(m.ready && !m.queued);

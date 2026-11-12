@@ -1701,6 +1701,8 @@ function M.needsYouKind(it, now)
   local m = type(it.merge) == "table" and it.merge or nil
   if m and m.needsYou then
     if m.phase == "requested" then
+      -- 2026-11-12: its branch is already in the base -- Merge and Not yet can't change anything
+      if type(m.landed) == "table" then return "fyi", "merge", "it's already merged -- Dismiss to clear it" end
       if m.waiterAlive == false then return "fyi", "merge", "nothing is waiting for the answer any more" end
       -- 2026-09-22: while the readiness gate runs, the review's Merge button is disabled --
       -- there is nothing on the card to press. Two of these at once read as Shepherd re-asking
@@ -2468,6 +2470,9 @@ function M.mergeFactsCmd(req)
     -- 2026-10-03 (E4): every changed file, UNCAPPED, for grant grading alone (M.grantRisk): a risky
     -- file past MERGE_FACTS_MAX_FILES must still hold a merge on the batch grant
     "echo @@allfiles", G .. " -c core.quotepath=off diff --name-status --find-renames " .. dots .. " 2>/dev/null",
+    -- 2026-11-12: the base's own record of merges, so a branch fast-forwarded into it OUTSIDE
+    -- Shepherd (a batch driver, by hand) reads as landed (M.parseMergeFacts' f.landed)
+    "echo @@landed", G .. " reflog show --date=unix --format='%H%x09%gd%x09%gs' refs/heads/" .. req.base .. " -n 200 2>/dev/null",
   }, "; ")
 end
 
@@ -2508,6 +2513,18 @@ function M.parseMergeFacts(out, req)
         if from then f.allFiles[#f.allFiles + 1] = { st = st, path = unq(to), from = unq(from) }
         else f.allFiles[#f.allFiles + 1] = { st = st, path = unq(rest) } end
       end
+    end
+  end
+  -- 2026-11-12: landed = the base's reflog has "merge <branch>: …" from after the request was made
+  -- (an older merge of a branch with the same name doesn't count). Chargeback Sentinel's
+  -- fix/alert-split-payments was fast-forwarded by its batch driver and the request sat red with
+  -- nothing to press. Its commits were rebased, so matching patches would have missed it.
+  local reqAt, want = tonumber(req.at) or 0, "merge " .. tostring(req.branch) .. ":"
+  for _, l in ipairs(sec.landed or {}) do
+    local sha, at, subj = l:match("^(%x+)\t[^\t]*@{(%d+)}\t(.*)$")
+    at = tonumber(at)
+    if sha and at and at >= reqAt and subj:sub(1, #want) == want and (not f.landed or at > f.landed.at) then
+      f.landed = { sha = sha:sub(1, 7), at = at }
     end
   end
   return f
@@ -3047,6 +3064,9 @@ function M.mergeLine(v)
   if type(v) ~= "table" then return nil end
   local b, base = tostring(v.branch or "?"), tostring(v.base or "main")
   if v.phase == "requested" then
+    if type(v.landed) == "table" then
+      return "✓ already merged: " .. b .. " is in " .. base .. " (" .. tostring(v.landed.sha) .. "), merged outside Shepherd -- Dismiss to clear"
+    end
     if v.sent then return "⇡ merge approved: " .. b .. " is starting" end
     if v.queued then
       return "⇡ queued to merge " .. b .. " (" .. ((v.queued == 1) and "next" or ("#" .. v.queued)) .. " in line)"
@@ -3097,6 +3117,11 @@ function M.mergeView(req, rd, facts, q, gate, checker, redFirst)
   if req.phase == "requested" then
     v.ready = rd and rd.ready or false
     v.checking = (rd == nil) or (rd.checking == true)
+    -- 2026-11-12: its branch is already in the base (merged outside Shepherd): nothing to approve
+    if type(facts) == "table" and type(facts.landed) == "table" then
+      v.landed = facts.landed
+      v.ready, v.checking = false, false
+    end
     -- NEVER v.queued: that is the APPROVAL queue's position (q.queued above), a different
     -- thing entirely. This one is the repo's single TEST-gate lane.
     v.gateQueued = (rd and rd.gateQueued) and true or nil

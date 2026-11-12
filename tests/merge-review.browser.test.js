@@ -223,6 +223,25 @@ try {
     grant.cw > 0 && grant.sw <= grant.cw);
   check("...and Adam's own Merge button stays live: his click is never graded", grant.mergeDisabled === false);
 
+  // ---- a request whose branch landed outside Shepherd (2026-11-12) ----
+  // 2026-11-12: Chargeback Sentinel's fix/alert-split-payments was merged into master by its batch
+  // driver; the review kept Merge (greyed) and Not yet, and no Dismiss, so nothing cleared it.
+  const landed = await page.evaluate((r) => {
+    const h = JSON.parse(JSON.stringify(r));
+    h.merge.landed = { sha: "8ff19d0", at: 1794508776 };
+    h.merge.line = "✓ already merged: fix/alert-split-payments is in master (8ff19d0), merged outside Shepherd -- Dismiss to clear";
+    h.merge.needsYou = true; h.merge.ready = false;
+    h.merge.problems = ["the worktree isn't one of this repo's worktrees any more", "nothing to merge: 0 commits ahead of master"];
+    delete h.merge.claims;
+    renderMerge(h);
+    const vis = (id) => { const e = document.getElementById(id); return !!e && getComputedStyle(e).display !== "none"; };
+    return { acts: vis("dm-acts"), done: vis("dm-done"), dismiss: vis("dm-dismiss"), closeTab: vis("dm-closetab"),
+             problems: document.getElementById("dm-problems").textContent };
+  }, review);
+  check("an already-merged request offers Dismiss  (" + JSON.stringify(landed) + ")", landed.done && landed.dismiss);
+  check("...not Merge and Not yet, which can't do anything for it", !landed.acts);
+  check("...and no 'Not ready' list for a merge that already happened", landed.problems === "");
+
   await browser.close();
   finish();
 })().catch((e) => { console.log("FAIL - browser run crashed: " + e.message); process.exit(1); });

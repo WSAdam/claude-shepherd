@@ -1098,5 +1098,41 @@ do
   os.remove(MD .. "/rq1.json"); os.remove(T .. "/status/rq1.json")
 end
 
+-- ---- a request whose branch landed outside Shepherd (2026-11-12) ----
+-- 2026-11-12: Chargeback Sentinel's fix/alert-split-payments was fast-forwarded into master by
+-- its batch driver while Adam was on Remote Control, its worktree removed; the request sat red
+-- with Merge greyed out and Dismiss refused, so the card had nothing to press.
+do
+  local wt = newUnit("ld1", "/r/LD", "fix/alert-split-payments", "59d1d373a7066dfad678335ff4406c648be7e9b2", 1793, 1993)
+  local function gone(landedLine)
+    FACTS[wt] = table.concat({ "@@listed", "worktree /r/LD", "HEAD a", "branch refs/heads/main", "",
+      "@@head", "@@sha", "@@status", "@@ahead", "0", "@@behind", "0", "@@commits", "@@stat", "@@files",
+      "@@landed", landedLine or "", "" }, "\n")
+  end
+  gone("8ff19d00304526f097b6f6136e45c80488b6f406\tmain@{" .. (now + 30) .. "}\tmerge fix/alert-split-payments: Fast-forward")
+  tick(); tick()
+  local li
+  for _, it in ipairs(fx._shownItems or {}) do if it.key == "ld1" then li = it end end
+  local m = li and li.merge
+  check("a request whose branch is already in its base reads already merged  (" .. tostring(m and m.line) .. ")",
+        m and m.landed and tostring(m.line):find("already merged", 1, true) ~= nil)
+  check("...a heads-up, not a red Needs you  (" .. tostring(li and li.needsYou) .. ")", li and li.needsYou == "fyi")
+  quiet(function() fx.mergeDismiss("ld1") end)
+  check("...and Dismiss clears it (the waiting script then exits as withdrawn)", read(MD .. "/ld1.json") == nil)
+
+  -- a request whose branch did NOT land is still refused, even with its worktree gone
+  wt = newUnit("ld2", "/r/LE", "fix/not-merged", "aaaa", 1794, 1994)
+  local function gone2()
+    FACTS[wt] = table.concat({ "@@listed", "worktree /r/LE", "HEAD a", "branch refs/heads/main", "",
+      "@@head", "@@sha", "@@status", "@@ahead", "0", "@@behind", "0", "@@commits", "@@stat", "@@files",
+      "@@landed", "1111111111111111111111111111111111111111\tmain@{" .. (now + 30) .. "}\tcommit: unrelated", "" }, "\n")
+  end
+  gone2()
+  tick(); tick()
+  quiet(function() fx.mergeDismiss("ld2") end)
+  check("Dismiss still refuses a waiting request whose branch never reached its base", read(MD .. "/ld2.json") ~= nil)
+  os.remove(MD .. "/ld2.json"); os.remove(T .. "/status/ld2.json"); os.remove(T .. "/status/ld1.json")
+end
+
 check("the whole flow never focused a window or pressed a key", taps == 0 and focusCalls == 0)
 finish()

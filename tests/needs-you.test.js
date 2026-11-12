@@ -98,8 +98,10 @@ check("the pulse is styled", /\.tile\.needs \{ animation:askglow/.test(src));
 const rm = slice("    function renderMerge(it){", "\n    }\n") || "";
 // 2026-09-15 requirement change: a merged unit's leftover tab is no longer "needs you" (it's
 // housekeeping), but its review keeps the buttons -- any finished merge with a note gets them.
+// 2026-11-12 REQUIREMENT CHANGE: a request whose branch already landed outside Shepherd (m.landed)
+// gets the finished-state buttons too -- Chargeback Sentinel's had nothing to press.
 check("the review shows its finished-state buttons for any finished merge with a note (needs you or not)",
-      rm.indexOf('document.getElementById("dm-done").style.display = (!asking && (m.needsYou || m.closeNote || m.phase === "merged-dirty")) ? "flex" : "none";') >= 0);
+      rm.indexOf('document.getElementById("dm-done").style.display = (!asking && (m.needsYou || m.closeNote || m.phase === "merged-dirty" || m.landed)) ? "flex" : "none";') >= 0);
 // 2026-09-22 requirement change: a closeNote is no longer proof that Close tab could do
 // anything. Four of its five sources are GUARDS deliberately holding the tab open (a post-merge
 // gate running, one queued behind it, main red after the merge, a merge Shepherd couldn't
