@@ -16,7 +16,10 @@
 # Out of the way (no output: the tab shows its own picker, exactly as without the hook)
 # when ask.enabled is switched off (Settings > Approvals, or the config),
 # and when the panel heartbeat is stale, there are no questions, Adam releases the question,
-# or ask.waitSeconds (default 900, max 3600) runs out.
+# or ask.waitSeconds (default 120, max 3600) runs out. And while Adam is away from the Mac
+# (Shepherd keeps $CC_ASK_DIR/.away: the screen locked, Shepherd's 🔒 up, or no keyboard/mouse
+# for ask.awayIdleSeconds): the question goes straight to the tab, where Remote Control shows it,
+# and one already held is let go the moment he walks away (2026-11-12, Adam's call).
 # Only the decision JSON is ever written to stdout; logs go to stderr.
 #
 # The round trip (2026-09-18, measured live): the status dir's watcher is slowed by the panel's
@@ -56,8 +59,16 @@ CWD="$(cc_get "$INPUT" '.cwd')"
 [ -n "$CWD" ] || CWD="$PWD"
 KEY="$(cc_key "$SESSION_ID" "$CWD")"
 
-WAIT="${CC_ASK_WAIT:-$(cc_config '.ask.waitSeconds' '900')}"
-case "$WAIT" in ''|*[!0-9]*) WAIT=900 ;; esac
+# 2026-11-12: Adam away from the Mac -- the tab (and Remote Control) takes the question at once
+AWAY_FILE="$CC_ASK_DIR/.away"
+if [ -f "$AWAY_FILE" ]; then
+  echo "[cc-ask] 🚶 Adam is away from the Mac -- the tab's picker takes the question, so Remote Control shows it ($KEY)" >&2
+  exit 0
+fi
+
+# 2026-11-12: 2 minutes, was 15 (Adam's call): after that the tab and Remote Control have it too
+WAIT="${CC_ASK_WAIT:-$(cc_config '.ask.waitSeconds' '120')}"
+case "$WAIT" in ''|*[!0-9]*) WAIT=120 ;; esac
 [ "$WAIT" -ge 1 ] || WAIT=1
 [ "$WAIT" -le 3600 ] || WAIT=3600   # the hook's settings.json timeout is 3630s
 
@@ -115,6 +126,11 @@ while [ "$SECONDS" -lt "$WAIT" ]; do
     else
       echo "[cc-ask] ⚠️ an answer for another question was thrown away ($KEY)" >&2
     fi
+  fi
+  # 2026-11-12: Adam walked away from the Mac -- hand it to the tab, where Remote Control shows it
+  if [ -f "$AWAY_FILE" ]; then
+    echo "[cc-ask] 🚶 Adam walked away from the Mac -- the tab's picker takes the question ($KEY)" >&2
+    exit 0
   fi
   # cc-status.sh's read-modify-write can land a pre-arm snapshot over ours (#28): put the
   # nonce back (~1Hz) so the card keeps its buttons. A foreign nonce is a newer question.

@@ -113,6 +113,11 @@ local fakeApp = { allWindows = function() return {} end, activate = function() e
 rawset(hs.application, "applicationsForBundleID", function() return { fakeApp } end)
 rawset(hs.application, "find", function() return fakeApp end)
 hs.reload = function() end
+-- 2026-11-12: the Mac's idle time and screen lock, which decide whether Adam is away from it
+local IDLE, LOCKED = 0, false
+hs.host = setmetatable({ idleTime = function() return IDLE end }, { __index = function() return mkstub() end })
+hs.caffeinate = setmetatable({ sessionProperties = function() return { CGSSessionScreenIsLocked = LOCKED or nil } end },
+  { __index = function() return mkstub() end })
 setmetatable(hs, { __index = function() return mkstub() end })
 _G.hs = hs
 
@@ -252,6 +257,24 @@ do
   click("answer", "s1", "1")
   check("...and so does a one-click answer", exists(ANS) and item() ~= nil and item().askHeld ~= true)
   os.remove(ANS)
+end
+
+-- ---- away from the Mac, the tab takes questions (2026-11-12) ----
+-- 2026-11-12: on Remote Control Adam saw none of his sessions' questions -- each was held on its
+-- Shepherd card, and a held question never reaches the tab. Shepherd now keeps an away flag in the
+-- ask dir that cc-ask.sh reads: up while the Mac is locked or idle, down when he's back.
+do
+  local AWAY = ASK .. "/.away"
+  IDLE, LOCKED = 0, false; tick()
+  check("at the Mac: no away flag", not exists(AWAY))
+  IDLE = 130; tick()
+  check("2 minutes without keyboard or mouse: Shepherd raises the away flag cc-ask.sh reads", exists(AWAY))
+  IDLE = 3; tick()
+  check("back at the Mac: the flag goes", not exists(AWAY))
+  LOCKED = true; tick()
+  check("the screen locked: away at once", exists(AWAY))
+  LOCKED = false; tick()
+  check("...and unlocked: back", not exists(AWAY))
 end
 
 check("no keystroke anywhere", taps == 0)

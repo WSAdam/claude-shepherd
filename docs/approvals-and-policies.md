@@ -338,8 +338,13 @@ the tab:
   The hook looks for your answer every 0.1 seconds.
 - **Answer in the tab instead** hands the question back to the tab's own picker and takes you
   there. The tab's picker also takes over at once if Shepherd isn't running when the question is
-  asked, and after `ask.waitSeconds` (default 900) otherwise, including when Shepherd quits while
-  holding it.
+  asked, and after `ask.waitSeconds` (default 120, 2 minutes; it was 15) otherwise, including when
+  Shepherd quits while holding it.
+- **Away from the Mac, the tab takes it.** While the screen is locked, Shepherd's 🔒 is up, or
+  there has been no keyboard or mouse input for `ask.awayIdleSeconds` (default 120), a question
+  isn't held: it goes straight to the tab, where Remote Control shows it on your phone. A question
+  already held is handed to the tab the moment you walk away. Shepherd keeps
+  `~/.claude/cc-ask/.away` while you're away, and the hook reads it.
 - Approve / Deny (and Approve all) skip a held question: it is answered with its own buttons.
 
 Your answer is `~/.claude/cc-ask/<key>.answer`, bound to the question it's for. The hook is wired by

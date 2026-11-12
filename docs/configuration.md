@@ -56,7 +56,7 @@ File-only switches include, among others: `rules.enabled`, `schedules.enabled` a
 `gate.fence`, `resume.enabled`, `restart.waveMinutes` and `restart.keepHours`, `lease.*`,
 `coach.*`, `decide.waitSeconds`, `radar.*`, `schedLock.*`, `timeLost.*`, `score.weights`,
 `subagents.*`, `status.resumeSlack`, `autoContinue.backoff.*`, `fleet.enabled`, `commits.*`,
-`usage.limitAlerts.*`, `ask.waitSeconds`, `tabless.autoEndMinutes`, `escalation.hung`, `search.*`,
+`usage.limitAlerts.*`, `ask.waitSeconds`, `ask.awayIdleSeconds`, `tabless.autoEndMinutes`, `escalation.hung`, `search.*`,
 `worklist.*`, `decisions.*`, `notifications.days`, `templates.sourceDir`,
 `context.autoCompactFraction`, `stopGuards.*`, `seance.*`, `alerts.onScreen` and
 `alerts.voiceEvents`, and the `keystrokes`, `tabBridge` and `stacks` sections.
@@ -111,6 +111,8 @@ install's [defaults](../defaults/cc-config.json) differ.
 | `gate.fence` | `false` | `true` | [Worktree fence](approvals-and-policies.md#worktree-fence) |
 | `policies.alwaysAsk.patterns` | `[]` (the built-ins always apply) | | [Always-ask commands](approvals-and-policies.md#always-ask-commands) |
 | `decide.waitSeconds` | `1800` (at most 7200) | | [Decisions inbox](approvals-and-policies.md#decisions-inbox) |
+| `ask.waitSeconds` | `120` (at most 3600) | | [Answer questions from Shepherd](approvals-and-policies.md#answer-questions-from-shepherd) |
+| `ask.awayIdleSeconds` | `120` (30 to 3600) | | [Answer questions from Shepherd](approvals-and-policies.md#answer-questions-from-shepherd) |
 | `stopGuards.question` | `false` | `true` | [Questions asked in prose come back](approvals-and-policies.md#questions-asked-in-prose-come-back) |
 | `stopGuards.fakeDone` | `false` | `true` | ["Done" is checked against the diff](approvals-and-policies.md#done-is-checked-against-the-diff) |
 | `stopGuards.unfinished` | `false` | `true` | [Finished units get a merge reminder](approvals-and-policies.md#finished-units-get-a-merge-reminder) |
@@ -221,7 +223,7 @@ For the hook scripts (and the test suite):
 | `CC_GATE_TOOLS` | from `gate.tools` | Overrides the gated tools |
 | `CC_GATE_TIMEOUT` | `120` | Seconds the gate waits before stepping aside |
 | `CC_PANEL_MAX_AGE` | `5` | How old the panel heartbeat may be before the gate and the question hook treat the panel as gone |
-| `CC_ASK_WAIT` | from `ask.waitSeconds` (900) | Seconds a held question waits before going back to the tab (1–3600) |
+| `CC_ASK_WAIT` | from `ask.waitSeconds` (120) | Seconds a held question waits before going back to the tab (1–3600) |
 | `CC_DECIDE_WAIT` | from `decide.waitSeconds` (1800) | Seconds a `cc-decide.sh --blocking` question waits before it prints the default |
 | `CC_STATUS_DIR` | `~/.claude/cc-status` | Where the status files go ([Development](development.md#test-it-without-claude)) |
 | `CC_STATUS_DEBUG` | unset | Any value appends raw hook input to `cc-status/.debug.log` (so does a `cc-status/.debug-hooks` file) |

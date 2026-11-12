@@ -17002,5 +17002,29 @@ do
   eq("...and a real sh runs it as those words", ran, "a b|it's")
 end
 
+-- ---- a question goes to the tab while Adam is away from the Mac (2026-11-12) ----
+-- 2026-11-12: on Remote Control Adam saw none of his sessions' questions: cc-ask.sh held each
+-- one on its Shepherd card for up to 15 minutes, and a held question never reaches the tab, so
+-- the phone had nothing to show. Adam: hold only while he's at the Mac.
+do
+  check("away: the Mac locked", core.awayFromMac({ idle = 0, locked = true }, 120) == true)
+  check("away: Shepherd's own lock is up", core.awayFromMac({ idle = 0, shepherdLocked = true }, 120) == true)
+  check("away: no keyboard or mouse for the whole threshold", core.awayFromMac({ idle = 120 }, 120) == true)
+  check("at the Mac: input a little while ago", core.awayFromMac({ idle = 119 }, 120) == false)
+  check("at the Mac: idle time unreadable and no lock -- behave as before (hold)", core.awayFromMac({}, 120) == false)
+  check("at the Mac: nothing known at all", core.awayFromMac(nil, 120) == false)
+  eq("away threshold: 2 minutes when the config says nothing", core.askAwaySeconds({}), 120)
+  eq("away threshold: ask.awayIdleSeconds", core.askAwaySeconds({ ask = { awayIdleSeconds = 300 } }), 300)
+  eq("away threshold: never below 30s", core.askAwaySeconds({ ask = { awayIdleSeconds = 5 } }), 30)
+  eq("away threshold: never above an hour", core.askAwaySeconds({ ask = { awayIdleSeconds = 99999 } }), 3600)
+  eq("away threshold: junk falls back to 2 minutes", core.askAwaySeconds({ ask = { awayIdleSeconds = "soon" } }), 120)
+  check("Settings keep a hand-set ask.awayIdleSeconds", (function()
+    for _, k in ipairs(core.SETTINGS_KEEP_SUBKEYS and core.SETTINGS_KEEP_SUBKEYS.ask or {}) do
+      if k == "awayIdleSeconds" then return true end
+    end
+    return false
+  end)())
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

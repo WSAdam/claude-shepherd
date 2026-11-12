@@ -4,6 +4,20 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-11-12 — Questions reach Remote Control while you're away from the Mac
+
+- Fixed: on Remote Control Adam saw none of his sessions' questions. While Shepherd runs,
+  `cc-ask.sh` held each one on its Shepherd card for up to 15 minutes. A held question never
+  reaches the tab, so the phone had nothing to show.
+- While the Mac is locked, Shepherd's 🔒 is up, or there's been no keyboard or mouse for 2 minutes
+  (`ask.awayIdleSeconds`), a question now goes straight to its tab, where Remote Control shows it.
+  A question already held is handed to the tab the moment Adam walks away. Shepherd keeps
+  `~/.claude/cc-ask/.away` while he's away, and the hook reads it.
+- Changed (Adam's call): at the Mac, a question is held on its card for 2 minutes instead of 15
+  (`ask.waitSeconds` default 120), then the tab and Remote Control get it too. A question can't be
+  answerable in both places at once: while the hook holds it the tab draws no picker, and once
+  the picker is up Shepherd can't click it.
+
 ## 2026-11-12 — A merge that happened outside Shepherd can be dismissed
 
 - Fixed: Chargeback Sentinel's batch driver fast-forwarded `fix/alert-split-payments` into master

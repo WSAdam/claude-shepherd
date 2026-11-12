@@ -204,6 +204,40 @@ assert_eq "...without disturbing the nonce" "$N" "$(jq -r '.ask_nonce // empty' 
 answer "$(jq -nc --arg n "$N" '{nonce:$n, release:true}')"
 wait_for "$TMP/rc.k" 80
 
+# ---- away from the Mac: the question goes to the tab, where Remote Control shows it (2026-11-12) ----
+# 2026-11-12: on Remote Control Adam saw none of his sessions' questions -- each was held on its
+# Shepherd card for up to 15 minutes, and a held question never reaches the tab. Adam's call: hold
+# for 2 minutes, and only while he's at the Mac (Shepherd keeps $CC_ASK_DIR/.away while he isn't).
+fresh; alive; rm -f "$CC_CONFIG_FILE"
+(input | env -u CC_ASK_WAIT bash "$H" > "$TMP/out.l" 2> "$TMP/err.l"; echo $? > "$TMP/rc.l") &
+N="$(wait_nonce)" || N=""
+until_left="$(( $(jq -r '.ask_until // 0' "$SF") - $(date +%s) ))"
+[ "$until_left" -ge 115 ] && [ "$until_left" -le 121 ] && got=yes || got="no (${until_left}s)"
+assert_eq "with nothing configured, a held question goes to the tab after 2 minutes" "yes" "$got"
+answer "$(jq -nc --arg n "$N" '{nonce:$n, release:true}')"
+wait_for "$TMP/rc.l" 80
+
+fresh; alive; opt_in; mkdir -p "$CC_ASK_DIR"; : > "$CC_ASK_DIR/.away"
+start=$(date +%s); out="$(input | CC_ASK_WAIT=20 bash "$H" 2> "$TMP/err.m")"; took=$(( $(date +%s) - start ))
+assert_eq "Adam away from the Mac: the question isn't held, nothing on stdout" "" "$out"
+[ "$took" -le 2 ] && got=yes || got="no (${took}s)"
+assert_eq "...it goes to the tab at once" "yes" "$got"
+assert_eq "...no nonce, so the card doesn't offer answers the hook won't take" "" "$(jq -r '.ask_nonce // empty' "$SF")"
+case "$(cat "$TMP/err.m")" in *away*) got=said ;; *) got=silent ;; esac
+assert_eq "...and the hook's log says why" "said" "$got"
+rm -f "$CC_ASK_DIR/.away"
+
+fresh; alive; opt_in
+run n
+N="$(wait_nonce)" || N=""
+assert_eq "(a question is held while Adam is at the Mac)" "yes" "$([ -n "$N" ] && echo yes || echo no)"
+: > "$CC_ASK_DIR/.away"
+wait_for "$TMP/rc.n" 30 && got=yes || got=no
+assert_eq "Adam walks away: the held question is handed to the tab within a few seconds" "yes" "$got"
+assert_eq "...with nothing on stdout (the tab's own picker takes it)" "" "$(cat "$TMP/out.n" 2>/dev/null)"
+assert_eq "...and its nonce is gone from the card" "" "$(jq -r '.ask_nonce // empty' "$SF")"
+rm -f "$CC_ASK_DIR/.away"
+
 # ---- SessionEnd leaves no answer behind ----
 mkdir -p "$CC_ASK_DIR"; : > "$CC_ASK_DIR/s1.answer"; : > "$CC_ASK_DIR/s1.answer.claim.99"
 ( . "$ROOT/cc-lib.sh"; cc_remove s1 )

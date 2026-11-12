@@ -6740,6 +6740,36 @@ function FX.releaseAsk(key, formNote)
   return true
 end
 
+-- 2026-11-12: is Adam away from the Mac? While he is, cc-ask.sh holds no question for the card --
+-- it goes to the tab, where Remote Control shows it -- and lets go of one it's holding. Shepherd
+-- says so with $CC_ASK_DIR/.away (the quiet ask dir), written only when it changes. Adam's call:
+-- held questions never reached his phone.
+FX.ASK_AWAY_FILE = FX.ASK_DIR .. "/.away"
+function FX.awayState()
+  local s = {}
+  pcall(function() s.idle = tonumber(hs.host.idleTime()) end)
+  pcall(function()
+    local p = hs.caffeinate.sessionProperties()
+    s.locked = type(p) == "table" and p.CGSSessionScreenIsLocked == true or nil
+  end)
+  pcall(function() s.shepherdLocked = FX.shepherdLocked and FX.shepherdLocked() or nil end)
+  return s
+end
+function FX.stepAway(cfg)
+  local away = core.awayFromMac(FX.awayState(), core.askAwaySeconds(cfg))
+  if away == FX._awayWritten then return away end
+  if away then
+    os.execute('mkdir -p "' .. FX.ASK_DIR .. '" 2>/dev/null')
+    if not FX.writeFileAtomic(FX.ASK_AWAY_FILE, tostring(os.time())) then return away end
+    print("[cc-dashboard] 🚶 away from the Mac -- questions go to their tabs, where Remote Control shows them")
+  else
+    os.remove(FX.ASK_AWAY_FILE)
+    if FX._awayWritten ~= nil then print("[cc-dashboard] 👋 back at the Mac -- questions are held for the cards again") end
+  end
+  FX._awayWritten = away
+  return away
+end
+
 -- Every tick: mark held questions (the card and the Instances row answer them) and alert once.
 function FX.annotateAsks(list, bannerOn)
   local now = FX.now()
@@ -14498,6 +14528,8 @@ end
 function FX.lockCheck(input) return core.lockVerify(FX.lockLoad(), input, lockHasher) end
 
 local lockState = nil
+-- 2026-11-12: Shepherd's own 🔒 is up -- Adam is away, so questions go to the tab (FX.stepAway)
+function FX.shepherdLocked() return lockState ~= nil end
 local function lockRelease()
   if not lockState then return end
   pcall(function() if lockState.tap then lockState.tap:stop() end end)
@@ -19868,7 +19900,7 @@ local HTML = [[
 
       <div class="s-sec">Questions</div>
       <label class="s-row"><input type="checkbox" id="s-ask-en"> Answer questions in Shepherd (a session's AskUserQuestion is held for its card)</label>
-      <div class="s-help">On by default. On: while Shepherd is running, a session's question is held by the cc-ask.sh hook and you answer it on its card &mdash; each option with its explanation &mdash; with no tab. "Answer in the tab instead" hands it back, and the tab's own picker takes over after 15&nbsp;min or when Shepherd isn't running. Off: questions go straight to the tab, as Claude Code does on its own. Takes effect on the next question; needs the hooks from <code>make setup</code>.</div>
+      <div class="s-help">On by default. On: while Shepherd is running, a session's question is held by the cc-ask.sh hook and you answer it on its card &mdash; each option with its explanation &mdash; with no tab. "Answer in the tab instead" hands it back, and the tab's own picker takes over after 2&nbsp;min, at once while you're away from the Mac (locked, or no keyboard or mouse for 2&nbsp;min, so Remote Control shows it), or when Shepherd isn't running. Off: questions go straight to the tab, as Claude Code does on its own. Takes effect on the next question; needs the hooks from <code>make setup</code>.</div>
 
       <div class="s-sec">Approval gate (advanced)</div>
       <label class="s-row"><input type="checkbox" id="s-gate"> Arm the approval gate (route permission prompts to this panel)</label>
@@ -30929,6 +30961,8 @@ function FX._refreshBody()
   -- arithmetic evaluates it as 0, AGE blows past the threshold, and the gate
   -- judges the LIVE panel dead -- silently falling back to the native prompt.
   FX.writeFileAtomic(HEARTBEAT, tostring(now))
+  -- 2026-11-12: away from the Mac? cc-ask.sh then sends questions to the tab (Remote Control)
+  pcall(FX.stepAway, cfg)
   -- Overlay persistent relabels by project path (display-only; .name stays the
   -- real target). A new session in a labeled folder inherits the name (F1).
   core.applyLabelsByCwd(list, labels)

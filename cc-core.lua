@@ -550,6 +550,26 @@ function M.askReleaseNote(text)
   return picked .. " picked, Submit was " .. (n.submitOn == true and "on" or "off")
 end
 
+-- Is Adam away from the Mac? s = { idle = seconds since the last keyboard/mouse input,
+-- locked = the macOS screen is locked, shepherdLocked = Shepherd's own 🔒 is up }. While he is,
+-- cc-ask.sh doesn't hold a question for the card: it goes to the tab, where Remote Control shows
+-- it (2026-11-12, Adam's call -- held questions never reached his phone). Unknown idle time and
+-- no lock reads as at the Mac, which holds exactly as before.
+function M.awayFromMac(s, threshold)
+  if type(s) ~= "table" then return false end
+  if s.locked == true or s.shepherdLocked == true then return true end
+  local idle, t = tonumber(s.idle), tonumber(threshold) or 120
+  return idle ~= nil and idle >= t
+end
+
+M.ASK_AWAY_SECONDS = 120
+-- ask.awayIdleSeconds: how long without input counts as away (30s .. 1h, default 2 minutes).
+function M.askAwaySeconds(cfg)
+  local n = tonumber(M.config(cfg, "ask.awayIdleSeconds", M.ASK_AWAY_SECONDS))
+  if not n then return M.ASK_AWAY_SECONDS end
+  return math.max(30, math.min(3600, math.floor(n)))
+end
+
 -- What the card and the Instances row show for a held question. simple = one single-choice
 -- question, so a click on an option answers it outright.
 function M.askView(item)
@@ -12944,7 +12964,7 @@ M.SETTINGS_KEEP_SUBKEYS = {
   -- hostPressure.{cpu,mem,disk} thresholds (no UI input) must survive a Save.
   insights = { "hostPressure" },
   -- 2026-09-18: Settings > Approvals manages ask.enabled only; the hand-edited wait survives.
-  ask = { "waitSeconds", "_comment" },
+  ask = { "waitSeconds", "awayIdleSeconds", "_comment" },
   -- 2026-09-28: the form rebuilds autoContinue from enabled/delaySeconds/maxAttempts; the
   -- back-off (startSeconds/maxSeconds) has no input.
   -- dryRun (2026-09-29): Settings sends the dry-run switches apart (core.applyDryRunFlags), so every
@@ -27204,7 +27224,7 @@ M.FEATURES = {
     what = "Each worktree Shepherd starts a session for -- a New worktree tab, a batch unit, Instances Open -- gets its own port and database path (lease.portFrom-portTo, lease.dbDir). The session is told them in its prompt and at every start, /clear or compaction, and they are in $(git rev-parse --git-dir)/shepherd-lease.env for a project to source. The card shows :PORT. Once the worktree is gone the lease is freed, and the database file Shepherd named goes with it.",
     why = "Parallel units that run dev servers or databases never fight over one port or one file." },
   { key = "answers", cat = "Control", new = true, title = "Answer questions from Shepherd",
-    what = "When a session asks you something, its card pulses with the question and you get one alert; its answers are buttons right there (and on its Instances row). Your click goes straight to the session -- no tab to find. Several parts, multi-select or free text: pick per part, then the Submit answers bar. Answer in the tab instead hands it back to the tab.",
+    what = "When a session asks you something, its card pulses with the question and you get one alert; its answers are buttons right there (and on its Instances row). Your click goes straight to the session -- no tab to find. Several parts, multi-select or free text: pick per part, then Submit answers. Answer in the tab instead hands it back to the tab, and so do 2 minutes unanswered. Away from the Mac (locked, or no keyboard or mouse for 2 minutes) a question goes straight to its tab, where Remote Control shows it.",
     why = "A session waiting on you shouldn't wait for you to find its tab -- and you always know when one is." },
   { key = "stopguards", cat = "Control", new = true, title = "Questions asked in prose come back",
     what = "A turn that ends by asking you something in prose (\"Want me to push?\", \"A or B?\") is sent back once, to ask it with the question tool instead, so it lands on the card as buttons. Code, quotes and a question answered in the same breath don't count. Off in plan mode, in Shepherd's own runs and where Shepherd isn't running. stopGuards.question in ~/.claude/cc-config.json, on by default.",
