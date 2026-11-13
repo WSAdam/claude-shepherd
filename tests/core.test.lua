@@ -17050,5 +17050,48 @@ do
         core.approvalDismissed({ status = "approval", updated = 100 }, 101) == true)
 end
 
+-- ---- right-click Clear status (2026-11-13) ----
+-- 2026-11-13 (Adam): "from right click i'd like a way to clear a set status on a card" -- for a card
+-- Shepherd reads wrong. Shepherd's own live holds are never wrong, so they aren't cleared.
+do
+  local now = 1000
+  local ask = { { question = "Switch to Opus 4.8?", options = { { label = "Yes" } } } }
+  local held = { status = "approval", ask_nonce = "n1", ask_until = now + 60,
+                 pending = { tool = "AskUserQuestion", ask = ask } }
+  check("Clear status: a red card can be cleared",
+        core.statusClearable({ status = "approval", pending = { tool = "Bash" } }, now) == true)
+  check("Clear status: an error card can be cleared", core.statusClearable({ status = "error" }, now) == true)
+  check("Clear status: a card frozen at Working can be cleared", core.statusClearable({ status = "working" }, now) == true)
+  local ok, why = core.statusClearable({ status = "done" }, now)
+  check("Clear status: nothing to clear on a finished card, and no menu line for it", ok == false and why == nil)
+  ok, why = core.statusClearable({ status = "idle" }, now)
+  check("Clear status: ...nor on an idle one", ok == false and why == nil)
+  ok, why = core.statusClearable(held, now)
+  check("Clear status: a question Shepherd holds on the card isn't cleared, and says why",
+        ok == false and tostring(why):find("held on the card", 1, true) ~= nil)
+  ok, why = core.statusClearable({ status = "approval", gate = "waiting", gate_nonce = "g1", pending = { tool = "Bash" } }, now)
+  check("Clear status: the approval gate holding a tool isn't cleared -- Approve or Deny it",
+        ok == false and tostring(why):find("Approve or Deny", 1, true) ~= nil)
+  check("Clear status: a held question past its deadline is no hold any more",
+        core.statusClearable({ status = "approval", ask_nonce = "n1", ask_until = now - 1, pending = held.pending }, now) == true)
+  ok, why = core.statusClearable({ status = "approval", remote = { host = "box" } }, now)
+  check("Clear status: a remote card isn't cleared here", ok == false and why ~= nil)
+
+  local before = { status = "approval", session_id = "eed88578", cwd = "/r", model = "claude-opus-5-5",
+                   since = 1, updated = 1, pending = { tool = "AskUserQuestion", prompt = true, ask = ask },
+                   ask_nonce = "n0", ask_until = now - 5, error_kind = "rate_limit", error_message = "You've hit your limit" }
+  local text = core.clearedStatus(core.json.encode(before), now)
+  local after = text and core.json.decode(text) or {}
+  check("Clear status: the file reads idle, since now", after.status == "idle" and after.since == now and after.updated == now)
+  check("Clear status: the gone prompt, the error and a dead hold's fields are dropped",
+        after.pending == nil and after.error_kind == nil and after.error_message == nil
+        and after.ask_nonce == nil and after.ask_until == nil)
+  check("Clear status: everything else is kept", after.session_id == "eed88578" and after.cwd == "/r" and after.model == "claude-opus-5-5")
+  local none, hold = core.clearedStatus(core.json.encode(held), now)
+  check("Clear status: the file is re-checked -- a hold that appeared since the menu opened refuses",
+        none == nil and tostring(hold):find("held on the card", 1, true) ~= nil)
+  check("Clear status: an unreadable file writes nothing", core.clearedStatus("{torn", now) == nil)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

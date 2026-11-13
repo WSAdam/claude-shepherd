@@ -9565,6 +9565,45 @@ function M.approvalDismissed(it, interruptedAt)
   return at ~= nil and armed ~= nil and at > armed
 end
 
+-- Right-click -> Clear status (2026-11-13, Adam: "from right click i'd like a way to clear a set
+-- status on a card"): for a card Shepherd reads wrong -- a prompt gone from the tab, an error that
+-- has passed, a Working an interrupt froze. It makes the card idle, as SessionStart would, and the
+-- session's next hook writes the truth again. Shepherd's OWN live holds are never wrong, so they are
+-- refused with the way out: M.statusHold says why (nil: no hold).
+M.CLEARABLE_STATUSES = { approval = true, error = true, working = true }
+function M.statusHold(it, now)
+  if M.askHeld(it, now) then
+    return "its question is held on the card -- answer it there, or hand it back to the tab"
+  end
+  if type(it) == "table" and it.gate == "waiting" then
+    return "the approval gate is holding its tool -- Approve or Deny it"
+  end
+  return nil
+end
+
+-- Is there something to clear on this card? true, or false + why. A false with no why (a finished or
+-- idle card) means the menu shows no line at all; with a why, a greyed-out line that says it. Pure.
+function M.statusClearable(it, now)
+  if type(it) ~= "table" or not M.CLEARABLE_STATUSES[it.status] then return false, nil end
+  if it.remote then return false, "a remote session's status lives on its own machine" end
+  local hold = M.statusHold(it, now)
+  if hold then return false, hold end
+  return true
+end
+
+-- The status file's text, cleared: idle since `now`, with the prompt, the error and a dead hold's
+-- fields gone, everything else kept. Re-checks the hold on the file itself (the menu was built from
+-- a snapshot): nil + why for a hold, nil for a file that won't decode. Pure.
+function M.clearedStatus(text, now)
+  local ok, data = pcall(function() return M.json.decode(text) end)
+  if not ok or type(data) ~= "table" then return nil end
+  local hold = M.statusHold(data, now)
+  if hold then return nil, hold end
+  data.status, data.since, data.updated = "idle", now, now
+  data.pending, data.error_kind, data.error_message, data.ask_nonce, data.ask_until = nil, nil, nil, nil, nil
+  return M.json.encode(data)
+end
+
 -- Classify an error message into a coarse CAUSE (L5 error-reason taxonomy): pure
 -- keyword match over the lowercased text, most-specific first. The caller may
 -- override from non-message signals (a usage-limit autoDeny -> budget_exceeded, the

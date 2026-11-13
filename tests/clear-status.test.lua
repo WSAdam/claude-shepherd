@@ -71,6 +71,7 @@ local function webviewHandle()
 end
 local settingsStore, frame = {}, { x = 0, y = 0, w = 1920, h = 1080 }
 local menus = {}
+local panelCb
 local function menuStub()
   return setmetatable({ setMenu = function(_, m) menus[#menus + 1] = m end },
     { __index = function() return function() return mkstub() end end })
@@ -107,7 +108,10 @@ hs.webview = setmetatable({
   windowMasks  = setmetatable({}, { __index = function() return 0 end }),
   windowLevels = setmetatable({}, { __index = function() return 0 end }),
   new = function() return webviewHandle() end,
-  usercontent = { new = function() return mkstub() end },
+  -- the panel's message channel: keep the callback so the test can post what a right-click posts
+  usercontent = { new = function()
+    return setmetatable({ setCallback = function(_, fn) panelCb = fn end }, { __index = function() return function() return mkstub() end end })
+  end },
 }, { __index = function() return function() return mkstub() end end })
 hs.drawing = setmetatable({
   windowLevels    = setmetatable({}, { __index = function() return 0 end }),
@@ -165,5 +169,70 @@ do
 end
 tick()
 check("a new question after it turns the card red again", items().d1.status == "approval")
+
+-- ---- right-click Clear status (2026-11-13) ----
+-- 2026-11-13 (Adam): "from right click i'd like a way to clear a set status on a card".
+local function rightClick(key)
+  menus = {}
+  quiet(function() panelCb({ body = json.encode({ a = "ctx-menu", v = key, text = "" }) }) end)
+  return menus[#menus] or {}
+end
+local function clearLine(menu)
+  for _, m in ipairs(menu) do
+    if type(m.title) == "string" and m.title:find("^Clear status") then return m end
+  end
+  return nil
+end
+-- c1: frozen at Working for two hours; c2: an API error; c3: a question Shepherd holds on the card;
+-- c4: the approval gate holding a tool; c5: finished
+local hourAgo = now - 7200
+card("c1", 111, REFUSED, { status = "working", since = hourAgo, updated = hourAgo, pending = nil })
+card("c2", 112, REFUSED, { status = "error", since = hourAgo, updated = hourAgo, pending = nil,
+                           error_kind = "rate_limit", error_message = "You've hit your limit" })
+card("c3", 113, REFUSED .. ASKING, { since = now - 5, updated = now - 5, ask_nonce = "n3", ask_until = now + 100 })
+card("c4", 114, REFUSED, { since = now - 5, updated = now - 5, gate = "waiting", gate_nonce = "g4",
+                           pending = { tool = "Bash", summary = "rm -rf build", message = "rm -rf build" } })
+card("c5", 115, REFUSED, { status = "done", pending = nil })
+tick(); tick()
+I = items()
+check("the five Clear status cards are on the panel", I.c1 and I.c2 and I.c3 and I.c4 and I.c5)
+
+local line = clearLine(rightClick("d1"))
+check("a red card's right-click menu has Clear status", line ~= nil and type(line.fn) == "function" and not line.disabled)
+-- a hold that turns up while the menu is open: the file is re-checked, nothing is written
+do
+  local s = json.decode(read(T .. "/status/d1.json"))
+  s.ask_nonce, s.ask_until = "late", os.time() + 100
+  write(T .. "/status/d1.json", json.encode(s))
+  quiet(function() line.fn() end)
+  check("a hold that appeared since the menu opened refuses the clear", json.decode(read(T .. "/status/d1.json")).status == "approval")
+  s.ask_nonce, s.ask_until = nil, nil
+  write(T .. "/status/d1.json", json.encode(s))
+end
+quiet(function() line.fn() end)
+local d1 = json.decode(read(T .. "/status/d1.json"))
+check("Clear status writes the card's file idle and drops the gone prompt",
+      d1.status == "idle" and d1.pending == nil and d1.session_id == "d1")
+tick()
+check("...and the card reads idle, not needing Adam", items().d1.status == "idle" and items().d1.needsYou ~= "needs")
+
+line = clearLine(rightClick("c1"))
+check("a card frozen at Working has Clear status", line ~= nil and not line.disabled)
+quiet(function() line.fn() end)
+check("...and clearing it makes it idle", json.decode(read(T .. "/status/c1.json")).status == "idle")
+line = clearLine(rightClick("c2"))
+quiet(function() if line and line.fn then line.fn() end end)
+local c2 = json.decode(read(T .. "/status/c2.json"))
+check("clearing an error card drops the error", c2.status == "idle" and c2.error_kind == nil and c2.error_message == nil)
+
+line = clearLine(rightClick("c3"))
+check("a question Shepherd holds on the card: Clear status is greyed out, saying why  (" .. tostring(line and line.title) .. ")",
+      line ~= nil and line.disabled == true and line.fn == nil and line.title:find("held on the card", 1, true) ~= nil)
+line = clearLine(rightClick("c4"))
+check("the approval gate holding a tool: greyed out, Approve or Deny it  (" .. tostring(line and line.title) .. ")",
+      line ~= nil and line.disabled == true and line.fn == nil and line.title:find("Approve or Deny", 1, true) ~= nil)
+check("...and both files are untouched",
+      json.decode(read(T .. "/status/c3.json")).status == "approval" and json.decode(read(T .. "/status/c4.json")).gate == "waiting")
+check("a finished card has no Clear status line", clearLine(rightClick("c5")) == nil)
 check("no keystroke anywhere", taps == 0)
 finish()

@@ -35,6 +35,11 @@ In order (a remote SSH-bridge tile offers only Relabel and Set group):
   project cards are on).
 - **New worktree tab…**: start a new unit in this repo (repo cards in VS Code or Cursor only;
   [Merging and batches](merging-and-batches.md#new-worktree-tab)).
+- **Clear status (mark idle)**: for a card that reads wrong (red, Error or Working when the session
+  isn't). It writes the card's status file **idle** and drops the prompt or error it held. Nothing is
+  typed into the session, and its next hook writes the real status again. Shown only on a red, Error
+  or Working card. While Shepherd's own hook holds the card (a question held on it, or the approval
+  gate waiting on a tool) the line is greyed out and says what to do instead.
 - **Relabel…**: give the tile a custom display name. It is display-only (jumps still target the real
   window) and **persistent**: keyed by the session's stable project identity (its launch folder, in
   `~/.claude/cc-labels.json`), so it survives the agent changing directories, a Hammerspoon reload,

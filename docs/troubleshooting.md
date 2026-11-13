@@ -137,6 +137,10 @@ also for a policy that allowed it: the Decisions tab and the audit ledger record
   its status stays `working`. Shepherd treats it as finished only when the transcript ends with Claude
   Code's *Request interrupted by user* marker. A leftover process with no tab is ended on its own
   after `tabless.autoEndMinutes` ([Controls](controls.md#sessions-with-no-tab)).
+- **A card stays red after you closed its prompt in the tab.** Closing a question (X) or a permission
+  dialog (Esc) fires no hook. Shepherd reads the transcript's interrupt marker instead, and the card
+  turns idle once the marker is newer than the prompt. For anything else that reads wrong,
+  right-click → **Clear status** ([Controls](controls.md#the-context-menu)).
 - **A duplicate tile after `/clear`.** The panel prunes it once the fresh session is live in the same
   window. **Forget tile** removes a stale orphan by hand; on a live session the tile comes back,
   because the hooks rewrite it (use **Hide tile** for that).

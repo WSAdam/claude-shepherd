@@ -4,6 +4,16 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-11-13 — Right-click → Clear status
+
+- New (Adam's ask): right-click a card → **Clear status (mark idle)** for a card that reads wrong. It
+  writes the card's status file idle and drops the prompt or error it held (`core.clearedStatus`),
+  with a `status_cleared` ledger event. Nothing is typed into the session; its next hook writes the
+  real status again. The line appears only on a red, Error or Working card.
+- Shepherd's own live holds are never cleared. With a question held on the card, or the approval
+  gate waiting on a tool, the line is greyed out and says what to do instead. The file is checked
+  again at the click, so a hold that turned up while the menu was open refuses the clear.
+
 ## 2026-11-13 — A prompt dismissed in the tab clears its card
 
 - Fixed: Chargeback Sentinel's card stayed red over Claude Code's own "switch to Opus 4.8?"

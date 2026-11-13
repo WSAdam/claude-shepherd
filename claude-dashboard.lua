@@ -9640,6 +9640,39 @@ function FX.patchStatus(key, fields)
   return true
 end
 
+-- Right-click -> Clear status (2026-11-13, Adam: "a way to clear a set status on a card"): writes the
+-- card's status file idle (core.clearedStatus -- re-checked on the file, so a hold that turned up
+-- since the menu opened refuses), temp+mv like FX.patchStatus. The session's next hook writes the
+-- truth again; nothing is typed into its window.
+function FX.clearStatus(item)
+  local shown = tostring(item and (item.label or item.name or item.key) or "?")
+  local okc, why = core.statusClearable(item, FX.now())
+  if not okc then
+    FX.alert("Claude Shepherd: can't clear " .. shown .. " -- " .. tostring(why or "nothing to clear"))
+    return false
+  end
+  local path = STATUS_DIR .. "/" .. item.key .. ".json"
+  local text, hold = core.clearedStatus(FX.readFile(path) or "", FX.now())
+  if not text then
+    print("[cc-dashboard] ⚠️ Clear status refused for " .. shown .. ": " .. tostring(hold or "its status file won't read"))
+    FX.alert("Claude Shepherd: can't clear " .. shown .. " -- " .. tostring(hold or "its status file won't read"))
+    return false
+  end
+  local tmp = path .. ".tmp." .. tostring(FX.now())
+  local f = io.open(tmp, "w")
+  if not f then FX.alert("Claude Shepherd: can't clear " .. shown .. " -- the status file can't be written"); return false end
+  f:write(text); f:close()
+  if not os.rename(tmp, path) then
+    os.remove(tmp)
+    FX.alert("Claude Shepherd: can't clear " .. shown .. " -- the status file can't be written")
+    return false
+  end
+  ledgerFor(item, { type = "status_cleared", from = item.status })
+  print("[cc-dashboard] ✅ cleared " .. shown .. "'s status (was " .. tostring(item.status) .. ") -> idle (" .. item.key .. ")")
+  refresh()
+  return true
+end
+
 -- temp+mv is atomic, so cc-approve's exists-then-read poll can never observe the
 -- decision file created but still empty (io.open("w") creates it BEFORE the
 -- content lands at close) -- an empty read would fall through to the native
@@ -17120,6 +17153,18 @@ local function handleBridgeMsg(msg)
             refresh()
           end },
       }
+      -- 2026-11-13 (Adam: "from right click i'd like a way to clear a set status on a card"):
+      -- Clear status, for a card Shepherd reads wrong (core.statusClearable). While Shepherd's own
+      -- hook holds the card the line is greyed out and says why; nothing to clear, no line. Second,
+      -- under Jump (Instances / New worktree tab are inserted above it below).
+      do
+        local okc, why = core.statusClearable(item, FX.now())
+        if okc then
+          table.insert(menu, 2, { title = "Clear status (mark idle)", fn = function() FX.clearStatus(item) end })
+        elseif why then
+          table.insert(menu, 2, { title = "Clear status — " .. why, disabled = true })
+        end
+      end
       -- Project stacks: every instance of this card's project + its idle worktrees. The
       -- same view as the card's corner button, but a native menu click is reliable on
       -- this non-activating panel (an in-webview button's first click can just activate
