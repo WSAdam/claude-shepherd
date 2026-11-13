@@ -392,6 +392,9 @@ FX._healedDone = {}
 -- Stale-"approval" self-heal latch (same shape/rationale as _healedDone): tile key ->
 -- the frozen `updated` at the tick a stuck approval was healed to working.
 FX._healedApproval = {}
+-- 2026-11-13: a prompt dismissed in the tab (same shape): tile key -> the frozen `updated` at the
+-- tick its card was turned idle (core.approvalDismissed).
+FX._dismissedPrompt = {}
 -- Auto-respawn budget hold: budgetKey -> epoch deadline. A just-fired respawn charges
 -- respawnAttempts[budgetKey] and removeStatus()es the dead tile, so until the
 -- relaunch's SessionStart lands NO tile backs that key -- the liveBudgetKeys reap in
@@ -30068,9 +30071,13 @@ function FX._refreshBody()
     -- local clone could make it exist HERE too, so never read it (peek/error/
     -- watchdog all skip). Approve/Deny route over ssh; escalation stays on
     -- (pure timestamp math -- nagging about a remote approval is the point).
+    -- 2026-11-13: and any card waiting on Adam, stale or not -- a prompt dismissed in the tab is seen
+    -- only in the transcript (core.approvalDismissed), and Sentinel's had gone stale before anything
+    -- looked. There are few of them; the peek itself still skips stale ones.
     local peekable = ACTIVITY_PEEK and not it.stale and not it.remote
        and (it.status == "working" or it.status == "approval" or it.status == "done")
-    local wantTail = it.transcript_path and not it.remote and (peekable or it.status == "working")
+    local wantTail = it.transcript_path and not it.remote
+       and (peekable or it.status == "working" or it.status == "approval")
     local tail = wantTail and FX.readTail(it.transcript_path, ACTIVITY_BYTES) or nil
     if peekable and tail then
       it.activity = core.transcriptSnippet(tail, ACTIVITY_LEN)
@@ -30111,6 +30118,29 @@ function FX._refreshBody()
       end
     else
       FX._healedDone[it.key] = nil
+    end
+    -- 2026-11-13: a prompt Adam DISMISSED in the tab (X on a question, Esc on a permission dialog)
+    -- writes the interrupt marker and fires no hook, so the card stayed red for good (Chargeback
+    -- Sentinel, Claude Code's own Opus 4.8 question). A marker newer than the prompt
+    -- (core.approvalDismissed) makes the card idle and drops the gone prompt -- idle, not done, so no
+    -- done edge (queue autofeed, drain close, a Done banner) fires into a session Adam just stopped.
+    -- Before the heal below, which would read it as "working". Latched by `updated` like that heal:
+    -- a tick with no tail keeps it idle, and any hook write moves `updated` and drops the latch.
+    if it.status == "approval" then
+      if tail and core.approvalDismissed(it, core.transcriptInterrupted(tail)) then
+        if FX._dismissedPrompt[it.key] ~= it.updated then
+          print("[cc-dashboard] 🔍 " .. tostring(it.label or it.name or it.key)
+            .. ": its prompt was dismissed in the tab -- the card is idle (" .. tostring(it.key) .. ")")
+        end
+        it.status, it.pending = "idle", nil
+        FX._dismissedPrompt[it.key] = it.updated
+      elseif tail == nil and FX._dismissedPrompt[it.key] ~= nil and FX._dismissedPrompt[it.key] == it.updated then
+        it.status, it.pending = "idle", nil
+      else
+        FX._dismissedPrompt[it.key] = nil
+      end
+    else
+      FX._dismissedPrompt[it.key] = nil
     end
     -- Stale-"approval" self-heal: the native-prompt guard holds status=approval until a
     -- matching resolution event, but a session that has MOVED PAST the pending doesn't

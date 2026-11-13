@@ -286,6 +286,9 @@ echo ""
 echo "== lua: a leftover claude process with no tab is marked, and End stops only it (behavioral, stubbed hs + ps) =="
 HOME="$(mktemp -d)" lua "$DIR/tabless.test.lua" || fail=1
 echo ""
+echo "== lua: a card stuck at a status it no longer has -- a dismissed prompt, Clear status (behavioral, stubbed hs) =="
+HOME="$(mktemp -d)" lua "$DIR/clear-status.test.lua" || fail=1
+echo ""
 echo "== lua: batch driving -- one approval, unit tabs, merges on the grant (behavioral, stubbed hs + git) =="
 HOME="$(mktemp -d)" lua "$DIR/fleet.test.lua" || fail=1
 echo ""

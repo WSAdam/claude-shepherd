@@ -17026,5 +17026,29 @@ do
   end)())
 end
 
+-- ---- a prompt dismissed in the tab clears its card (2026-11-13) ----
+-- 2026-11-13: Chargeback Sentinel's card stayed red over Claude Code's own "switch to Opus 4.8?"
+-- question after Adam closed it with X -- a dismissal writes the interrupt marker and fires no hook.
+do
+  -- the live status file, trimmed: armed 01:56:23, the marker at 01:56:54
+  local sentinel = { status = "approval", since = 1794534983, updated = 1794534983,
+                     pending = { tool = "AskUserQuestion", prompt = true,
+                                 message = "Opus 5.5's safeguards flagged this session. … Switch to Opus 4.8 and keep going whenever this happens?" } }
+  local dismissedAt = 1794535014
+  check("dismissed: the interrupt marker is newer than the prompt (Sentinel's Opus 4.8 question)",
+        core.approvalDismissed(sentinel, dismissedAt) == true)
+  check("not dismissed: the marker is from an earlier turn (a dialog Claude Code raised on its own writes nothing)",
+        core.approvalDismissed(sentinel, sentinel.since - 30) == false)
+  check("not dismissed: the marker in the prompt's own second is no proof (the safe side)",
+        core.approvalDismissed(sentinel, sentinel.since) == false)
+  check("not dismissed: no marker as the transcript's newest record", core.approvalDismissed(sentinel, nil) == false)
+  check("not dismissed: a card that isn't waiting on Adam",
+        core.approvalDismissed({ status = "working", since = 1, updated = 1 }, dismissedAt) == false)
+  check("not dismissed: a remote card (its transcript is on another machine)",
+        core.approvalDismissed({ status = "approval", since = 1, updated = 1, remote = { host = "box" } }, dismissedAt) == false)
+  check("dismissed: a status file with no since falls back to updated",
+        core.approvalDismissed({ status = "approval", updated = 100 }, 101) == true)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

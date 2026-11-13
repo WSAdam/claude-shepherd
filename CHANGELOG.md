@@ -4,6 +4,19 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-11-13 — A prompt dismissed in the tab clears its card
+
+- Fixed: Chargeback Sentinel's card stayed red over Claude Code's own "switch to Opus 4.8?"
+  question after Adam closed it with X. Dismissing a prompt (X on a question, Esc on a permission
+  dialog) writes the interrupt marker to the transcript and fires no hook, so the status file kept
+  "approval". A card waiting on Adam also stopped reading its transcript once it went stale (90s),
+  so nothing could have seen the marker.
+- A card waiting on Adam now reads its transcript even when stale. An interrupt marker newer than
+  the prompt (`core.approvalDismissed`) makes the card **idle**. It's idle rather than done, so no
+  queue autofeed, drain close or Done banner fires into a session Adam just stopped. An older
+  marker proves nothing: a dialog Claude Code raises on its own writes nothing, so it can sit
+  after one.
+
 ## 2026-11-12 — Questions reach Remote Control while you're away from the Mac
 
 - Fixed: on Remote Control Adam saw none of his sessions' questions. While Shepherd runs,

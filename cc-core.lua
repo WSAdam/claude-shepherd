@@ -9551,6 +9551,20 @@ function M.approvalHealable(it, awaiting, progressed)
   return awaiting == false and progressed == true
 end
 
+-- Was the prompt this card waits on DISMISSED in the tab? (2026-11-13) X on a question or Esc on
+-- a permission dialog writes the interrupt marker and fires no hook, so the status file says
+-- "approval" for good -- Chargeback Sentinel's card stayed red over Claude Code's own "switch to
+-- Opus 4.8?" question after Adam closed it. `interruptedAt` is M.transcriptInterrupted's (the
+-- marker is still the transcript's newest record); it proves the prompt is gone only when it is
+-- NEWER than the prompt (since: when the approval was armed). An older marker is an earlier turn's,
+-- and a dialog Claude Code raises on its own writes nothing, so one can sit after it; the prompt's
+-- own second is no proof either (the safe side). Pure.
+function M.approvalDismissed(it, interruptedAt)
+  if type(it) ~= "table" or it.status ~= "approval" or it.remote then return false end
+  local at, armed = tonumber(interruptedAt), tonumber(it.since) or tonumber(it.updated)
+  return at ~= nil and armed ~= nil and at > armed
+end
+
 -- Classify an error message into a coarse CAUSE (L5 error-reason taxonomy): pure
 -- keyword match over the lowercased text, most-specific first. The caller may
 -- override from non-message signals (a usage-limit autoDeny -> budget_exceeded, the
