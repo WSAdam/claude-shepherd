@@ -1723,6 +1723,24 @@ function FX.stepTurnLabel(it, pv, ledgerOn)
   it.turnLabelPending = (st.label == nil and st.tries < 5) or nil
 end
 
+-- Was this errored card's turn opened by an expired Monitor's notice (core.idleWakeTurn,
+-- 2026-11-16)? Auto-continue skips it: the session had no work in progress. Uses the tick's tail
+-- when it has one; a StopFailure error has none, so it reads one per status write and remembers it.
+FX._idleWake = {}   -- key -> { updated, v }
+function FX.idleWakeFor(it, tail)
+  if it.status ~= "error" or it.remote or type(it.transcript_path) ~= "string" then
+    FX._idleWake[it.key or ""] = nil
+    return nil
+  end
+  if tail then return core.idleWakeTurn(tail) or nil end
+  local memo = FX._idleWake[it.key or ""]
+  if memo and memo.updated == it.updated then return memo.v end
+  local v = core.idleWakeTurn(FX.readTail(it.transcript_path, ACTIVITY_BYTES) or "") or nil
+  FX._idleWake[it.key or ""] = { updated = it.updated, v = v }
+  if v then print("[cc-dashboard] 🔍 " .. tostring(it.name) .. ": its errored turn was an expired Monitor's notice -- no auto-continue") end
+  return v
+end
+
 -- Where the time went (2026-09-29, build program unit 34): each card's waits on Adam or on a usage
 -- limit, its stalls and its errors, ledgered ONCE each when they end -- waited{source, seconds},
 -- hung_end{seconds}, error_end{reason, seconds} (core.timeLostStep). Runs after FX.annotateNeedsYou:
@@ -30229,10 +30247,11 @@ function FX._refreshBody()
     -- Done before the watchdog/auto-respawn below (which key off "working", so they skip
     -- it), and the list is re-sorted after the loop so errors surface near approvals.
     if tail and it.status == "working" then
-      local err = core.transcriptError(tail)
+      local err = core.transcriptError(tail, now)
       if err then
         it.status = "error"; it.error_message = err.message; it.error_reason = err.reason
         it.error_kind = err.kind   -- Claude Code's own kind (rate_limit, server_error...), when it wrote one
+        it.error_retrying = err.retrying   -- 2026-11-16: Claude Code is still retrying by itself
       end
     end
     -- 2026-09-18: an INTERRUPTED turn fires no Stop hook, so its status file stays "working" for
@@ -30656,6 +30675,9 @@ function FX._refreshBody()
     -- A session in a shared window (core.keystrokeBlocked) never fires: "continue" is typed.
     -- 2026-09-28: turns that change nothing back it off (autoContinue.backoff.*), and a rule's
     -- continue held by core.queueRuleContinue comes back here as cstep.rule once it's due.
+    -- 2026-11-16: never while Claude Code is still retrying by itself (it.error_retrying), nor into
+    -- a turn an expired Monitor's notice opened (it.idleWake, FX.idleWakeFor): no work to resume.
+    it.idleWake = autoContinueOn and FX.idleWakeFor(it, tail) or nil
     local cstep = core.stepAutoContinue(autoContinueState, it,
       { enabled = autoContinueOn and not it.remote and not core.keystrokeBlocked(it), now = now,
         minSeconds = autoContinueDelay, maxAttempts = autoContinueMax,

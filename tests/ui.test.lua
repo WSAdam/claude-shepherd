@@ -4048,6 +4048,23 @@ do
   eq("backoff: ...up to 30", (ac.backoff or {}).maxSeconds, 1800)
 end
 
+-- ---- auto-continue leaves Claude Code's own retries and idle wakes alone (2026-11-16) ----
+-- 2026-11-16: auto-continue typed "[shepherd] continue" into Chargeback Sentinel three times during
+-- an outage, interrupting Claude Code's own retries of a turn an expired Monitor's notice had opened.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("retry: the tick judges a retry against its own clock",
+        src:find("local err = core.transcriptError(tail, now)", 1, true) ~= nil)
+  check("retry: ...and the card carries whether Claude Code is still retrying",
+        src:find("it.error_retrying = err.retrying", 1, true) ~= nil)
+  check("idle wake: the card says whether an expired Monitor opened its errored turn, before auto-continue steps",
+        src:find("it.idleWake = autoContinueOn and FX.idleWakeFor(it, tail) or nil\n    local cstep = core.stepAutoContinue(", 1, true) ~= nil)
+  check("idle wake: a StopFailure error with no tail reads its own, once per status write",
+        src:find("if memo and memo.updated == it.updated then return memo.v end", 1, true) ~= nil)
+end
+
 -- ---- the session mailbox is stepped every tick (2026-09-29) ----
 -- Build program unit 11a. tests/mailbox.test.lua drives FX.stepMailbox itself; this pins that the
 -- tick runs it (after the annotations it reads, isolated so a failure can't stop the tick) and

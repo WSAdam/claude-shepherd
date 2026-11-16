@@ -642,6 +642,98 @@ do
   eq("a rate-limited tile never auto-continues, however long it waits", limited(5000).fire, false)
 end
 
+-- ---- Auto-continue leaves Claude Code's own retries and idle wakes alone (2026-11-16) ---------
+-- 2026-11-16: in an API outage Claude Code writes a system api_error record before EACH retry it
+-- makes (retryAttempt 1..10, retryInMs). transcriptError read the first as a frozen session, so
+-- auto-continue typed "[shepherd] continue" 60s later and interrupted Claude Code's own retry --
+-- three times into Chargeback Sentinel, whose errored turn was only an expired Monitor's notice
+-- (it had finished at 13:43 and was just serving localhost:5173). Records copied from that transcript.
+do
+  local J = core.json.encode
+  local function retry(n, ts) return J({ type = "system", subtype = "api_error", level = "error",
+    error = { message = "Connection error.", formatted = "Can't reach the API server — check your internet or DNS (ENOTFOUND)",
+      connection = { code = "ENOTFOUND", message = "getaddrinfo ENOTFOUND api.anthropic.com", isSSLError = false },
+      isNetworkDown = true },
+    retryInMs = 557, retryAttempt = n, maxRetries = 10, source = "request_retry",
+    timestamp = ts or "2026-11-16T14:14:44.113Z" }) end
+  local final = J({ type = "assistant", isApiErrorMessage = true, error = "server_error",
+    timestamp = "2026-11-16T14:20:44.000Z",
+    message = { model = "<synthetic>", role = "assistant", type = "message", stop_reason = "stop_sequence",
+      content = { { type = "text", text = "API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)" } } } })
+  local expired = J({ type = "user", origin = { kind = "task-notification", producer = "session-task" },
+    promptSource = "system", timestamp = "2026-11-16T14:13:43.850Z",
+    message = { role = "user", content = "<task-notification>\n<task-id>bpf34pj7k</task-id>\n"
+      .. "<summary>Monitor event: \"errors in the 5173 dev server log\"</summary>\n"
+      .. "<event>[Monitor expired after 30m with no events delivered. Re-arm it if you still need the watch"
+      .. " — and widen the filter if silence was unexpected.]</event>\n</task-notification>" } })
+  local apiReq = J({ type = "api-request", timestamp = "2026-11-16T14:14:14.091Z" })
+  local now = core.isoToEpoch("2026-11-16T14:15:44Z")
+
+  -- Claude Code retrying by itself: the card still shows the error, marked as retrying
+  local e = core.transcriptError(expired .. "\n" .. apiReq .. "\n" .. retry(1) .. "\n", now)
+  check("a retry Claude Code is about to make still shows the error", e ~= nil)
+  eq("...marked as Claude Code retrying by itself", e and e.retrying, true)
+  eq("Claude Code's final failure is no retry",
+     (core.transcriptError(retry(10) .. "\n" .. final .. "\n", now) or {}).retrying, nil)
+  eq("a retry record with no clock to judge it by reads as retrying", (core.transcriptError(retry(3)) or {}).retrying, true)
+  eq("an api_error from a build that writes no retry fields is a freeze, as before",
+     (core.transcriptError(J({ type = "system", subtype = "api_error", error = { formatted = "Connection error." } })) or {}).retrying, nil)
+  local hung = core.transcriptError(retry(10, "2026-11-16T14:00:00Z"), core.isoToEpoch("2026-11-16T14:10:01Z"))
+  check("a retry that hangs past Claude Code's own 10-minute request timeout is frozen", hung ~= nil and hung.retrying == nil)
+  eq("...but not a second sooner",
+     (core.transcriptError(retry(10, "2026-11-16T14:00:00Z"), core.isoToEpoch("2026-11-16T14:09:59Z")) or {}).retrying, true)
+
+  -- the gate
+  local function gate(o)
+    local a = { status = "error", reason = "runtime_error", elapsed = 100, minSeconds = 60, attempts = 0, maxAttempts = 3 }
+    for k, v in pairs(o) do a[k] = v end
+    return core.shouldAutoContinue(a)
+  end
+  eq("auto-continue never types into a turn Claude Code is still retrying", gate({ retrying = true }), false)
+  eq("...nor into a turn an expired Monitor opened", gate({ idleWake = true }), false)
+  eq("...and still continues a turn that froze for good", gate({}), true)
+
+  -- the grace starts when Claude Code gives up, not at its first retry
+  local function stepper()
+    local st = { since = {}, attempts = {} }
+    return function(fields, t)
+      local item = { key = "kr", projectKey = "pr", status = "error", error_reason = "runtime_error" }
+      for k, v in pairs(fields) do item[k] = v end
+      return core.stepAutoContinue(st, item, { enabled = true, minSeconds = 60, maxAttempts = 3, now = t })
+    end
+  end
+  local step = stepper()
+  eq("Claude Code's own retries type nothing", step({ error_retrying = true }, 1000).fire, false)
+  eq("...five minutes of them included", step({ error_retrying = true }, 1300).fire, false)
+  eq("its final failure waits out the grace from there", step({}, 1301).fire, false)
+  eq("...then continues", step({}, 1361).fire, true)
+  local idle = stepper()
+  idle({ idleWake = true }, 1000)
+  eq("an expired Monitor's errored turn never auto-continues, however long it waits", idle({ idleWake = true }, 5000).fire, false)
+
+  -- core.idleWakeTurn: the newest prompt in the tail is an expired Monitor's notice
+  local tail = expired .. "\n" .. apiReq .. "\n" .. retry(1) .. "\n"
+  eq("an errored turn an expired Monitor opened is an idle wake", core.idleWakeTurn(tail), true)
+  local expired2 = expired:gsub("with no events delivered", "with 2 events delivered")
+  eq("...whatever it delivered before it expired", core.idleWakeTurn(expired2 .. "\n" .. final .. "\n"), true)
+  local typed = J({ type = "user", origin = { kind = "human" }, message = { role = "user",
+    content = { { type = "text", text = "run the migration" } } } })
+  eq("a turn Adam started is no idle wake", core.idleWakeTurn(expired .. "\n" .. typed .. "\n" .. retry(1) .. "\n"), false)
+  local cont = J({ type = "user", origin = { kind = "human" }, message = { role = "user",
+    content = { { type = "text", text = "[shepherd] continue" } } } })
+  eq("...nor one Adam's Continue click restarted", core.idleWakeTurn(expired .. "\n" .. cont .. "\n" .. final .. "\n"), false)
+  local merged = J({ type = "user", origin = { kind = "task-notification" }, message = { role = "user",
+    content = "<task-notification>\n<task-id>b7</task-id>\n<status>completed</status>\n"
+      .. "<summary>Background command \"cc-merge.sh request\" completed (exit code 0)</summary>\n</task-notification>" } })
+  eq("a background command's result is work to resume (a merge approved)", core.idleWakeTurn(merged .. "\n" .. final .. "\n"), false)
+  local result = J({ type = "user", message = { role = "user",
+    content = { { type = "tool_result", tool_use_id = "t", content = "re-armed" } } } })
+  eq("tool results after the notice don't hide it", core.idleWakeTurn(expired .. "\n" .. result .. "\n" .. final .. "\n"), true)
+  eq("no prompt in the tail is no idle wake", core.idleWakeTurn(retry(1) .. "\n"), false)
+  eq("empty input is no idle wake", core.idleWakeTurn(""), false)
+  eq("a torn last line is skipped", core.idleWakeTurn(expired .. "\n" .. typed:sub(1, 40)), true)
+end
+
 -- ---- planFromTranscript: agent plan/TODO from the tail ---------------------
 do
   local function asst(blocks) return core.json.encode({ type = "assistant", message = { content = blocks } }) end

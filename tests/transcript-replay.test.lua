@@ -161,6 +161,18 @@ do
   eq("...carrying Claude Code's own error kind", err and err.kind, "server_error")
 end
 
+-- ---- tail-connection-dropped-retrying: Claude Code retrying by itself (2026-11-16) ------------
+-- 2026-11-16: auto-continue typed "continue" into a session whose newest api_error record was a
+-- retry Claude Code was about to make, interrupting it. This real window ends on retry 1 of 10.
+do
+  local tail = readTail(FIXTURES .. "tail-connection-dropped-retrying.jsonl", TICK_TAIL)
+  local err = core.transcriptError(tail or "")
+  check("a dropped connection Claude Code is retrying still shows the error", err ~= nil)
+  eq("...marked as Claude Code retrying by itself, so auto-continue waits", err and err.retrying, true)
+  local hung = core.transcriptError(tail or "", core.isoToEpoch("2026-01-01T00:20:00Z"))
+  check("...unless that retry has hung past Claude Code's own request timeout", hung ~= nil and hung.retrying == nil)
+end
+
 -- ---- tail-turn-made-progress: a real finished turn, labelled (2026-09-28) ---------------------
 -- 2026-09-28: when a tile turns done, its last turn's label (core.turnEvidence / turnOutcome) is
 -- read from the transcript tail. This window ends on the Stop of a real turn that made two edits:

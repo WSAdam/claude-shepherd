@@ -9358,7 +9358,22 @@ function M.notesToPrune(entries, now, days)
   return out
 end
 
-function M.transcriptError(text)
+-- 2026-11-16: Claude Code writes a system api_error record BEFORE each retry it makes itself
+-- (retryAttempt 1..maxRetries, retryInMs) and the turn's final failure as the assistant record
+-- above. A retry record still reads as an error -- the card shows the outage -- but carries
+-- `retrying = true`, so auto-continue waits for Claude Code to give up instead of interrupting its
+-- retry. One that hangs past Claude Code's own request timeout (API_TIMEOUT_MS, 10 min) plus its
+-- scheduled wait is frozen after all. `now` (epoch) is optional: without it a retry stays a retry.
+M.API_RETRY_STALL_SECONDS = 600
+local function retryPending(obj, now)
+  if tonumber(obj.retryAttempt) == nil then return false end
+  now = tonumber(now)
+  local at = type(obj.timestamp) == "string" and M.isoToEpoch(obj.timestamp) or nil
+  if not (now and at) then return true end
+  return now - at <= (tonumber(obj.retryInMs) or 0) / 1000 + M.API_RETRY_STALL_SECONDS
+end
+
+function M.transcriptError(text, now)
   if not text or #text == 0 then return nil end
   local lines = {}
   for line in (text .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
@@ -9400,12 +9415,46 @@ function M.transcriptError(text)
         elseif t == "system" and obj.subtype == "api_error" then
           local e = obj.error
           local msg = (type(e) == "table" and (e.formatted or e.message)) or "API error"
-          return { message = tostring(msg), reason = M.classifyError(msg) }  -- L5 cause taxonomy
+          return { message = tostring(msg), reason = M.classifyError(msg),  -- L5 cause taxonomy
+                   retrying = retryPending(obj, now) or nil }
         end
       end
     end
   end
   return nil
+end
+
+-- Was the newest turn in this tail opened by an expired Monitor's notice (2026-11-16)? Claude Code
+-- wakes a finished session to say a Monitor it armed has expired ("<event>[Monitor expired after
+-- 30m with no events delivered. Re-arm it ..."): the session had nothing in progress, so an API
+-- error in that turn leaves no work to resume, and auto-continue's "continue" would only start some.
+-- A background command's result (a merge approved, a fleet event) is work, and a prompt of Adam's
+-- or Shepherd's is his. The newest prompt decides; tool results and bookkeeping are skipped. Lines
+-- are walked with a plain find, the torn last line dropped. Pure.
+M.IDLE_WAKE_MARK = "<event>[Monitor expired"
+function M.idleWakeTurn(text)
+  if type(text) ~= "string" or text == "" then return false end
+  local spans, pos = {}, 1
+  while true do
+    local nl = text:find("\n", pos, true)
+    if not nl then break end
+    if nl > pos then spans[#spans + 1] = { pos, nl - 1 } end
+    pos = nl + 1
+  end
+  for i = #spans, 1, -1 do
+    local a, b = spans[i][1], spans[i][2]
+    local line = text:sub(a, b)
+    if line:sub(1, 1) == "{" and line:find('"type":"user"', 1, true) then
+      local okj, obj = pcall(function() return M.json.decode(line) end)
+      local origin = okj and type(obj) == "table" and M.promptOrigin(obj) or nil
+      if origin == "notification" then
+        return line:find(M.IDLE_WAKE_MARK, 1, true) ~= nil
+      elseif origin and origin ~= "meta" then
+        return false
+      end
+    end
+  end
+  return false
 end
 
 -- Stale-"done" self-heal (symmetric to transcriptError's working->error override).
@@ -12335,6 +12384,10 @@ function M.shouldAutoContinue(args)
   -- 2026-09-28: a usage limit is Adam's to act on (wait for the reset, or switch): typing
   -- "continue" into it only fails again and spends the budget.
   if args.reason == "budget_exceeded" then return false end
+  -- 2026-11-16: Claude Code is still retrying by itself (a "continue" interrupts the retry), or the
+  -- errored turn was an expired Monitor's notice in a session with no work in progress
+  -- (M.idleWakeTurn): Chargeback Sentinel got three of them while it was only serving localhost.
+  if args.retrying or args.idleWake then return false end
   if (tonumber(args.elapsed) or 0) < (tonumber(args.minSeconds) or 0) then return false end
   local cap = tonumber(args.maxAttempts) or 0
   if cap <= 0 then return false end                                  -- 0/absent = disabled
@@ -12455,11 +12508,18 @@ function M.stepAutoContinue(state, item, opts)
     out.attempts = state.attempts[pk]
     return out
   end
+  -- 2026-11-16: while Claude Code is still retrying by itself (it.error_retrying, from
+  -- M.transcriptError) the error isn't final: the grace clock starts when it gives up.
+  if item.error_retrying then
+    state.since[key] = nil
+    out.attempts = state.attempts[pk]
+    return out
+  end
   if state.since[key] == nil then state.since[key] = opts.now end
   local elapsed = (tonumber(opts.now) or 0) - (tonumber(state.since[key]) or 0)
   local n = state.attempts[pk] or 0
   local minSeconds = tonumber(opts.minSeconds) or 0
-  local gate = { status = item.status, reason = item.error_reason, elapsed = elapsed,
+  local gate = { status = item.status, reason = item.error_reason, elapsed = elapsed, idleWake = item.idleWake,
                  minSeconds = math.max(minSeconds, wait), attempts = n, maxAttempts = opts.maxAttempts }
   local fire = (opts.enabled == true) and M.shouldAutoContinue(gate) or false
   -- R2-22: restart the grace clock on a fired attempt (so a fired-but-undelivered
