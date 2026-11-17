@@ -738,41 +738,6 @@ function FX.reapWorkingOn(list)
   core.reapUnbacked(FX._workingOn, live)
 end
 
--- DR3 (Rewind tab): stream a transcript, returning ONLY its file-history-snapshot
--- lines joined (those checkpoint lines are a small fraction -- ~hundreds of KB -- of a
--- multi-MB transcript). On-demand (tab select), never the tick. nil on an unreadable path.
-function FX.snapshotLines(path)
-  local f = io.open(path, "r"); if not f then return nil end
-  local out = {}
-  for line in f:lines() do
-    if line:find("file-history-snapshot", 1, true) then out[#out + 1] = line end
-  end
-  f:close()
-  return table.concat(out, "\n")
-end
-
--- DR3: attach a prompt label to each restore point by streaming the transcript once
--- more and decoding ONLY the user lines whose uuid is a needed restore-point messageId
--- (a cheap uuid substring match skips decoding the many large tool-result user lines).
--- Mutates `points` in place; the snippet is core-pure (core.userPromptSnippet).
-function FX.attachCheckpointPrompts(path, points)
-  local need = {}
-  for _, p in ipairs(points or {}) do if p.messageId then need[p.messageId] = p end end
-  if not next(need) then return end
-  local f = io.open(path, "r"); if not f then return end
-  for line in f:lines() do
-    if line:find('"type":"user"', 1, true) then
-      local id = line:match('"uuid":"([^"]+)"')
-      local p = id and need[id]
-      if p and not p.prompt then
-        local snip = core.userPromptSnippet(line, 160)
-        if snip ~= "" then p.prompt = snip end
-      end
-    end
-  end
-  f:close()
-end
-
 -- Token-usage aggregation across active sessions' transcripts. ZERO API cost: pure
 -- local file reads, incremental per tick. Builds per-session + fleet cumulative
 -- totals + a 5h/7d Anthropic-only window approximation, pushes them to the webview.
@@ -16438,80 +16403,6 @@ local function handleBridgeMsg(msg)
       .. ", " .. jsString(sid) .. ", " .. jsString("timeline") .. ")") end)
     return
   end
-  if a == "detail-timeline" then
-    -- L5 inline Timeline tab: the selected session's chronological history,
-    -- rendered compactly in the detail panel (reuses core.sessionTimeline + the
-    -- cached ledger). Selection/tab-triggered, NEVER on the 1s tick. Replies an
-    -- empty array when there's nothing to show (the JS renders an empty note).
-    local key = tostring(payload.v or "")
-    local it = byKey[key]
-    local sid = it and it.session_id
-    if not ledgerEnabled() or not sid or tostring(sid) == "" then
-      pcall(function() wv:evaluateJavaScript("window.ccDetailTimeline(" .. jsString(key) .. ", [])") end)
-      return
-    end
-    local res = FX.readLedger({})
-    local events = core.sessionTimeline(res.events, sid, { limit = 200 })
-    pcall(function() wv:evaluateJavaScript("window.ccDetailTimeline("
-      .. jsString(key) .. ", " .. hs.json.encode(events) .. ")") end)
-    return
-  end
-  if a == "detail-rewind" then
-    -- DR3 Rewind tab: this session's checkpoint/restore-point timeline, read from the
-    -- transcript's file-history-snapshot lines (+ a prompt label per point). On-demand,
-    -- never the 1s tick (it scans the whole transcript). Local-only -- a remote tile has
-    -- no local transcript to scan. Replies null when there's nothing to show.
-    local key = tostring(payload.v or "")
-    local it = byKey[key]
-    local path = it and it.transcript_path
-    -- Always reply a non-null object: the panel treats null as "still loading", so a
-    -- remote / no-transcript / no-checkpoints reply must be a real (empty) result, else
-    -- the tab would spin forever.
-    local function reply(data)
-      pcall(function() wv:evaluateJavaScript("window.ccCheckpoints("
-        .. jsString(key) .. ", " .. hs.json.encode(data) .. ")") end)
-    end
-    if not it or it.remote or not path or path == "" then reply({ points = {}, remote = (it and it.remote) or false }); return end
-    local snap = FX.snapshotLines(path)
-    if not snap or snap == "" then reply({ points = {} }); return end
-    local points = core.checkpointTimeline(snap, { limit = 80 })
-    FX.attachCheckpointPrompts(path, points)
-    reply({ points = points })
-    return
-  end
-  if a == "rewind-open" then
-    -- DR3 rewind action: type /rewind into the session to open Claude Code's own
-    -- restore-point picker. HARD-GATED by a modal confirm (the "so we don't accidentally
-    -- click it and it eats dirt" requirement) that also surfaces the bash-changes caveat.
-    -- Serialized + delivery-gated like every keystroke chain: a skipped send (no window
-    -- match) is never announced as done, and only a real send is ledgered.
-    local target = byKey[tostring(payload.v or "")]
-    if not target then return end
-    if target.remote then
-      pcall(function() FX.alert("Claude Shepherd: rewind is local-only (no keystroke path to a remote session)") end)
-      return
-    end
-    pcall(function()
-      local nm = tostring(target.label or target.name or "this session")
-      -- #31: FX.runModal holds pending injection beats (a chain's Return would
-      -- press the default "Open /rewind" unconfirmed).
-      if FX.runModal(function() return hs.dialog.blockAlert("Open the rewind picker?",
-           "This types /rewind into \"" .. nm .. "\", opening Claude Code's restore-point "
-           .. "picker — you still choose a point and confirm there.\n\n"
-           .. "Note: rewind reverts Write / Edit / NotebookEdit changes only. Files changed "
-           .. "by bash are NOT undone.",
-           "Open /rewind", "Cancel") end) ~= "Open /rewind" then return end
-      dispatchSerialized(target, a, function()
-        if FX.typeIntoWindow(winTarget(target), "/rewind") then
-          ledgerFor(target, { type = "rewind_open" })
-          FX.alert("Claude Shepherd: opened /rewind in " .. tostring(target.name))
-        else
-          FX.alert("Claude Shepherd: couldn't deliver /rewind (no matching window)")
-        end
-      end)
-    end)
-    return
-  end
   if a == "detail-subagents" then
     -- DR1 Agents tab: the selected session's spawned subagents (delegated agents +
     -- Workflow fleets), read from its subagents/ tree. Selection/tab-triggered, never
@@ -18486,9 +18377,7 @@ local HTML = [[
   #d-tab-menu label.locked { color:var(--dim); cursor:default; }
   .d-panel { display:none; }
   .d-panel.active { display:block; }
-  #d-timeline { font-size:11px; }
-  #d-timeline .tl-pre { white-space:pre-wrap; color:var(--text-2); font-family:ui-monospace,Menlo,monospace; font-size:11px; line-height:1.5; margin:0; }
-  #d-timeline .tl-empty, #d-changes .tl-empty, #d-checkpoints .tl-empty, #d-transcript .tl-empty { color:var(--dim); font-size:11px; }
+  #d-changes .tl-empty, #d-transcript .tl-empty { color:var(--dim); font-size:11px; }
   /* F4 Transcript peek tab */
   .d-tr-search { width:100%; box-sizing:border-box; margin-bottom:7px; padding:5px 8px; font-size:11px;
                  background:var(--surface-2); color:var(--text); border:1px solid var(--border); border-radius:7px; }
@@ -18497,22 +18386,6 @@ local HTML = [[
   .tr-who { flex:0 0 42px; font-weight:600; color:var(--muted); text-align:right; }
   .tr-user .tr-who { color:var(--accent); }
   .tr-txt { flex:1; color:var(--text-2); white-space:pre-wrap; word-break:break-word; }
-  /* DR3 Rewind tab: checkpoint/restore-point timeline + guarded /rewind action */
-  #rw-head { display:flex; align-items:center; gap:8px; margin-bottom:6px; flex-wrap:wrap; }
-  #b-rewind { font-size:11px; color:var(--warn); background:transparent; border:1px solid #5a4a22; border-radius:6px;
-    padding:3px 10px; cursor:pointer; font-family:inherit; }
-  #b-rewind:hover { color:var(--text-strong); background:#3a2f12; border-color:#7a6326; }
-  #rw-caveat { font-size:10px; color:var(--muted); } #rw-caveat b { color:var(--warn); font-weight:600; }
-  #rw-tl-head { margin:10px 0 3px; font-size:10px; text-transform:uppercase; letter-spacing:.4px; color:var(--dim); border-top:1px solid var(--border-weak); padding-top:7px; }
-  #d-checkpoints { font-size:11px; }
-  #d-checkpoints .cp-row { display:flex; align-items:baseline; gap:8px; padding:3px 0; border-bottom:1px solid var(--surface-3); }
-  #d-checkpoints .cp-time { flex:0 0 auto; color:var(--muted); font-family:ui-monospace,Menlo,monospace; font-size:10px; }
-  #d-checkpoints .cp-body { flex:1 1 auto; min-width:0; }
-  #d-checkpoints .cp-prompt { color:var(--text-2); word-break:break-word; }
-  #d-checkpoints .cp-files { color:var(--muted); font-size:10px; margin-top:1px; }
-  #d-checkpoints .cp-files .cp-fname { color:var(--accent-text); }
-  #d-checkpoints .cp-badge { flex:0 0 auto; color:var(--ok); font-size:10px; font-family:ui-monospace,Menlo,monospace; }
-  #d-checkpoints .cp-badge.none { color:#5a5f6b; }
   /* L5 git Changes tab */
   #d-changes { font-size:11px; }
   #d-changes .ch-head { display:flex; align-items:center; gap:8px; margin-bottom:4px; color:var(--text-3); }
@@ -19724,19 +19597,6 @@ local HTML = [[
       <div id="d-score"></div>
       <div id="d-lineage" title="Respawn / clear / continue churn for this project since midnight (needs the audit ledger)."></div>
       <div id="d-plan"></div>
-    </div>
-    <!-- DR3 Rewind tab: checkpoint/restore-point timeline (from the transcript's
-         file-history-snapshot lines) folded together with the session activity
-         timeline. The "Rewind…" button types /rewind into the session behind a
-         mandatory modal confirm (it opens Claude Code's own restore-point picker). -->
-    <div class="d-panel" data-tab="rewind">
-      <div id="rw-head">
-        <button id="b-rewind" onclick="act('rewind-open')" title="Type /rewind into this session to open Claude Code's restore-point picker. You confirm first, and again in the session.">↶ Rewind…</button>
-        <span id="rw-caveat">Rewind reverts Write/Edit/NotebookEdit only — <b>bash-made changes are not undone</b>.</span>
-      </div>
-      <div id="d-checkpoints"></div>
-      <div id="rw-tl-head">Activity timeline</div>
-      <div id="d-timeline"></div>
     </div>
     <div class="d-panel" data-tab="transcript">
       <input type="text" id="d-tr-search" class="d-tr-search" placeholder="Search this session's recent messages…" oninput="renderTranscript()">
@@ -23920,8 +23780,6 @@ local HTML = [[
         queueListOpen = false; renderQueueList();   // queue editor is per-session
         togglePacketForm(false);                     // ...and so is the packet form (2026-09-29)
         tplOpen = false; renderTemplates();
-        TIMELINE = { key:null, events:null };       // L5: inline timeline is per-session, lazy
-        CHECKPOINTS = { key:null, data:null };      // DR3: rewind checkpoints are per-session, lazy
         CHANGES = { key:null, data:null }; CH_DIFFS = {}; CH_OPEN = {};  // git Changes: per-session
         STORIES = { key:null, data:null, blocks:null, hash:null, dirty:false, editing:null, flash:null };  // per-session
         ONPURPOSE = { key:null, data:null, flash:null, draft:null };  // per-session
@@ -23951,7 +23809,6 @@ local HTML = [[
     var DETAIL_TABS = __DETAIL_TABS__;     // [{id,label}], canonical order
     var detailTab = "activity";            // active tab id for the current selection
     var detailUnpinned = {};               // { id:true } hidden tabs for the current project
-    var TIMELINE = { key:null, events:null };  // inline timeline cache (lazy, per-session)
 
     function projectKeyOf(it){ return (it && (it.projectKey || it.cwd || it.key)) || null; }
     function tabStorageKey(pk){ return "cc-detailTabs-" + pk; }
@@ -24023,26 +23880,7 @@ local HTML = [[
     // tab is the active one.
     function maybeLoadActiveTab(){
       if(!selectedKey) return;
-      if(detailTab === "rewind"){
-        // DR3: the Rewind tab folds two lazy views -- the checkpoint/restore-point
-        // list (from the transcript) and the session activity timeline (from the
-        // ledger). Both fetch on tab-activation only, each deduped by its own marker.
-        if(CHECKPOINTS.key !== selectedKey){
-          CHECKPOINTS = { key: selectedKey, data: null };   // pending (dedupes re-fetch)
-          send("detail-rewind", selectedKey);               // ccCheckpoints repaints
-        }
-        renderCheckpoints();
-        if(TIMELINE.key !== selectedKey){
-          var it = findItem(selectedKey);
-          if(it && it.session_id){
-            // Mark pending (key set, events=null) BEFORE the async send so a
-            // second tab-click before the reply arrives won't re-fetch.
-            TIMELINE = { key: selectedKey, events: null };
-            send("detail-timeline", selectedKey);   // ccDetailTimeline repaints
-          } else { TIMELINE = { key: selectedKey, events: [] }; }
-        }
-        renderDetailTimeline();   // clears stale (key mismatch) or paints cache/pending
-      } else if(detailTab === "transcript"){
+      if(detailTab === "transcript"){
         // F4: fetch the recent-conversation peek on tab-activation only, deduped by key.
         if(TRANSCRIPT.key !== selectedKey){
           TRANSCRIPT = { key: selectedKey, rows: null };   // pending (dedupes re-fetch)
@@ -24084,57 +23922,6 @@ local HTML = [[
         if(!queueListOpen){ var it2 = findItem(selectedKey); if(it2 && (it2.queue||0) > 0){ toggleQueueList(); } }
       }
     }
-    window.ccDetailTimeline = function(key, events){
-      TIMELINE = { key: key, events: events || [] };
-      renderDetailTimeline();
-    };
-    function renderDetailTimeline(){
-      var box = document.getElementById("d-timeline"); if(!box) return;
-      // Stale paint guard: only show data fetched for the CURRENT selection.
-      if(TIMELINE.key !== selectedKey){ box.innerHTML = ""; return; }
-      var evs = TIMELINE.events;
-      if(evs === null){ box.innerHTML = '<div class="tl-empty">Loading activity…</div>'; return; }  // fetch in flight
-      if(!evs.length){ box.innerHTML = '<div class="tl-empty">No recorded activity for this session yet (the ledger is off, or this session has no id).</div>'; return; }
-      box.innerHTML = '<pre class="tl-pre">' + esc(evs.map(narr).join("\n")) + '</pre>';
-    }
-
-    // ---- DR3 Rewind tab: checkpoint/restore-point timeline (data===null in flight) ----
-    var CHECKPOINTS = { key:null, data:null };
-    window.ccCheckpoints = function(key, data){
-      if(key !== selectedKey) return;     // stale guard
-      CHECKPOINTS = { key:key, data:data };   // data may be null (remote/no transcript)
-      renderCheckpoints();
-    };
-    function renderCheckpoints(){
-      var box = document.getElementById("d-checkpoints"); if(!box) return;
-      if(CHECKPOINTS.key !== selectedKey){ box.innerHTML = ""; return; }   // stale guard
-      var d = CHECKPOINTS.data;
-      if(d === null){ box.innerHTML = '<div class="tl-empty">Loading checkpoints…</div>'; return; }
-      if(d && d.remote){ box.innerHTML = '<div class="tl-empty">Rewind is local-only — this is a remote tile (no local transcript to scan).</div>'; return; }
-      var pts = (d && d.points) || [];
-      if(!pts.length){ box.innerHTML = '<div class="tl-empty">No restore points found — this session has no checkpoints yet.</div>'; return; }
-      var html = '<div class="tl-empty" style="margin-bottom:4px;">' + pts.length + ' restore point' + (pts.length===1?'':'s') + ' · newest first</div>';
-      pts.forEach(function(p){
-        var when = p.ts ? (fmtAge(p.ts) + ' ago') : '';
-        var nfiles = p.filesChanged || 0;
-        var badge = nfiles ? ('±' + nfiles) : '—';
-        var names = '';
-        if(p.changed && p.changed.length){
-          var shown = p.changed.slice(0, 6).map(function(c){ return '<span class="cp-fname" title="' + esc(c.path||'') + '">' + esc(c.name||'') + '</span>'; });
-          names = shown.join(', ') + (p.changed.length > 6 ? (' +' + (p.changed.length - 6) + ' more') : '');
-        }
-        html += '<div class="cp-row">'
-              + '<span class="cp-time" title="' + esc(p.iso||'') + '">' + esc(when) + '</span>'
-              + '<span class="cp-body">'
-              + '<div class="cp-prompt">' + esc(p.prompt || '(no prompt captured)') + '</div>'
-              + (names ? ('<div class="cp-files">' + names + '</div>') : '')
-              + '</span>'
-              + '<span class="cp-badge' + (nfiles?'':' none') + '" title="files changed during this turn">' + esc(badge) + '</span>'
-              + '</div>';
-      });
-      box.innerHTML = html;
-    }
-
     // ---- DR1 Agents tab: this session's subagent fan-out, clickable to drill in ----
     var SUBAGENTS  = { key:null, tree:null };   // tree===null while a fetch is in flight
     var SUB_OPEN   = {};   // agent name -> expanded
@@ -25207,7 +24994,7 @@ local HTML = [[
       var gateWait = it.gate === "waiting";
       var REMOTE_T = "Remote session — headless approve/deny only";
       var SHARED_T = "Its VS Code window hosts " + sharedN + " Claude sessions — Shepherd can't pick the tab, so it won't type here. Jump there and act in the tab.";
-      var SHARED_IDS = ["b-stop","b-clear","b-compact","b-improve","b-nudge","b-feed","b-rewind","effort","mode","d-model"];
+      var SHARED_IDS = ["b-stop","b-clear","b-compact","b-improve","b-nudge","b-feed","effort","mode","d-model"];
       // Lock with a reason as the tooltip; unlocking restores the tooltip it had (controls
       // never locked keep whatever title other code gives them, e.g. syncGateSelect).
       function lockCtl(el, why){
@@ -25220,10 +25007,10 @@ local HTML = [[
         }
       }
       // b-verify, b-coach: a remote session has no checkout here; they type nothing, so a shared window keeps them
-      ["b-jump","b-stop","b-auto","b-talk","b-hold","b-clear","b-compact","b-improve","b-nudge","b-feed","b-rewind",
+      ["b-jump","b-stop","b-auto","b-talk","b-hold","b-clear","b-compact","b-improve","b-nudge","b-feed",
        "effort","mode","d-model","d-gate","d-policy","nudge","b-verify","b-coach"].forEach(function(id){
         var el = document.getElementById(id); if(!el) return;
-        var why = (remote && id !== "b-rewind") ? REMOTE_T : ((shared && SHARED_IDS.indexOf(id) >= 0) ? SHARED_T : "");
+        var why = remote ? REMOTE_T : ((shared && SHARED_IDS.indexOf(id) >= 0) ? SHARED_T : "");
         lockCtl(el, why);
       });
       var dsh = document.getElementById("d-shared");
@@ -28826,13 +28613,6 @@ local HTML = [[
       var st = sel ? (sel.status || "idle") : null;
       if(sel && lastSelectedStatus !== null && st !== lastSelectedStatus){
         requestDecisions(selectedKey);
-        // A status edge likely just appended an event / a new checkpoint -- refresh
-        // the Rewind tab's folded views too, but ONLY while that tab is the active
-        // one (still lazy: a status change is an edge, not the 1s tick).
-        if(detailTab === "rewind"){
-          TIMELINE = { key:null, events:null }; CHECKPOINTS = { key:null, data:null };
-          maybeLoadActiveTab();
-        }
       }
       lastSelectedStatus = st;
       // The User Stories tab is gated on the file existing; if that flips for the

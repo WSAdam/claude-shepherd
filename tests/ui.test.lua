@@ -1365,17 +1365,10 @@ do
         src:find('return "cc-detailTabs-" + pk', 1, true) ~= nil
         and src:find("function projectKeyOf(it)", 1, true) ~= nil)
   check("l5tab-pin: tab state restored on selection", src:find("loadTabState(key)", 1, true) ~= nil)
-  check("l5tab-pin: lazy Timeline fetch (not on tick)", src:find('send("detail-timeline", selectedKey)', 1, true) ~= nil
-        and src:find('a == "detail-timeline"', 1, true) ~= nil)
-  check("l5tab-pin: inline timeline reuses narr + stale guard",
-        src:find("evs.map(narr).join", 1, true) ~= nil
-        and src:find("if(TIMELINE.key !== selectedKey)", 1, true) ~= nil)
+  -- the inline timeline went with the Rewind tab it was folded into (pruned 2026-11-17)
   check("l5tab-pin: default tab can't be unpinned", src:find('if(id === "activity") return;', 1, true) ~= nil)
   -- adversarial-review fixes (round 1): dedup in-flight timeline fetch, DOM-safe
   -- tab menu (no inline-handler id interpolation), empty-state notes, JS/Lua parity.
-  check("l5tab-fix: timeline fetch deduped via pending marker",
-        src:find("TIMELINE = { key: selectedKey, events: null }", 1, true) ~= nil
-        and src:find("if(evs === null)", 1, true) ~= nil)
   check("l5tab-fix: tab menu built DOM-safe (no inline onchange interpolation)",
         src:find("cb.onchange = function(){ toggleTabPinned(t.id); }", 1, true) ~= nil
         and src:find('onchange="toggleTabPinned(', 1, true) == nil)
@@ -1932,39 +1925,7 @@ do
         src:find('hs.eventtap.keyStroke({ "cmd" }, "tab")', 1, true) ~= nil
         and src:find('elseif name == "apptab" then sdAppTab()', 1, true) ~= nil)
 
-  -- ---- DR3: Rewind tab (Timeline folded in) + guarded /rewind ----------------
-  -- The timeline detail tab was renamed to "rewind" (core.DETAIL_TABS); the panel
-  -- folds the checkpoint list + the activity timeline under it.
-  check("dr3-pin: DETAIL_TABS renamed timeline -> rewind (single source)",
-        src:find('data%-tab="rewind"') ~= nil
-        and src:find('data%-tab="timeline"') == nil)
-  check("dr3-pin: Rewind tab folds in the activity timeline (#d-timeline retained)",
-        src:find('id="d%-checkpoints"') ~= nil and src:find('id="d%-timeline"') ~= nil)
-  check("dr3-pin: rewind lazy-load fetches BOTH checkpoints and the folded timeline",
-        src:find('detailTab === "rewind"', 1, true) ~= nil
-        and src:find('send("detail-rewind", selectedKey)', 1, true) ~= nil
-        and src:find('send("detail-timeline", selectedKey)', 1, true) ~= nil)
-  check("dr3-pin: checkpoints round-trip (handler -> core.checkpointTimeline -> ccCheckpoints)",
-        src:find('a == "detail-rewind"', 1, true) ~= nil
-        and src:find("core.checkpointTimeline(snap", 1, true) ~= nil
-        and src:find("FX.attachCheckpointPrompts(path, points)", 1, true) ~= nil
-        and src:find("window.ccCheckpoints(", 1, true) ~= nil)
-  check("dr3-pin: snapshot/prompt scan is thin FX + on-demand (core.userPromptSnippet)",
-        src:find("function FX.snapshotLines(path)", 1, true) ~= nil
-        and src:find("function FX.attachCheckpointPrompts(path, points)", 1, true) ~= nil
-        and src:find("core.userPromptSnippet(line, 160)", 1, true) ~= nil)
-  -- the rewind ACTION is HARD-gated by a modal confirm (bash-changes caveat) and
-  -- delivery-gated like every keystroke chain (a skip is never announced as sent).
-  check("dr3-pin: /rewind behind a modal confirm with the bash-changes caveat",
-        src:find('a == "rewind-open"', 1, true) ~= nil
-        and src:find("Open the rewind picker?", 1, true) ~= nil
-        and src:find("by bash are NOT undone", 1, true) ~= nil)
-  check("dr3-pin: /rewind serialized + delivery-gated + ledgered only on a real send",
-        src:find('FX.typeIntoWindow(winTarget(target), "/rewind")', 1, true) ~= nil
-        and src:find('ledgerFor(target, { type = "rewind_open" })', 1, true) ~= nil)
-  check("dr3-pin: checkpoint rows stale-guarded + ESC'd (no key interpolation)",
-        src:find("CHECKPOINTS.key !== selectedKey", 1, true) ~= nil
-        and src:find("esc(p.prompt", 1, true) ~= nil)
+  -- DR3 Rewind tab: removed 2026-11-17 (Adam pruned it); its absence is pinned under "Pruned detail tabs".
 
   -- ---- DR6: per-session model auto-routing (opt-in, off by default) -----------
   -- The model switch + the task feed are ONE atomic delivery via pasteIntoWindow's
@@ -3379,7 +3340,7 @@ do
         and src:find("{ enabled = not core.keystrokeBlocked(it), prevStatus = pv and pv.status or nil }", 1, true) ~= nil)
   local d = body("function renderDetail(){", 6000)
   check("sharedwin-pin: the detail panel greys the keystroke controls and says why",
-        d:find('var SHARED_IDS = ["b-stop","b-clear","b-compact","b-improve","b-nudge","b-feed","b-rewind","effort","mode","d-model"];', 1, true) ~= nil
+        d:find('var SHARED_IDS = ["b-stop","b-clear","b-compact","b-improve","b-nudge","b-feed","effort","mode","d-model"];', 1, true) ~= nil
         and d:find('document.getElementById("d-shared")', 1, true) ~= nil
         and src:find('<div id="d-shared"></div>', 1, true) ~= nil)
   -- 2026-09-22: the banner sat directly under #d-head, ~20 lines above the ready-to-merge
@@ -5828,6 +5789,27 @@ do
   for _ in src:gmatch("FX%.taskStreamed%(") do streamedUses = streamedUses + 1 end
   if src:find("\nfunction FX.taskStreamed(", 1, true) then streamedUses = streamedUses - 1 end   -- its definition
   check("taskStreamed: nothing else uses it (a reader would lose a late chunk)  (" .. streamedUses .. " uses)", streamedUses == 1)
+end
+
+-- ---- Pruned detail tabs (2026-11-17) ----
+-- 2026-11-17: Adam pruned detail tabs he has no use for. Each is gone from core.DETAIL_TABS, the
+-- panel and the bridge; what still reaches the same data elsewhere is pinned to stay.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local ids = {}
+  for _, t in ipairs(core.DETAIL_TABS) do ids[t.id] = true end
+  -- Rewind, with the activity timeline that was folded into it
+  check("pruned: no Rewind tab in core.DETAIL_TABS", not ids.rewind)
+  check("pruned: no Rewind panel, /rewind button or checkpoint list",
+        src:find('data-tab="rewind"', 1, true) == nil and src:find('id="b-rewind"', 1, true) == nil
+        and src:find('id="d-checkpoints"', 1, true) == nil and src:find('id="d-timeline"', 1, true) == nil)
+  check("pruned: no Rewind bridge actions",
+        src:find('a == "detail-rewind"', 1, true) == nil and src:find('a == "rewind-open"', 1, true) == nil
+        and src:find('a == "detail-timeline"', 1, true) == nil and src:find("function FX.snapshotLines", 1, true) == nil)
+  check("pruned: the 📜 Timeline button still opens the session's timeline in the audit view",
+        src:find('onclick="openSessionTimeline()"', 1, true) ~= nil and src:find('if a == "open-session-timeline" then', 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

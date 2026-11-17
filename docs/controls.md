@@ -271,7 +271,7 @@ in [claude-dashboard.lua](../claude-dashboard.lua); add or reorder editors there
 
 When several Claude tabs run in one VS Code window, keys land in whichever tab is in front. So a
 session whose window hosts other sessions gets **no keystroke action at all**: no nudge, queue feed,
-routed task, auto-continue, `/clear`, `/compact`, `/rc`, Rewind, model / effort / mode switch or key
+routed task, auto-continue, `/clear`, `/compact`, `/rc`, model / effort / mode switch or key
 approval. The detail panel greys those controls and says how many sessions share the window; each
 refusal is logged and raises a toast (at most once a minute per session).
 

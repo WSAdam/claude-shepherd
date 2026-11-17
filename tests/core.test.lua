@@ -6835,9 +6835,12 @@ do
   check("tabs: that tab stays unpinned", n3.unpinned.queue == true)
 
   -- unknown ids in unpinned are dropped
-  local n4 = core.normalizeTabState({ unpinned = { nope = true, rewind = true } })
+  local n4 = core.normalizeTabState({ unpinned = { nope = true, transcript = true } })
   eq("tabs: unknown unpinned id dropped", n4.unpinned.nope, nil)
-  check("tabs: known unpinned id kept", n4.unpinned.rewind == true)
+  check("tabs: known unpinned id kept", n4.unpinned.transcript == true)
+  -- 2026-11-17: a pruned tab's id saved before the prune is dropped like any unknown one
+  local n4b = core.normalizeTabState({ selectedTab = "rewind", unpinned = { rewind = true } })
+  check("tabs: a pruned tab saved as selected falls back to the default", n4b.selectedTab == "activity" and n4b.unpinned.rewind == nil)
 
   -- canonical map form only: a stray non-true value is ignored (no array form)
   local n5 = core.normalizeTabState({ unpinned = { decisions = true, usage = "x" } })
@@ -8033,62 +8036,6 @@ do
   eq("lock: saltedInput format", core.lockSaltedInput("s", "p"), "s:p")
 end
 
--- ---- DR3: checkpoint / rewind timeline ------------------------------------
-do
-  local function snap(mid, isUpd, ts, files)
-    return core.json.encode({ type = "file-history-snapshot", messageId = mid, isSnapshotUpdate = isUpd,
-      snapshot = { messageId = mid, timestamp = ts, trackedFileBackups = files or {} } })
-  end
-  -- u1: 0 files at start, a.txt@v1 created during the turn (update line);
-  -- u2: baseline a.txt@v1, then a.txt bumped to v2 + b.md@v1 created;
-  -- u3: baseline a.txt@v2 + b.md@v1 (committed end of u2), no further edits.
-  local T1, T2, T3 = "2026-06-18T14:00:00Z", "2026-06-18T14:05:00Z", "2026-06-18T14:09:00Z"
-  local av1 = { ["/p/a.txt"] = { version = 1, backupTime = "b1" } }
-  local av2b = { ["/p/a.txt"] = { version = 2, backupTime = "b2" }, ["/p/sub/b.md"] = { version = 1, backupTime = "b3" } }
-  local text = table.concat({
-    snap("u1", false, T1, {}),
-    snap("u1", true,  T1, av1),
-    snap("u2", false, T2, av1),
-    snap("u2", true,  T2, av2b),
-    snap("u3", false, T3, av2b),
-  }, "\n")
-  local pts = core.checkpointTimeline(text, {})
-  eq("checkpoint: 3 restore points", #pts, 3)
-  eq("checkpoint: newest-first (u3 head)", pts[1].messageId, "u3")
-  eq("checkpoint: oldest last (u1 tail)", pts[3].messageId, "u1")
-  check("checkpoint: ts parsed to epoch", type(pts[1].ts) == "number")
-  -- u1 turn created a.txt (diff establishing-u1 {} vs establishing-u2 {a.txt})
-  eq("checkpoint: u1 changed 1 file", pts[3].filesChanged, 1)
-  eq("checkpoint: u1 changed = a.txt", pts[3].changed[1].name, "a.txt")
-  -- u2 turn bumped a.txt v1->v2 and created b.md (diff vs establishing-u3)
-  eq("checkpoint: u2 changed 2 files", pts[2].filesChanged, 2)
-  eq("checkpoint: changed sorted by path (a.txt first)", pts[2].changed[1].name, "a.txt")
-  eq("checkpoint: changed includes basename of nested", pts[2].changed[2].name, "b.md")
-  eq("checkpoint: changed carries new version", pts[2].changed[1].version, 2)
-  -- u3 is the latest turn: no committed next snapshot, no own updates -> 0 changed
-  eq("checkpoint: latest turn 0 changed (uncommitted)", pts[1].filesChanged, 0)
-  -- limit keeps the most-recent N
-  local two = core.checkpointTimeline(text, { limit = 2 })
-  eq("checkpoint: limit caps to N", #two, 2)
-  eq("checkpoint: limit keeps newest", two[1].messageId, "u3")
-  -- robustness
-  eq("checkpoint: empty -> {}", #core.checkpointTimeline("", {}), 0)
-  eq("checkpoint: garbage skipped", #core.checkpointTimeline("not json\n{bad", {}), 0)
-  eq("checkpoint: nil -> {}", #core.checkpointTimeline(nil, {}), 0)
-
-  -- userPromptSnippet (the caller's label source, decoded per matching user line)
-  local strLine = core.json.encode({ type = "user", uuid = "u1", message = { content = "please review this prompt\nmore detail" } })
-  eq("promptSnippet: string content, first line", core.userPromptSnippet(strLine, 140), "please review this prompt")
-  local arrLine = core.json.encode({ type = "user", message = { content = { { type = "text", text = "build the thing" } } } })
-  eq("promptSnippet: array text block", core.userPromptSnippet(arrLine, 140), "build the thing")
-  local toolLine = core.json.encode({ type = "user", message = { content = { { type = "tool_result", content = "x" } } } })
-  eq("promptSnippet: tool_result-only -> empty", core.userPromptSnippet(toolLine, 140), "")
-  eq("promptSnippet: non-user -> empty", core.userPromptSnippet(strLine:gsub('"user"', '"assistant"'), 140), "")
-  eq("promptSnippet: non-json -> empty", core.userPromptSnippet("garbage", 140), "")
-  local longLine = core.json.encode({ type = "user", message = { content = string.rep("x", 300) } })
-  check("promptSnippet: truncates to maxLen", #core.userPromptSnippet(longLine, 40) <= 40)
-end
-
 -- ---- DR7: A/B fork-to-compare (plan / worktree cmds / compare / judge) -----
 do
   eq("abSlug: sanitizes + caps", core.abSlug("My Cohort #1!!"), "my-cohort-1")
@@ -8554,7 +8501,8 @@ do
   check("FEATURES: covers the new features (theme/transcript/doctor/cost/render)",
         keys.theme and keys.transcript and keys.doctor and keys.cost and keys.render)
   check("FEATURES: covers major existing flows too",
-        keys.search and keys.policies and keys.automodel and keys.bridge and keys.agents and keys.ab and keys.usage and keys.rewind)
+        keys.search and keys.policies and keys.automodel and keys.bridge and keys.agents and keys.ab and keys.usage)
+  check("FEATURES: no Rewind entry (the tab was pruned 2026-11-17)", not keys.rewind)
   check("FEATURES: lists the user-stories tab", keys.stories == true)
   local newCount = 0; for _, f in ipairs(core.FEATURES) do if f.new then newCount = newCount + 1 end end
   -- 2026-08-31: 6 -> 7 when the worklist gained the TODO.md import (re-flagged new).

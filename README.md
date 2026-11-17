@@ -86,8 +86,6 @@ Every feature below has a reference page one click away. The panel lists the sam
   an editor, permission mode, provider and first task, or from a saved preset.
 - [**Restart the fleet in place**](docs/fleet.md#restart-the-fleet-in-place): reopen every session
   an update or reboot took down, preview first, never twice; each row then says if it came back.
-- [**Rewind & checkpoints**](docs/fleet.md#the-detail-panel): see each turn's restore point and the
-  files it changed, then open Claude Code's rewind picker.
 - [**Global hotkeys**](docs/controls.md#global-hotkeys): approve, jump to whoever needs you, cycle,
   spawn and show the panel from any app.
 - [**Stream Deck**](docs/controls.md#stream-deck): sessions and fleet actions on physical keys, with

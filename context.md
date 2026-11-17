@@ -539,6 +539,10 @@ Sonnet, hard→Opus.
 
 ## State (2026-06-18) — DR3 Rewind tab (checkpoint/rewind timeline)
 
+> **Removed 2026-11-17** (Adam pruned it): the Rewind tab, its checkpoint list, the folded-in
+> timeline and `core.checkpointTimeline` are gone. The 📜 Timeline button still opens a session's
+> timeline in the audit view. The notes below are history.
+
 DR3 shipped (deep-research backlog now DR1–DR5 done; next DR6 → DR7). The detail-panel **Timeline tab was
 folded into a richer "Rewind" tab** (`core.DETAIL_TABS` `timeline`→`rewind`; Decisions kept). It lists
 newest-first **restore points** (prompt label · age · ±N files changed + the changed basenames) above the

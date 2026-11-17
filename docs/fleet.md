@@ -286,10 +286,6 @@ session is never in the snapshot.
   first: your prompts and Claude's text replies, each cut to 800 characters. Tool calls, tool
   results and IDE file-open lines are skipped. A search box filters the loaded messages as you
   type. It doesn't search the whole history; use **Find in fleet** for that.
-- **Rewind**: restore points, newest first (the prompt, its age, and the files changed in that
-  turn), above this session's recorded activity. **↶ Rewind…** opens Claude Code's own restore-point
-  picker (`/rewind`) after a confirm that states the caveat: rewind reverts Write / Edit /
-  NotebookEdit changes only, not changes made through Bash.
 - **Decisions**: the gate's recent decisions for this session, grouped with counts and provenance
   (*"⛔ deny Bash ×4 (autoDeny: Bash(rm*)) · 2m ago"*). `decisions.limit` / `decisions.hours` tune it.
 - **Usage**: this session's token breakdown.
