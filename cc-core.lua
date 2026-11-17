@@ -11182,7 +11182,7 @@ end
 -- 2026-10-03 (D4b): a line can be HELD. The flag rides with the line: a held line is
 -- { text = "...", held = true }, every other line stays a plain string, so a queue with nothing
 -- held keeps the old file shape. queuePeek/queuePop take the first line that isn't held -- so
--- auto-feed, Feed next, the router and the packet gate all skip held lines -- and a held line
+-- auto-feed, the router and the packet gate all skip held lines -- and a held line
 -- keeps its place. Parsed tolerantly: a line with no string text is dropped on the next rebuild.
 function M.queueText(x)
   if type(x) == "string" then return x end
@@ -23492,7 +23492,6 @@ M.DETAIL_TABS = {
   { id = "changes",    label = "Changes" },
   { id = "stories",    label = "User Stories" },  -- gated: shows only when spec/product/user-stories.md exists
   { id = "compare",    label = "Compare" },     -- 2026-10-27: replaces Requirements; the same board on every card
-  { id = "queue",      label = "Queue" },
 }
 M.DETAIL_TAB_DEFAULT = "activity"
 
@@ -27182,10 +27181,10 @@ M.FEATURES = {
     what = "Line up tasks per session, auto-feed the next when one finishes, and route work to whichever session is free.",
     why = "Keep sessions busy without babysitting each handoff." },
   { key = "packets", cat = "Automate", new = true, title = "Task packets",
-    what = "+ Packet in the queue editor saves a task with its evidence: the code it cites (path:line or path:from-to, read at the session's HEAD and kept with that commit), repro steps and when it's done. The queue holds @packet:pN. Before it is fed, Shepherd re-reads each cited range at the receiving worktree's HEAD in the background; if any of it changed, the task isn't fed and the card says \"cited code moved\". A batch unit can carry a packet too: it is checked before the unit's tab opens, and its evidence goes into the unit's message.",
+    what = "A packet is a queued task with its evidence (the panel's + Packet form went with the Queue tab, 2026-11-17; saved packets still gate): the code it cites (path:line or path:from-to, read at the session's HEAD and kept with that commit), repro steps and when it's done. The queue holds @packet:pN. Before it is fed, Shepherd re-reads each cited range at the receiving worktree's HEAD in the background; if any of it changed, the task isn't fed and the card says \"cited code moved\". A batch unit can carry a packet too: it is checked before the unit's tab opens, and its evidence goes into the unit's message.",
     why = "A task written against yesterday's code doesn't send a session after lines that are no longer there." },
   { key = "queuehold", cat = "Automate", new = true, title = "Queue hold & fleet view",
-    what = "Hold one queued line and auto-feed, Feed next and the router skip it: it keeps its place, and the next line that isn't held goes first, until you Release it. ☰ → Queues lists every session's queue in one place -- whose it is, each line held or not, the line fed next and a packet line's last cited-code check -- with Hold / Release, ▲ ▼ and ✕ (which asks first).",
+    what = "Hold one queued line and auto-feed and the router skip it: it keeps its place, and the next line that isn't held goes first, until you Release it. ☰ → Queues lists every session's queue in one place -- whose it is, each line held or not, the line fed next and a packet line's last cited-code check -- with Hold / Release, ▲ ▼ and ✕ (which asks first).",
     why = "Park a task that isn't ready without losing its place, and see what every session has lined up without opening each card." },
   { key = "recover", cat = "Automate", title = "Auto-respawn & auto-continue",
     what = "Respawn a stuck session and nudge one frozen on an API error to continue — within safe retry budgets.",

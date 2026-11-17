@@ -11,7 +11,7 @@ action, [resume at the limit reset](#resume-at-the-limit-reset),
 auto-routing, the self-summary, escalation, rules, routines and the coach's own runs
 (`coach.enabled`, which its weekly and evidence runs both need) start off; their keys are in
 [Configuration](configuration.md#editing-the-file-by-hand). The manual tools (Queue,
-Feed next, templates, A/B compare, a routine's **Run**) work without a switch.
+templates, A/B compare, a routine's **Run**) work without a switch.
 
 Automatic actions that type into a session are delivery-gated (a task leaves the queue only once
 it reached the session's window), skip sessions whose window hosts other sessions, wait until the
@@ -52,7 +52,7 @@ turn, and a rule's nudge or continue is skipped (`nudge_skipped` / `continue_ski
 reason). A nudge rule on a `hung` or `loop` edge fires while the session is still working, so it is
 always refused.
 
-Your own clicks (Nudge, Feed next, Continue and the rest) aren't gated: when you act, it types.
+Your own clicks (Nudge, Continue and the rest) aren't gated: when you act, it types.
 
 ## Dry run and the automation trace
 
@@ -126,7 +126,7 @@ whole fleet, while you take over.
   typed, and the session's turn end and start hand nothing over. The card says
   "1 message waiting (on hold)". Once you lift the hold, mail goes out as usual: typed into an idle
   session where typing is safe, or handed over at its next turn end or start.
-- **Your own clicks** (Nudge, Feed next, Continue, Merge) still work on a held session.
+- **Your own clicks** (Nudge, Continue, Merge) still work on a held session.
 
 The flags are files in `~/.claude/cc-hold/`: `<pid>` for a session's claude process, `key-<key>`
 for a session without one, and `.fleet` for the freeze. Shepherd reads them every tick and the hooks
@@ -135,8 +135,8 @@ when the session ends.
 
 ## Task queue
 
-Each session has a queue. **Queue** in the detail panel adds the input; **Feed next** sends the
-front task; the tile shows `+N queued`. Turn on `queue.autofeed` and Shepherd feeds the next task
+Each session has a queue. **Queue** next to the detail panel's message box adds the input; the tile
+shows `+N queued`. Turn on `queue.autofeed` and Shepherd feeds the next task
 each time the session finishes, so a session works through a backlog unattended
 (`queue.dryRun` records what it [would feed](#dry-run-and-the-automation-trace) instead of sending).
 
@@ -144,18 +144,19 @@ each time the session finishes, so a session works through a backlog unattended
   window. No window match and it stays queued, and the ledger records `task_feed_skipped`.
 - **Queues follow the project**, so a respawned or `/clear`-ed session inherits its folder's pending
   tasks.
-- **Edit in place**: click "Queue: N" to expand the list, then reorder (▲▼) or remove (✕) entries.
+- **Edit in place**: in **☰ → 📑 Queues** (below), reorder (▲▼), hold or remove (✕) entries.
   Each edit carries the task text you clicked, so if the queue changed underneath, the edit is
-  refused and the list refreshed instead of moving the wrong task.
+  refused and the list refreshed instead of moving the wrong task. (The detail panel's Queue tab,
+  with its own editor and **Feed next**, was removed 2026-11-17.)
 - **Bulk paste**: paste a multi-line list and press Queue. It splits into one task per line
   (bullets and numbering stripped, blanks dropped) after a confirm.
 
 ### Queue hold and the Queues view
 
-- **Hold one line**: **Hold** on a line in the queue editor (or in the Queues view) parks it.
-  Auto-feed, **Feed next** and the [router](#project-routing) skip a held line; it keeps its
+- **Hold one line**: **Hold** on a line in the Queues view parks it.
+  Auto-feed and the [router](#project-routing) skip a held line; it keeps its
   place, and the next line that isn't held goes first. **Release** lets it feed again from where
-  it sits. With every line held, nothing is fed, and Feed next says so. The card reads
+  it sits. With every line held, nothing is fed. The card reads
   `+3 queued (1 held)`.
 - **In the file**: the flag rides with the line. A held line is stored as
   `{ "text": "…", "held": true }` in `~/.claude/cc-queue/<queue>.json`; every other line stays a
@@ -166,7 +167,7 @@ each time the session finishes, so a session works through a backlog unattended
   whether the queue is routed. A [packet](#task-packets) line shows its last cited-code check:
   unchanged or moved at which commit, and how long ago. The view only reads that check; it runs
   when the line is next to feed. Each line has Hold / Release, ▲ ▼, and ✕, which asks first.
-  Like the editor, each click carries the line's text, so an edit to a queue that changed
+  Each click carries the line's text, so an edit to a queue that changed
   underneath is refused and the list refreshed. A queue file that won't read is listed as such
   and left alone; queues with nothing in them aren't listed.
 
@@ -175,15 +176,15 @@ each time the session finishes, so a session works through a backlog unattended
 A task written against the code as it is today can send a session after lines that are gone by
 the time it's fed. A **packet** carries its evidence, and isn't fed once that evidence has moved.
 
-- **Save one**: **+ Packet** in the queue panel opens a form: the task, an optional title, the
-  cited code (one `path:line` or `path:from-to` per line, relative to the repo root; up to 8
-  ranges of up to 80 lines), repro steps and done-when. Shepherd reads each range at the
-  session's HEAD in the background and saves the lines with that commit. A path that isn't in
-  the repo, or a range past the end of its file, is refused with the reason.
+- **Save one**: the panel's only way to save one, the Queue tab's **+ Packet** form, was removed
+  with that tab (2026-11-17). A packet held the task, an optional title, the cited code (one
+  `path:line` or `path:from-to` per line, relative to the repo root; up to 8 ranges of up to 80
+  lines), repro steps and done-when, each range read at the session's HEAD and saved with that
+  commit. Packets already saved still gate as below.
 - **Stored**: packets live in `~/.claude/cc-queue/<queue>.packets.json`, next to the queue file,
   written atomically. The queue holds a token in place of the text, `@packet:p3 <title>`, which
   can sit behind `@all:`/`@any:` and `@role:` like any task.
-- **At feed time** (Feed next, auto-feed or the router), Shepherd re-reads every cited range at
+- **At feed time** (auto-feed or the router), Shepherd re-reads every cited range at
   the **receiving** session's worktree HEAD, in the background. HEAD is read from the repo's
   files, so a commit the session made just before it finished is noticed at once.
   - Unchanged: the session gets the task, each cited range as it was read (with its commit),
@@ -192,8 +193,7 @@ the time it's fed. A **packet** carries its evidence, and isn't fed once that ev
     records `packet_moved` once, and the packet stays at the head until you remove it (✕) or the
     code matches again. A queue that can't be read, or a packet that isn't saved, is flagged the
     same way.
-  - Still being checked: the feed waits. Auto-feed tries again while the session stays done;
-    Feed next goes through once the check lands.
+  - Still being checked: the feed waits. Auto-feed tries again while the session stays done.
 - **Batches**: a unit in a batch file can name a packet (`"packet": "p3"`), one saved from a
   session in the repo's main checkout. Before its tab opens, Shepherd checks it at the repo's
   HEAD. If the cited code moved, `cc-fleet.sh tab` is refused with the reason; if not, the
@@ -213,7 +213,7 @@ deletes them. Templates live in `~/.claude/cc-templates.json`.
 - **Structured or raw**: a template is a description plus an optional expected output, or raw text.
 - **Before a spawn**: the New session dialog's **Templates** picker seeds the initial task, with
   variables filled in first.
-- **Before a feed**: queued tasks are rendered just before they're typed in (manual, auto-feed or
+- **Before a feed**: queued tasks are rendered just before they're typed in (auto-feed or
   routed): `{{prev_output}}` (the turn that just finished) and the date built-ins resolve; variables
   that can't be filled automatically are left as they are.
 - **Versions**: every save keeps the previous body and bumps the version (a `v2` chip marks edited
@@ -224,7 +224,8 @@ deletes them. Templates live in `~/.claude/cc-templates.json`.
 
 ### Project routing
 
-With `queue.routing.enabled` on **and** a project armed with the detail panel's **route** toggle,
+With `queue.routing.enabled` on **and** a project armed (`"routing": true` in its queue file; the
+Queue tab's **route** toggle that set it was removed 2026-11-17),
 the project's queue feeds **whichever of its sessions is free** (Ready, sitting at its prompt), not only the
 one that emptied its own backlog, so parallel sessions in one folder drain a shared backlog. One
 feed per project per second, delivery-gated, ledgered as `by:"router"`. `starveMinutes` flags a
@@ -237,8 +238,9 @@ sees it):
   `review`. Unprefixed tasks go to anyone free.
 - **`@all:` / `@any:`**: a join barrier. `@all: …` waits until **every** session in the project has
   finished before it routes; `@any:` waits for one. It composes with a role: `@all: @review: ship`.
-- **seq**: the detail panel's **seq** toggle (next to **route**) runs a project's queue **one routed
-  task at a time**. Off, tasks spread across free sessions in parallel.
+- **seq**: `"mode": "sequential"` in the queue file (the Queue tab's **seq** toggle, removed
+  2026-11-17) runs a project's queue **one routed task at a time**. Otherwise tasks spread across
+  free sessions in parallel.
 - **Timing**: each routed or queued task is timed from feed to completion; the Shift report shows
   tasks completed with average and total duration (needs the ledger).
 

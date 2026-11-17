@@ -47,9 +47,8 @@ assert_eq "the project's merge order is esc()'d"            "yes" "$(has 'esc(p.
 assert_eq "a lease's port is esc()'d"                     "yes" "$(has 'esc(String(ls.port))')"
 assert_eq "a lease's tooltip (its database path) is esc()'d" "yes" "$(has "title=\"'+esc(leaseTitle(ls))+'\"")"
 # task packets (2026-09-29): a moved packet's line names cited paths, which anyone can type; it
-# rides meta (esc()'d), and the packet form's result is set as text
+# rides meta (esc()'d). (The Queue tab's + Packet form, whose result was set as text, was pruned 2026-11-17.)
 assert_eq "a moved packet's line rides the esc()'d meta"   "yes" "$(has 'if(it.packetMoved){ meta = (meta ? meta + " · " : "") + "📦 " + it.packetMoved; }')"
-assert_eq "the packet form's result is text, never HTML"   "yes" "$(has 'document.getElementById("pk-msg").textContent = ')"
 # the decisions inbox (2026-09-29): a question, its default and its options were written by a
 # session (cc-decide.sh), and the row names its session (a relabel) -- inboxRowsHtml's `r.`
 assert_eq "an Inbox question is esc()'d"            "yes" "$(has 'esc(r.question)')"

@@ -6806,7 +6806,7 @@ do
   eq("tabs: default is first id", core.DETAIL_TABS[1].id, core.DETAIL_TAB_DEFAULT)
   local ids = core.detailTabIds()
   check("tabs: ids set has activity", ids.activity == true)
-  check("tabs: ids set has queue", ids.queue == true)
+  check("tabs: ids set has usage", ids.usage == true)   -- 2026-11-17: queue was pruned; usage is a tab that stays
 
   -- nil / garbage raw -> default selected, no unpinned
   local n0 = core.normalizeTabState(nil)
@@ -6830,9 +6830,9 @@ do
   eq("tabs: default cannot be unpinned", n2.unpinned.activity, nil)
 
   -- selecting a tab that is also unpinned -> falls back to default (active must be visible)
-  local n3 = core.normalizeTabState({ selectedTab = "queue", unpinned = { queue = true } })
+  local n3 = core.normalizeTabState({ selectedTab = "usage", unpinned = { usage = true } })
   eq("tabs: selected-but-unpinned -> default", n3.selectedTab, "activity")
-  check("tabs: that tab stays unpinned", n3.unpinned.queue == true)
+  check("tabs: that tab stays unpinned", n3.unpinned.usage == true)
 
   -- unknown ids in unpinned are dropped
   local n4 = core.normalizeTabState({ unpinned = { nope = true, transcript = true } })

@@ -1084,9 +1084,10 @@ do
   -- every feed site renders before typing; none feeds the raw task verbatim
   -- 2026-09-29 (unit 26): renderFeed can refuse a task packet, so each site renders into `typed`
   -- first (keeping the task on nil) and types exactly that -- same requirement, new shape
-  check("l3-pin: all 3 feed sites render",
-        select(2, src:gsub("local typed, notFed = renderFeed%(task, %a+%)", "")) == 3
-        and select(2, src:gsub("FX%.feedTask%(winTarget%([a-z]+%), typed, pre and pre%.cmd%)", "")) == 3)
+  -- 2026-11-17: the Queue tab's Feed next (the manual site) was pruned with the tab -- autofeed + router remain
+  check("l3-pin: both feed sites render",
+        select(2, src:gsub("local typed, notFed = renderFeed%(task, %a+%)", "")) == 2
+        and select(2, src:gsub("FX%.feedTask%(winTarget%([a-z]+%), typed, pre and pre%.cmd%)", "")) == 2)
   check("l3-pin: no feed site bypasses render",
         src:find("FX.feedTask(winTarget(item), task)", 1, true) == nil
         and src:find("FX.feedTask(winTarget(it), task)", 1, true) == nil)
@@ -1107,20 +1108,16 @@ do
     check("l4-pin: applyGroups runs before the router (so .group is set for @role:)",
           agPos ~= nil and rtPos ~= nil and agPos < rtPos)
   end
-  -- L4 Inc 2: process modes (sequential vs distribute) wired to the detail panel
-  check("l4-pin: queue-route-mode handler", src:find('a == "queue%-route%-mode"') ~= nil)
-  check("l4-pin: mode handler uses queueSetMode", src:find("core.queueSetMode(FX.readQueue(qk)", 1, true) ~= nil)
+  -- L4 Inc 2: process modes (sequential vs distribute). The Queue tab's seq toggle went with the
+  -- tab (pruned 2026-11-17); the mode still rides the queue file and the tile.
   check("l4-pin: tile carries routeSeq", src:find("it.routeSeq = (core.queueRouteMode(q)", 1, true) ~= nil)
-  check("l4-pin: seq checkbox + toggle", src:find('id="q-route-seq"', 1, true) ~= nil
-        and src:find("function onRouteModeToggle()", 1, true) ~= nil)
-  check("l4-pin: seq checkbox synced from routeSeq", src:find("seqEl.checked = !!it.routeSeq", 1, true) ~= nil)
   -- L4 Inc 3: renderFeed strips the @all:/@any: join barrier before typing
   check("l4-pin: renderFeed strips barrier", src:find("local _, afterBarrier = core.taskBarrier(tostring(task or ", 1, true) ~= nil)
   -- L4 Inc 4: per-task timing — stamp at feed, ledger task_done on the done edge
   check("l4-pin: taskStart map", src:find("local taskStart", 1, true) ~= nil)
   check("l4-pin: stampTaskStart helper", src:find("local function stampTaskStart(item, task, by)", 1, true) ~= nil)
-  check("l4-pin: stamps at all 3 feed sites",
-        select(2, src:gsub('stampTaskStart%(it[em]*, task, "', "")) == 3)
+  check("l4-pin: stamps at both feed sites",   -- 2026-11-17: the Queue tab's Feed next (the manual site) was pruned with the tab -- autofeed + router remain
+        select(2, src:gsub('stampTaskStart%(it[em]*, task, "', "")) == 2)
   check("l4-pin: task_done via stepTaskDone", src:find("core.stepTaskDone(started, pv and pv.status", 1, true) ~= nil)
   check("l4-pin: task_done ledger event", src:find('type = "task_done", durationS', 1, true) ~= nil)
   -- L4 review fix: taskStart has no self-expiry -> must abandon on stale + reap vanished keys
@@ -1359,7 +1356,7 @@ do
         and src:find("var EV_EMOJI = {", 1, true) == nil)
   check("l5tab-pin: tab bar + panels markup", src:find('<div id="d-tabs">', 1, true) ~= nil
         and src:find('class="d-panel" data-tab="activity"', 1, true) ~= nil
-        and src:find('class="d-panel" data-tab="queue"', 1, true) ~= nil)
+        and src:find('class="d-panel" data-tab="changes"', 1, true) ~= nil)   -- 2026-11-17: queue's panel was pruned
   check("l5tab-pin: JS mirrors core.normalizeTabState", src:find("function normalizeTabStateJS(raw)", 1, true) ~= nil)
   check("l5tab-pin: localStorage keyed by projectKey",
         src:find('return "cc-detailTabs-" + pk', 1, true) ~= nil
@@ -1941,12 +1938,13 @@ do
         src:find("function FX.autoModelPreface(item, task)", 1, true) ~= nil
         and src:find("core.isAnthropicSession(item.model, item.base_url)", 1, true) ~= nil
         and src:find("core.suggestModel(typed, loadConfig())", 1, true) ~= nil)  -- R1-32: rendered, not bare template
-  -- all THREE feed sites (manual / autofeed / router) consult it + ledger on delivery
+  -- both feed sites (autofeed / router) consult it + ledger on delivery
+  -- 2026-11-17: the Queue tab's Feed next (the manual site) was pruned with the tab -- autofeed + router remain
   do
     local n = 0; for _ in src:gmatch("= FX%.autoModelPreface%(") do n = n + 1 end  -- call sites, not the def
-    check("dr6-pin: all 3 feed sites consult autoModelPreface", n == 3)
+    check("dr6-pin: both feed sites consult autoModelPreface", n == 2)
     local m = 0; for _ in src:gmatch('type = "model_change", from = pre%.from') do m = m + 1 end
-    check("dr6-pin: model_change ledgered (by=auto) at all 3 sites, gated on commit.persist", m == 3)
+    check("dr6-pin: model_change ledgered (by=auto) at both sites, gated on commit.persist", m == 2)
   end
   check("dr6-pin: per-session opt-in file (presence=on), off by default, NEVER fleet-wide",
         src:find("function FX.autoModelOn(key)", 1, true) ~= nil
@@ -1987,7 +1985,7 @@ do
   do
     local n = 0; for _ in src:gmatch("item%.auto_model and 0%.8 or 0") do n = n + 1 end
     local m = 0; for _ in src:gmatch("it%.auto_model and 0%.8 or 0") do m = m + 1 end
-    check("dr6-fix: all 3 feed sites reserve extra stagger for the preface ladder", (n + m) == 3)
+    check("dr6-fix: both feed sites reserve extra stagger for the preface ladder", (n + m) == 2)   -- 2026-11-17: Feed next pruned
   end
 
   -- ---- DR7: A/B fork-to-compare (panel flow, worktree isolation) --------------
@@ -3266,8 +3264,9 @@ do
           body:find("local ok, err = pcall(fn)", 1, true) ~= nil
           and body:find("FX._queueFeedBusy = false", 1, true) ~= nil)
   end
-  eq("#34-pin: all 3 feed sites are guarded (manual + autofeed + router)",
-     select(2, src:gsub("FX%.feedGuard%(function%(%)", "")), 3)
+  -- 2026-11-17: the Queue tab's Feed next (the manual site) was pruned with the tab -- autofeed + router remain
+  eq("#34-pin: both feed sites are guarded (autofeed + router)",
+     select(2, src:gsub("FX%.feedGuard%(function%(%)", "")), 2)
   check("#34-pin: a guarded-out router attempt clears its pending marker",
         src:find("end) then routePending[item.key] = nil end", 1, true) ~= nil)
 
@@ -3335,7 +3334,7 @@ do
         and src:find("{ enabled = not core.keystrokeBlocked(it), prevStatus = pv and pv.status or nil }", 1, true) ~= nil)
   local d = body("function renderDetail(){", 6000)
   check("sharedwin-pin: the detail panel greys the keystroke controls and says why",
-        d:find('var SHARED_IDS = ["b-stop","b-clear","b-compact","b-improve","b-nudge","b-feed","effort","mode","d-model"];', 1, true) ~= nil
+        d:find('var SHARED_IDS = ["b-stop","b-clear","b-compact","b-improve","b-nudge","effort","mode","d-model"];', 1, true) ~= nil
         and d:find('document.getElementById("d-shared")', 1, true) ~= nil
         and src:find('<div id="d-shared"></div>', 1, true) ~= nil)
   -- 2026-09-22: the banner sat directly under #d-head, ~20 lines above the ready-to-merge
@@ -4669,8 +4668,9 @@ end
 
 -- ---- task packets (2026-09-29, build program unit 26) ----
 -- A packet at a queue's head is gated at feed time against the target's HEAD (FX.packetGate,
--- async); the card flags a moved one, every feed site keeps the task when renderFeed refuses,
--- and the queue editor saves packets through FX.packetCapture.
+-- async); the card flags a moved one, every feed site keeps the task when renderFeed refuses.
+-- (The Queue tab's + Packet form and Feed next were pruned 2026-11-17; FX.packetCapture stays,
+-- tests/packets.test.lua drives it.)
 do
   local f = io.open(ROOT .. "claude-dashboard.lua", "r")
   local src = f and f:read("*a") or ""
@@ -4689,22 +4689,13 @@ do
         src:find("if core.packetRef(bare) then return FX.packetFeedText(bare, item) end", 1, true) ~= nil)
   local sites = 0
   for _ in src:gmatch("local typed, notFed = renderFeed%(task, %a+%)\n%s+if not typed then") do sites = sites + 1 end
-  eq("packets: all three feed sites keep the task when renderFeed refuses", sites, 3)
-  local feedHandler = src:match('\n  if a == "queue%-feed" then(.-)\n  if a == "queue%-list"') or ""
-  check("packets: Feed next checks the head first, and feeds once the check lands",
-        feedHandler:find("FX.packetGate(item, qk, head)", 1, true) ~= nil and feedHandler:find("FX.packetCheckThen(", 1, true) ~= nil)
-  check("packets: the queue editor has a packet form",
-        src:find('id="packet-form"', 1, true) ~= nil and src:find('send("queue-packet-add", selectedKey', 1, true) ~= nil)
-  check("packets: the bridge saves it through FX.packetCapture",
-        src:find('if a == "queue-packet-add" then', 1, true) ~= nil and src:find("FX.packetCapture(item, qk, fields,", 1, true) ~= nil)
-  check("packets: removing a packet's token from the queue drops the packet",
-        src:find("FX.dropPacket(qk, core.packetRef(removed))", 1, true) ~= nil)
-  check("packets: a fed packet leaves the store (three feed sites, besides its definition)",
-        select(2, src:gsub("FX%.dropPacketFed%(qk, task%)", "")) == 4 and src:find("function FX.dropPacketFed(qk, task)", 1, true) ~= nil)
+  eq("packets: both feed sites keep the task when renderFeed refuses", sites, 2)   -- 2026-11-17: Feed next pruned
+  check("packets: removing a packet's token from the queue drops the packet (☰ → Queues)",
+        src:find("if removed then FX.dropPacket(qk, (core.packetRef(removed))) end", 1, true) ~= nil)
+  check("packets: a fed packet leaves the store (both feed sites, besides its definition)",
+        select(2, src:gsub("FX%.dropPacketFed%(qk, task%)", "")) == 3 and src:find("function FX.dropPacketFed(qk, task)", 1, true) ~= nil)
   check("packets: the card's meta carries the flag (meta is esc()'d)",
         src:find('if(it.packetMoved){ meta = (meta ? meta + " · " : "") + "📦 " + it.packetMoved; }', 1, true) ~= nil)
-  check("packets: the form's result is set as text, never HTML",
-        src:find('document.getElementById("pk-msg").textContent = ', 1, true) ~= nil)
   check("packets: the unit's message carries its packet",
         src:find("message = core.fleetUnitMessage(b, unit, lease, FX.fleetPacketFor(b, unit)) })", 1, true) ~= nil)
   check("packets: FX.fleetOpenTab checks the packet before anything opens",
@@ -5493,15 +5484,7 @@ do
   check("queue hold: the tick counts held lines for the card", src:find("it.queueHeld = (held > 0) and held or nil", 1, true) ~= nil)
   check("queue hold: the router's starvation clock runs only while a line that isn't held waits",
         src:find("elseif core.queueRouted(q) and core.queuePeek(q) ~= nil then", 1, true) ~= nil)
-  check("queue hold: Feed next with every line held says so instead of doing nothing",
-        src:find("every queued line is held", 1, true) ~= nil)
-  check("queue hold: the editor's Hold goes through core.queueSetHeld, the line's text the guard",
-        src:find("core.queueSetHeld(q, req.idx, req.held == true, req.task)", 1, true) ~= nil)
-  local listJs = src:match("\nfunction FX%.queueListJs%(key, qk%).-\nend\n") or ""
-  check("queue hold: the editor's list carries each line's held state",
-        listJs:find("core.queueLines(", 1, true) ~= nil and listJs:find("ccQueueList(", 1, true) ~= nil)
-  local _, listUses = src:gsub("FX%.queueListJs%(key, qk%)", "")
-  check("queue hold: ...every reply to the editor sends it (edits and a saved packet)", listUses >= 2)
+  -- (the Queue tab's editor, its Hold and Feed next were pruned 2026-11-17; ☰ → Queues holds lines)
   -- the view
   local push = src:match("\nfunction FX%.pushQueueView%(force%).-\nend\n") or ""
   check("queue view: pushed only while it's open, or right after a click",
@@ -5796,6 +5779,20 @@ do
         and src:find("function FX.onPurposeSave", 1, true) == nil and src:find("function FX.onPurposeLoad", 1, true) == nil)
   check("pruned: the handoff note and the coach still reach DECISIONS.md",
         src:find("function FX.decisionsFile(cwd)", 1, true) ~= nil and src:find("function FX.coachDecision(root, i, act)", 1, true) ~= nil)
+  -- Queue (the tab only; Adam's Inbox answer may widen it to the engine)
+  check("pruned: no Queue tab in core.DETAIL_TABS", not ids.queue)
+  check("pruned: no Queue panel -- count, route toggles, Feed next, + Packet form or editor",
+        src:find('data-tab="queue"', 1, true) == nil and src:find('id="q-count"', 1, true) == nil
+        and src:find('id="q-route"', 1, true) == nil and src:find('id="b-feed"', 1, true) == nil
+        and src:find('id="packet-form"', 1, true) == nil and src:find('id="queue-list"', 1, true) == nil)
+  check("pruned: no Queue tab bridge actions",
+        src:find('a == "queue-feed"', 1, true) == nil and src:find('a == "queue-packet-add"', 1, true) == nil
+        and src:find('a == "queue-list"', 1, true) == nil and src:find('a == "queue-route"', 1, true) == nil
+        and src:find('a == "queue-route-mode"', 1, true) == nil and src:find("function FX.queueListJs", 1, true) == nil)
+  check("pruned: the Queue button by the message box and ☰ → Queues still work",
+        src:find('<button id="b-queue" onclick="queueAdd()">Queue</button>', 1, true) ~= nil
+        and src:find('if a == "queue-add" then', 1, true) ~= nil and src:find('if a == "queue-add-bulk" then', 1, true) ~= nil
+        and src:find('if a == "queue-view-edit" then', 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

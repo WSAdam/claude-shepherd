@@ -1213,15 +1213,6 @@ function FX.queueKeyFor(item)
   end
   return qk or legacy
 end
--- The detail panel's queue editor gets its list as each line's text plus, 2026-10-03 (D4b), which
--- lines are held (core.queueLines) -- the texts stay a plain array, so the editor's other code is unchanged.
-function FX.queueListJs(key, qk)
-  local texts, held = {}, {}
-  for i, l in ipairs(core.queueLines(FX.readQueue(qk))) do texts[i] = l.text; held[i] = l.held end
-  local tj = (#texts > 0) and hs.json.encode(texts) or "[]"
-  local hj = (#held > 0) and hs.json.encode(held) or "[]"
-  pcall(function() wv:evaluateJavaScript("ccQueueList(" .. jsString(key) .. ", " .. tj .. ", " .. hj .. ")") end)
-end
 -- Returns whether the task was actually delivered (false = the no-window-match
 -- guard skipped the paste); callers must NOT pop the queue on a skip. `preface` (DR6,
 -- optional) is a slash command (e.g. "/model opus") submitted first in the SAME focus
@@ -15237,145 +15228,20 @@ local function handleBridgeMsg(msg)
     end
     return
   end
-  if a == "queue-feed" then
-    local key = tostring(payload.v or "")
-    local item = byKey[key]
-    if item and item.remote then
-      pcall(function() FX.alert("Claude Shepherd: can't feed a remote session (no local window)") end)
-      return
-    end
-    if item then
-      -- 2026-09-29 (unit 26): a task packet at the head is fed only once its cited code is checked
-      -- unchanged at this session's HEAD. Not checked yet: the check runs in the background and this
-      -- Feed next runs again once it lands (once). Moved: not fed, and said so.
-      do
-        local qk = FX.queueKeyFor(item)
-        local qNow = FX.readQueue(qk)
-        local head = core.queuePeek(qNow)
-        -- 2026-10-03 (D4b): Feed next skips held lines like every feed; with every line held it
-        -- says so rather than doing nothing
-        if head == nil and core.queueDepth(qNow) > 0 then
-          print("[cc-queue] not fed: every queued line is held -- " .. tostring(qk))
-          pcall(function() FX.alert("Claude Shepherd: nothing fed -- every queued line is held") end)
-          return
-        end
-        local g, why = FX.packetGate(item, qk, head)
-        if g == "wait" and not payload.packetRetried then
-          payload.packetRetried = true
-          local again = hs.json.encode(payload)
-          if FX.packetCheckThen(item, qk, head, function() handleBridgeMsg({ body = again }) end) then return end
-        elseif g and g ~= "feed" and g ~= "wait" then
-          print("[cc-queue] not fed: " .. tostring(why) .. " -- task kept queued")
-          pcall(function() FX.alert("Claude Shepherd: not fed -- " .. tostring(why)) end)
-          return
-        end
-      end
-      -- Serialized on the shared injection tail (R3 #2/#5): the paste ladder
-      -- must queue behind in-flight chains. The pop runs INSIDE the slot -- the
-      -- queue is re-read at dispatch time (an earlier slot may have consumed
-      -- the head) and the pop decision still gates on feedTask's synchronous
-      -- delivery result: only a DELIVERED paste pops the queue (persisting q2
-      -- after a skipped paste would silently destroy the task).
-      -- #34: FX.feedGuard makes the pop->deliver->write single-flight -- a kitty
-      -- delivery pumps the run loop (waitUntilExit) and a nested router/autofeed
-      -- tick or a double-clicked "Feed next" would pop + deliver the SAME head twice.
-      dispatchSerialized(item, a, function()
-        FX.feedGuard(function()
-        local qk = FX.queueKeyFor(item)
-        local task, q2 = core.queuePop(FX.readQueue(qk))
-        if task then
-          -- 2026-09-29 (unit 26): a packet not checked unchanged is not typed; it stays queued
-          local typed, notFed = renderFeed(task, item)
-          if not typed then
-            print("[cc-queue] not fed: " .. tostring(notFed) .. " -- task kept queued")
-            pcall(function() FX.alert("Claude Shepherd: not fed -- " .. tostring(notFed)) end)
-            return
-          end
-          local pre = FX.autoModelPreface(item, task)   -- DR6 (nil unless opted-in + a different tier)
-          local commit = core.queueFeedCommit(FX.feedTask(winTarget(item), typed, pre and pre.cmd))
-          if commit.persist then
-            FX.writeQueue(qk, q2); FX.dropPacketFed(qk, task); stampTaskStart(item, task, "manual")
-            if pre then ledgerFor(item, { type = "model_change", from = pre.from, to = pre.model, by = "auto", reason = pre.reason }); item.model = pre.model; FX.patchStatus(item.key, { model = pre.model }) end
-          else print("[cc-queue] feed skipped (no window match) -- task kept queued") end
-          ledgerFor(item, { type = commit.event, task = tostring(task):sub(1, 200), by = "manual" })
-        end
-        end)
-      end, item.auto_model and 0.8 or 0)   -- DR6: reserve extra stagger for the /model preface ladder
-    end
-    return
-  end
-  -- 2026-09-29 (unit 26): save a task packet from the queue editor. Its cites are read at the
-  -- session's HEAD in the background (FX.packetCapture); the store is written atomically, then its
-  -- token is queued and the editor's list refreshed.
-  if a == "queue-packet-add" then
-    local key = tostring(payload.v or "")
-    local item = byKey[key]
-    local function reply(ok, msg)
-      pcall(function() wv:evaluateJavaScript("ccPacketResult(" .. jsString(key) .. ", " .. (ok and "true" or "false")
-        .. ", " .. jsString(tostring(msg or "")) .. ")") end)
-    end
-    if not item or item.remote then reply(false, "Packets are saved for a local session."); return end
-    local okr, fields = pcall(hs.json.decode, payload.text or "{}")
-    if not okr or type(fields) ~= "table" then reply(false, "The packet form didn't arrive whole."); return end
-    local qk = FX.queueKeyFor(item)
-    FX.packetCapture(item, qk, fields, function(ok, idOrWhy, token)
-      if not ok then
-        print("[cc-queue] ⚠️ packet not saved for " .. tostring(qk) .. ": " .. tostring(idOrWhy))
-        reply(false, "Not saved: " .. tostring(idOrWhy))
-        return
-      end
-      ledgerFor(item, { type = "queue_edit", op = "packet_add", packet = idOrWhy })
-      reply(true, "Queued " .. tostring(token))
-      FX.queueListJs(key, qk)
-    end)
-    return
-  end
-  -- Queue editing (roadmap #5): list / reorder / remove / bulk-add. Every
-  -- mutation re-reads the file INSIDE the handler (the autofeed loop pops heads
-  -- asynchronously, so the JS snapshot may be stale), passes the clicked task
-  -- text as the `expect` guard, and always replies with the fresh list so the
-  -- panel self-heals after a refused edit.
-  if a == "queue-list" or a == "queue-move" or a == "queue-remove" or a == "queue-add-bulk" or a == "queue-hold" then
+  -- Bulk paste from the Queue button (roadmap #5b): one task per line (core.queueSplitLines).
+  -- (The Queue tab's editor -- list / move / remove / hold, Feed next, + Packet and the route
+  -- toggles -- was pruned 2026-11-17; ☰ → Queues edits every queue.)
+  if a == "queue-add-bulk" then
     local key = tostring(payload.v or "")
     local item = byKey[key]
     local qk = item and FX.queueKeyFor(item) or ((key ~= "") and key or nil)
     if not qk then return end
-    if a == "queue-move" or a == "queue-remove" or a == "queue-hold" then
-      local okr, req = pcall(hs.json.decode, payload.text or "{}")
-      req = (okr and type(req) == "table") and req or {}
-      local q = FX.readQueue(qk)
-      if a == "queue-hold" then
-        -- 2026-10-03 (D4b): hold or release one line; it keeps its place, and every feed skips it
-        local q2, ok = core.queueSetHeld(q, req.idx, req.held == true, req.task)
-        if ok then
-          FX.writeQueue(qk, q2)
-          print("[cc-queue] " .. (req.held == true and "⏸ held" or "▶ released") .. " line " .. tostring(req.idx) .. " of " .. qk)
-          if item then ledgerFor(item, { type = "queue_edit", op = req.held == true and "hold" or "release" }) end
-        end
-      elseif a == "queue-move" then
-        local q2, moved = core.queueMove(q, req.idx, req.dir, req.task)
-        if moved then
-          FX.writeQueue(qk, q2)
-          if item then ledgerFor(item, { type = "queue_edit", op = "move" }) end
-        end
-      else
-        local q2, removed = core.queueRemoveAt(q, req.idx, req.task)
-        if removed then
-          FX.writeQueue(qk, q2)
-          FX.dropPacket(qk, core.packetRef(removed))   -- 2026-09-29: a removed packet's token takes the packet
-          if item then ledgerFor(item, { type = "queue_edit", op = "remove",
-            task = tostring(removed):sub(1, 200) }) end
-        end
-      end
-    elseif a == "queue-add-bulk" then
-      local tasks = core.queueSplitLines(payload.text)
-      if #tasks > 0 then
-        FX.writeQueue(qk, core.queuePushAll(FX.readQueue(qk), tasks))
-        print("[cc-queue] bulk-queued " .. #tasks .. " task(s) for " .. qk)
-        if item then ledgerFor(item, { type = "queue_edit", op = "bulk_add", count = #tasks }) end
-      end
+    local tasks = core.queueSplitLines(payload.text)
+    if #tasks > 0 then
+      FX.writeQueue(qk, core.queuePushAll(FX.readQueue(qk), tasks))
+      print("[cc-queue] bulk-queued " .. #tasks .. " task(s) for " .. qk)
+      if item then ledgerFor(item, { type = "queue_edit", op = "bulk_add", count = #tasks }) end
     end
-    FX.queueListJs(key, qk)
     return
   end
   -- 2026-10-03 (D4b): ☰ → Queues, every session's queue in one place (FX.queueViewRows). A click
@@ -15391,32 +15257,6 @@ local function handleBridgeMsg(msg)
       pcall(function() FX.alert("Claude Shepherd: queue not changed -- " .. tostring(why)) end)
     end
     pcall(FX.pushQueueView, true)
-    return
-  end
-  -- 4c-E: arm/disarm project routing for this project's queue. The flag lives
-  -- in the queue file (routing:true) so it inherits projectKey keying; every
-  -- session of the project shows the same toggle (intended -- it's per-project).
-  if a == "queue-route" then
-    local key = tostring(payload.v or "")
-    local item = byKey[key]
-    if not item then return end
-    local qk = FX.queueKeyFor(item)
-    local on = tostring(payload.text or "") == "on"
-    FX.writeQueue(qk, core.queueSetRouted(FX.readQueue(qk), on))
-    print("[cc-route] " .. qk .. " routing " .. (on and "ARMED" or "off"))
-    ledgerFor(item, { type = "route_arm", on = on })
-    return
-  end
-  if a == "queue-route-mode" then
-    -- L4 process mode: distribute (default, fan out) vs sequential (one routed
-    -- task in flight at a time). Rides the queue file like the arm flag.
-    local item = byKey[tostring(payload.v or "")]
-    if not item then return end
-    local qk = FX.queueKeyFor(item)
-    local seq = tostring(payload.text or "") == "sequential"
-    FX.writeQueue(qk, core.queueSetMode(FX.readQueue(qk), seq and "sequential" or "distribute"))
-    print("[cc-route] " .. qk .. " mode " .. (seq and "sequential" or "distribute"))
-    ledgerFor(item, { type = "route_mode", mode = seq and "sequential" or "distribute" })
     return
   end
   -- Saved task templates (roadmap #5c; L3): named reusable task strings in
@@ -18465,36 +18305,6 @@ local HTML = [[
              font-size:12px; padding:0 2px; }
   #b-nudge, #b-queue { background:var(--surface); color:var(--text-2); border:1px solid var(--border);
              border-radius:8px; font-size:12px; padding:5px 10px; cursor:pointer; }
-  #queue-row { display:flex; align-items:center; gap:8px; margin-top:8px; }
-  #q-count { font-size:12px; color:var(--accent-text); flex:1; cursor:pointer; }
-  #q-count:hover { text-decoration:underline; }
-  #route-lbl { font-size:11px; color:var(--text-3); display:flex; align-items:center; gap:3px; cursor:pointer; }
-  /* queue editor (roadmap #5): expandable task list with reorder/remove */
-  #queue-list { display:none; margin-top:4px; border:1px solid var(--border); border-radius:8px;
-                background:var(--surface-3); max-height:140px; overflow-y:auto; }
-  #queue-list.show { display:block; }
-  .ql-row { display:flex; align-items:center; gap:4px; padding:3px 8px;
-            border-bottom:1px solid var(--border-weak); font-size:12px; }
-  .ql-row:last-child { border-bottom:none; }
-  .ql-text { flex:1; color:var(--text-2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .ql-row button { background:none; border:1px solid var(--border); color:var(--text-3); border-radius:5px;
-                   padding:0 5px; cursor:pointer; font-size:11px; }
-  .ql-row button:disabled { opacity:.3; cursor:default; }
-  .ql-row button.ql-x { color:#e88; border-color:#3a2c2f; }
-  .ql-row.held .ql-text { color:var(--dim); }
-  /* task packets (2026-09-29): the + Packet form under the queue row */
-  #b-packet { background:var(--surface); color:var(--text-2); border:1px solid var(--border); border-radius:8px;
-              font-size:12px; padding:5px 10px; cursor:pointer; }
-  #packet-form { display:none; flex-direction:column; gap:4px; margin-top:6px; padding:6px;
-                 border:1px solid var(--border); border-radius:8px; background:var(--surface-3); }
-  #packet-form.show { display:flex; }
-  #packet-form input, #packet-form textarea { width:100%; box-sizing:border-box; background:var(--surface-2); color:var(--text);
-                 border:1px solid var(--border); border-radius:6px; padding:4px 7px; font-size:12px; font-family:inherit; resize:vertical; }
-  #pk-cites { font-family:ui-monospace, Menlo, monospace; }
-  .pk-actions { display:flex; align-items:center; gap:6px; }
-  .pk-actions button { background:var(--surface); color:var(--text-2); border:1px solid var(--border); border-radius:6px;
-                       font-size:12px; padding:3px 9px; cursor:pointer; }
-  #pk-msg { flex:1; min-width:0; font-size:11px; color:var(--text-3); overflow-wrap:anywhere; }
   /* saved task templates (roadmap #5c) */
   #b-tpl { background:var(--surface); color:var(--text-2); border:1px solid var(--border); border-radius:8px;
            font-size:12px; padding:4px 8px; cursor:pointer; }
@@ -18545,8 +18355,6 @@ local HTML = [[
   .todo-row.todo-active { color:var(--accent-text); font-weight:600; }
   .d-plan-pre { white-space:pre-wrap; font-size:11px; color:var(--text-2); background:var(--surface-2); border:1px solid var(--border-weak);
                 border-radius:5px; padding:5px 7px; margin:2px 0 0; max-height:160px; overflow-y:auto; }
-  #b-feed { background:var(--surface); color:var(--ok); border:1px solid var(--ok); border-radius:8px;
-            font-size:12px; padding:5px 10px; cursor:pointer; }
   .qbadge { color:var(--accent-text); }
 
   /* new-session overlay (F3-F5): own ids so it never collides with #settings */
@@ -18826,7 +18634,7 @@ local HTML = [[
 .qv-line button{ background:none; border:1px solid var(--border); color:var(--text-3); border-radius:5px; padding:0 5px; cursor:pointer; font-size:11px; }
 .qv-line button:disabled{ opacity:.3; cursor:default; }
 .qv-line button.qv-x{ color:#e88; border-color:#3a2c2f; }
-.qv-hold, .ql-hold{ font-size:9px; font-weight:700; color:#8fd0f0; border:1px solid #8fd0f0; border-radius:4px; padding:0 3px; }
+.qv-hold{ font-size:9px; font-weight:700; color:#8fd0f0; border:1px solid #8fd0f0; border-radius:4px; padding:0 3px; }
 .qv-next{ font-size:9px; color:var(--accent-text); }
 .qv-pk{ width:100%; padding-left:18px; font-size:11px; color:var(--dim); overflow-wrap:anywhere; }
 .qv-pk-moved, .qv-pk-missing, .qv-pk-unreadable{ color:var(--st-approval); }
@@ -19487,25 +19295,6 @@ local HTML = [[
     <!-- Compare (2026-10-27; it replaced Requirements): you against up to 5 GitHub users, weekly -->
     <div class="d-panel" data-tab="compare">
       <div id="d-compare" onclick="compareAct(event)"></div>
-    </div>
-    <div class="d-panel" data-tab="queue">
-      <div id="queue-row">
-        <span id="q-count" onclick="toggleQueueList()" title="Click to view / reorder / remove queued tasks"></span>
-        <label id="route-lbl" title="4c-E project routing: feed this project's queue to WHICHEVER of its sessions is free (not just the one that finished). Per-project flag; also needs Settings &rarr; Queue &rarr; project routing enabled. Logged as by:'router'."><input type="checkbox" id="q-route" onchange="onRouteToggle()"> route</label>
-        <label id="route-seq-lbl" title="L4 process mode. Sequential: run this project's queue ONE routed task at a time (the next starts only after the current finishes) &mdash; serialize through the fleet. Off = distribute: fan tasks out across whichever sessions are free."><input type="checkbox" id="q-route-seq" onchange="onRouteModeToggle()"> seq</label>
-        <button id="b-feed" onclick="act('queue-feed')">Feed next</button>
-        <button id="b-packet" onclick="togglePacketForm()" title="Queue a task with its evidence: the code it cites (read now, with its commit), repro steps and when it's done. It is fed only while that code is unchanged at the session's HEAD.">+ Packet</button>
-      </div>
-      <!-- 2026-09-29 (unit 26): a task packet -- queued as @packet:pN, fed only while its cited code is unchanged -->
-      <div id="packet-form">
-        <input id="pk-title" maxlength="80" placeholder="Title (defaults to the task's first line)">
-        <textarea id="pk-task" rows="3" placeholder="Task: what the session should do"></textarea>
-        <textarea id="pk-cites" rows="2" placeholder="Cited code, one per line: path:line or path:from-to, relative to the repo root"></textarea>
-        <textarea id="pk-repro" rows="2" placeholder="Repro steps (optional)"></textarea>
-        <textarea id="pk-done" rows="2" placeholder="Done when (optional)"></textarea>
-        <div class="pk-actions"><button onclick="savePacket()">Save &amp; queue</button><button onclick="togglePacketForm(false)">Cancel</button><span id="pk-msg"></span></div>
-      </div>
-      <div id="queue-list"></div>
     </div>
     <!-- The shared-window banner heads the KEYSTROKE controls it governs (2026-09-22). It used to
          sit under #d-head, above the merge review -- which is decided by files, works in a shared
@@ -20627,107 +20416,6 @@ local HTML = [[
         }
       }
       send("queue-add", selectedKey, t); resetInput(el);
-    }
-
-    // ---- Queue editor (roadmap #5a): list / reorder / remove ---------------
-    var QUEUE_LIST = { key: null, tasks: [], held: [] };
-    var queueListOpen = false;
-    function toggleQueueList(){
-      queueListOpen = !queueListOpen;
-      if(queueListOpen && selectedKey){ send("queue-list", selectedKey); }
-      renderQueueList();
-    }
-    // 2026-10-03 (D4b): `held` is a parallel array (FX.queueListJs) -- which lines are held
-    function ccQueueList(key, tasks, held){
-      QUEUE_LIST = { key: key, tasks: tasks || [], held: Array.isArray(held) ? held : [] };
-      renderQueueList();
-    }
-    function queueListRowsHtml(ql){
-      var tasks = (ql && Array.isArray(ql.tasks)) ? ql.tasks : [];
-      var heldList = (ql && Array.isArray(ql.held)) ? ql.held : [];
-      var n = tasks.length;
-      return tasks.map(function(t, i){
-        var held = heldList[i] === true;
-        // idx+task ride along as the expect guard: the Lua side refuses the
-        // edit if the queue changed underneath (autofeed popped the head).
-        return '<div class="ql-row' + (held ? ' held' : '') + '">'
-          + '<span class="ql-text" title="' + esc(t) + '">' + (i+1) + '. ' + esc(t) + '</span>'
-          + (held ? '<span class="ql-hold" title="' + esc(QV_HOLD_TIP) + '">HOLD</span>' : '')
-          + (held ? '<button onclick="queueHold(' + i + ')" title="' + esc(QV_RELEASE_TIP) + '">Release</button>'
-                  : '<button onclick="queueHold(' + i + ')" title="' + esc(QV_HOLD_TIP) + '">Hold</button>')
-          + '<button onclick="queueMove(' + i + ',-1)"' + (i === 0 ? ' disabled' : '') + ' title="Move up">▲</button>'
-          + '<button onclick="queueMove(' + i + ',1)"' + (i === n-1 ? ' disabled' : '') + ' title="Move down">▼</button>'
-          + '<button class="ql-x" onclick="queueRemove(' + i + ')" title="Remove">✕</button>'
-          + '</div>';
-      }).join("");
-    }
-    function renderQueueList(){
-      var box = document.getElementById("queue-list"); if(!box) return;
-      var ok = queueListOpen && selectedKey && QUEUE_LIST.key === selectedKey
-               && QUEUE_LIST.tasks && QUEUE_LIST.tasks.length;
-      box.classList.toggle("show", !!ok);
-      if(!ok){ box.innerHTML = ""; return; }
-      box.innerHTML = queueListRowsHtml(QUEUE_LIST);
-    }
-    // 2026-10-03 (D4b): hold or release one line -- its number and text are the stale-list guard
-    function queueHold(i){
-      if(!selectedKey) return;
-      var t = QUEUE_LIST.tasks[i];
-      if(typeof t !== "string") return;
-      var held = Array.isArray(QUEUE_LIST.held) && QUEUE_LIST.held[i] === true;
-      send("queue-hold", selectedKey, JSON.stringify({ idx: i+1, task: t, held: !held }));
-    }
-    // 2026-10-03 (D4b): the detail's "Queue: 3 (1 held) ▾", and whether the open editor's list is out
-    // of date -- a line fed, or held or released from the Queues view, re-fetches it
-    function queueCountText(it, n){
-      return n > 0 ? ("Queue: " + n + (it.queueHeld ? " (" + Number(it.queueHeld) + " held)" : "") + " ▾") : "Queue: empty";
-    }
-    function queueListStale(it, n){
-      var held = (QUEUE_LIST.held || []).filter(function(h){ return h === true; }).length;
-      return QUEUE_LIST.tasks.length !== n || held !== (it.queueHeld || 0);
-    }
-    function queueMove(i, dir){
-      if(!selectedKey) return;
-      send("queue-move", selectedKey, JSON.stringify({ idx: i+1, dir: dir, task: QUEUE_LIST.tasks[i] }));
-    }
-    function queueRemove(i){
-      if(!selectedKey) return;
-      send("queue-remove", selectedKey, JSON.stringify({ idx: i+1, task: QUEUE_LIST.tasks[i] }));
-    }
-    // ---- Task packets (2026-09-29, unit 26): a queued task that carries its evidence ----
-    // The cites are read at the session's HEAD on the Lua side (FX.packetCapture); the result comes
-    // back through ccPacketResult, as text.
-    function togglePacketForm(on){
-      var f = document.getElementById("packet-form"); if(!f) return;
-      var show = (on === undefined) ? !f.classList.contains("show") : !!on;
-      f.classList.toggle("show", show);
-      if(show){ document.getElementById("pk-msg").textContent = ""; document.getElementById("pk-task").focus(); }
-    }
-    function packetField(id){ var el = document.getElementById(id); return el ? (el.value || "") : ""; }
-    function savePacket(){
-      if(!selectedKey) return;
-      var fields = { title: packetField("pk-title"), task: packetField("pk-task"), cites: packetField("pk-cites"),
-                     repro: packetField("pk-repro"), doneWhen: packetField("pk-done") };
-      if(!fields.task.trim()){ document.getElementById("pk-msg").textContent = "A packet needs its task."; return; }
-      document.getElementById("pk-msg").textContent = "Reading the cited code…";
-      send("queue-packet-add", selectedKey, JSON.stringify(fields));
-    }
-    function ccPacketResult(key, ok, msg){
-      if(key !== selectedKey) return;
-      document.getElementById("pk-msg").textContent = msg || "";
-      if(ok){
-        "pk-title pk-task pk-cites pk-repro pk-done".split(" ").forEach(function(id){ document.getElementById(id).value = ""; });
-      }
-    }
-    // 4c-E: arm/disarm project routing (per-project flag in the queue file).
-    function onRouteToggle(){
-      if(!selectedKey) return;
-      send("queue-route", selectedKey, document.getElementById("q-route").checked ? "on" : "off");
-    }
-    // L4: distribute (default) vs sequential (one routed task in flight at a time).
-    function onRouteModeToggle(){
-      if(!selectedKey) return;
-      send("queue-route-mode", selectedKey, document.getElementById("q-route-seq").checked ? "sequential" : "distribute");
     }
 
     // ---- Saved task templates (roadmap #5c; L3) ----------------------------
@@ -23551,8 +23239,6 @@ local HTML = [[
         detailExpanded = { pending:false, activity:false };
         var dnSel = document.getElementById("deny-note"); if(dnSel) dnSel.value = "";   // a reason is for ONE session's request
         requestDecisions(key);  // gate decision log loads per selection, not per tick
-        queueListOpen = false; renderQueueList();   // queue editor is per-session
-        togglePacketForm(false);                     // ...and so is the packet form (2026-09-29)
         tplOpen = false; renderTemplates();
         CHANGES = { key:null, data:null }; CH_DIFFS = {}; CH_OPEN = {};  // git Changes: per-session
         STORIES = { key:null, data:null, blocks:null, hash:null, dirty:false, editing:null, flash:null };  // per-session
@@ -23675,8 +23361,6 @@ local HTML = [[
         // one is due) and paints what it has meanwhile; ccCompare repaints
         send("compare-load", "");
         renderCompare();
-      } else if(detailTab === "queue"){
-        if(!queueListOpen){ var it2 = findItem(selectedKey); if(it2 && (it2.queue||0) > 0){ toggleQueueList(); } }
       }
     }
     // ---- L5 Changes tab: per-session git working-tree status + per-file diff --
@@ -24645,19 +24329,6 @@ local HTML = [[
       syncAutoModel(it);
       renderDecisions();
       renderDetailUsage(it);
-      var n = it.queue || 0;
-      document.getElementById("q-count").textContent = queueCountText(it, n);
-      document.getElementById("b-feed").style.display = n>0 ? "inline-block" : "none";
-      document.getElementById("q-route").checked = !!it.routed;
-      var seqEl = document.getElementById("q-route-seq"); if(seqEl) seqEl.checked = !!it.routeSeq;
-      // Keep the open queue editor honest: re-fetch when the depth moved
-      // (autofeed/manual feed popped a head) and fold it shut when empty.
-      if(queueListOpen){
-        if(n === 0){ queueListOpen = false; renderQueueList(); }
-        else if(QUEUE_LIST.key === selectedKey && queueListStale(it, n)){
-          send("queue-list", selectedKey);
-        }
-      }
       var ba = document.getElementById("b-auto");
       ba.textContent = it.autopilot ? "Autopilot: ON" : "Autopilot";
       ba.style.color = it.autopilot ? "#8fd4a3" : "#e8e9ee";
@@ -24679,7 +24350,7 @@ local HTML = [[
       var gateWait = it.gate === "waiting";
       var REMOTE_T = "Remote session — headless approve/deny only";
       var SHARED_T = "Its VS Code window hosts " + sharedN + " Claude sessions — Shepherd can't pick the tab, so it won't type here. Jump there and act in the tab.";
-      var SHARED_IDS = ["b-stop","b-clear","b-compact","b-improve","b-nudge","b-feed","effort","mode","d-model"];
+      var SHARED_IDS = ["b-stop","b-clear","b-compact","b-improve","b-nudge","effort","mode","d-model"];
       // Lock with a reason as the tooltip; unlocking restores the tooltip it had (controls
       // never locked keep whatever title other code gives them, e.g. syncGateSelect).
       function lockCtl(el, why){
@@ -24692,7 +24363,7 @@ local HTML = [[
         }
       }
       // b-verify, b-coach: a remote session has no checkout here; they type nothing, so a shared window keeps them
-      ["b-jump","b-stop","b-auto","b-talk","b-hold","b-clear","b-compact","b-improve","b-nudge","b-feed",
+      ["b-jump","b-stop","b-auto","b-talk","b-hold","b-clear","b-compact","b-improve","b-nudge",
        "effort","mode","d-model","d-gate","d-policy","nudge","b-verify","b-coach"].forEach(function(id){
         var el = document.getElementById(id); if(!el) return;
         var why = remote ? REMOTE_T : ((shared && SHARED_IDS.indexOf(id) >= 0) ? SHARED_T : "");

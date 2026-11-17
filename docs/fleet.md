@@ -295,7 +295,6 @@ session is never in the snapshot.
 - **User Stories**: shown only when the project has `spec/product/user-stories.md` (below).
 - **Compare**: a weekly leaderboard of you against up to 5 GitHub users (below). The same board on
   every card.
-- **Queue**: the session's task queue ([Automation → Task queue](automation.md#task-queue)).
 
 The expensive tabs load only when opened. The **⋯** button hides tabs you don't want; your choice
 (and the last-open tab) is remembered per project.

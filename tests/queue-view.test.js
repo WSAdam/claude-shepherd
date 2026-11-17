@@ -3,8 +3,8 @@
 //
 // ☰ → 📑 Queues lists every ~/.claude/cc-queue/*.json (core.queueViewRows): whose queue it is, each
 // line held or not, the line that feeds next, and an @packet line's last drift check. Each line has
-// Hold / Release, ▲ ▼ and ✕ (which asks first). The detail panel's queue editor gains the same
-// Hold / Release per line. Every word came from a session or its queue, so each goes through esc();
+// Hold / Release, ▲ ▼ and ✕ (which asks first). (The detail panel's Queue tab editor, which had the
+// same Hold / Release, was pruned 2026-11-17.) Every word came from a session or its queue, so each goes through esc();
 // a click sends only what the row arrays hold (the queue file's key, the line's number and its text
 // as the stale-list guard) -- never text read back out of the markup. Runs the REAL shipped
 // functions sliced out of claude-dashboard.lua (the tickets-view.test.js pattern).
@@ -37,17 +37,14 @@ const pkSrc = slice("    var QV_PK = ", ";\n");
 const tipsSrc = (slice("    var QV_HOLD_TIP = ", ";\n") || "") + "\n" + (slice("    var QV_RELEASE_TIP = ", ";\n") || "");
 const viewSrc = slice("    function queueViewHtml(rows){", "\n    }\n");
 const actSrc = slice("    function queueViewAct(ev){", "\n    }\n");
-const listSrc = slice("    function queueListRowsHtml(ql){", "\n    }\n");
-const holdSrc = slice("    function queueHold(i){", "\n    }\n");
 check("the panel ships queueViewHtml and queueViewAct", viewSrc !== null && actSrc !== null && opsSrc !== null && pkSrc !== null);
-check("the panel ships the editor's queueListRowsHtml and queueHold", listSrc !== null && holdSrc !== null);
 check("the panel ships the Hold / Release wording", tipsSrc.indexOf("var QV_HOLD_TIP") >= 0 && tipsSrc.indexOf("var QV_RELEASE_TIP") >= 0);
 check("the card's meta says how many queued lines are held", src.indexOf('(it.queueHeld ? " (" + Number(it.queueHeld) + " held)" : "")') >= 0);
+check("the Queue tab's editor is gone (pruned 2026-11-17)", src.indexOf("function queueListRowsHtml(ql){") < 0 && src.indexOf("function queueHold(i){") < 0);
 check("the panel has the Queues view (id queues)", src.indexOf('<div id="queues">') >= 0);
 check("☰ opens it", src.indexOf("menuPick('queues')") >= 0 && src.indexOf('else if(which === "queues") openQueueView();') >= 0);
-check("the editor renders through queueListRowsHtml", src.indexOf("box.innerHTML = queueListRowsHtml(QUEUE_LIST);") >= 0);
 check("the Queues view tells Lua it opened and closed", src.indexOf('send("queues-open");') >= 0 && src.indexOf('send("queues-close");') >= 0);
-if (!(escSrc && opsSrc && pkSrc && viewSrc && actSrc && listSrc && holdSrc)) {
+if (!(escSrc && opsSrc && pkSrc && viewSrc && actSrc)) {
   console.log("\n-- queue-view.test.js: " + run + " run, " + failed + " failed --");
   process.exit(1);
 }
@@ -56,15 +53,15 @@ const asked = [];
 let answer = true;
 const opened = [];
 const lib = new Function("sent", "asked", "getAnswer", "opened",
-  "var QUEUES = { rows: [] }; var QUEUE_LIST = { key: null, tasks: [], held: [] }; var selectedKey = 'sel-1';\n" +
+  "var QUEUES = { rows: [] }; var selectedKey = 'sel-1';\n" +
   "function send(a, v, text){ sent.push([a, v, text]); }\n" +
   "function confirm(m){ asked.push(m); return getAnswer(); }\n" +
   "function fmtAge(since){ return String(Math.floor(Date.now()/1000) - since) + 's'; }\n" +
   "function closeQueueView(){ opened.push('closed'); }\n" +
   "function selectTile(k){ opened.push(k); }\n" +
-  escSrc + "\n" + opsSrc + "\n" + pkSrc + "\n" + tipsSrc + "\n" + viewSrc + "\n" + actSrc + "\n" + listSrc + "\n" + holdSrc +
-  "\nreturn { queueViewHtml, queueViewAct, queueListRowsHtml, queueHold," +
-  " setRows: function(r){ QUEUES.rows = r; }, setList: function(l){ QUEUE_LIST = l; } };")(sent, asked, () => answer, opened);
+  escSrc + "\n" + opsSrc + "\n" + pkSrc + "\n" + tipsSrc + "\n" + viewSrc + "\n" + actSrc +
+  "\nreturn { queueViewHtml, queueViewAct," +
+  " setRows: function(r){ QUEUES.rows = r; } };")(sent, asked, () => answer, opened);
 
 // ---- the view's rows ----
 check("no queued lines: says so", /No queued lines/.test(lib.queueViewHtml([])));
@@ -131,21 +128,7 @@ click(0, null, "open", 1);
 eq("a session's name opens its card", opened.join(","), "closed,s2");
 eq("...and sends nothing", sent.length, 0);
 
-// ---- the detail panel's queue editor: Hold / Release per line ----
-const EL = lib.queueListRowsHtml({ key: "sel-1", tasks: ["a" + EVIL, "b"], held: [true, false] });
-check("editor: escaped", EL.indexOf("<img") < 0 && EL.indexOf("&lt;img") >= 0);
-check("editor: a held line says HOLD and offers Release", /ql-row held/.test(EL) && />Release<\/button>/.test(EL));
-check("editor: a line that isn't held offers Hold", />Hold<\/button>/.test(EL));
-check("editor: an old list with no held array reads every line as not held",
-      lib.queueListRowsHtml({ key: "sel-1", tasks: ["x"] }).indexOf(">Hold</button>") >= 0);
-lib.setList({ key: "sel-1", tasks: ["a" + EVIL, "b"], held: [true, false] });
-lib.queueHold(0);
-eq("editor: Release sends the line's number, its text and the new state",
-   JSON.stringify(sent.pop()), JSON.stringify(["queue-hold", "sel-1", JSON.stringify({ idx: 1, task: "a" + EVIL, held: false })]));
-lib.queueHold(1);
-eq("editor: Hold the same way", JSON.parse(sent.pop()[2]).held, true);
-lib.queueHold(7);
-eq("editor: a line that isn't there sends nothing", sent.length, 0);
+// (the detail panel's Queue tab editor and its Hold / Release went with the tab, pruned 2026-11-17)
 
 console.log("\n-- queue-view.test.js: " + run + " run, " + failed + " failed --");
 process.exit(failed === 0 ? 0 : 1);
