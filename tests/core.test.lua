@@ -7564,65 +7564,6 @@ do
   eq("subagentsDir: nil without .jsonl", core.subagentsDir("/p/sess"), nil)
   eq("subagentsDir: nil for non-string", core.subagentsDir(nil), nil)
 
-  local meta = core.subagentMeta(core.json.encode(
-    { type = "user", agentId = "a382c84e9550c1460", slug = "do-a-full-scan-sunny-panda", isSidechain = true }))
-  eq("subagentMeta: agentId", meta and meta.agentId, "a382c84e9550c1460")
-  eq("subagentMeta: slug", meta and meta.slug, "do-a-full-scan-sunny-panda")
-  eq("subagentMeta: nil for non-json", core.subagentMeta("not json"), nil)
-  eq("subagentMeta: nil when no agentId", core.subagentMeta(core.json.encode({ type = "user" })), nil)
-  -- prompt: the agent's first user message (the real task), as a string or a text block
-  eq("subagentMeta: prompt from string content",
-     core.subagentMeta(core.json.encode({ agentId = "z1", message = { role = "user", content = "Author the spec" } })).prompt,
-     "Author the spec")
-  eq("subagentMeta: prompt from first text block",
-     core.subagentMeta(core.json.encode({ agentId = "z2", message = { content = { { type = "text", text = "Review auth.ts" } } } })).prompt,
-     "Review auth.ts")
-  eq("subagentMeta: prompt nil when absent",
-     core.subagentMeta(core.json.encode({ agentId = "z3", slug = "s" })).prompt, nil)
-
-  eq("subagentLabel: humanizes slug",
-     core.subagentLabel("can-you-review-if-swirling-otter", "x"), "can you review if swirling otter")
-  eq("subagentLabel: falls back to short id", core.subagentLabel(nil, "a382c84e9550c1460"), "agent a382c84e")
-  eq("subagentLabel: prefers the prompt over the slug",
-     core.subagentLabel("random-prancy-hippo", "x", "Verify the missing-password coercion path"),
-     "Verify the missing-password coercion path")
-  eq("subagentLabel: collapses whitespace in the prompt",
-     core.subagentLabel(nil, "x", "  do   a\nthing  "), "do a thing")
-  check("subagentLabel: truncates a long prompt with an ellipsis", (function()
-    local lbl = core.subagentLabel(nil, "x", string.rep("word ", 40))
-    return #lbl <= 84 and lbl:sub(-3) == "…"
-  end)())
-
-  local now = 100000
-  local tailA = core.json.encode(
-    { type = "assistant", message = { content = { { type = "text", text = "Scanning the payments module" } } } })
-  local files = {
-    { name = "agent-a1.jsonl", mtime = now - 5,
-      firstLine = core.json.encode({ agentId = "a1", slug = "full-scan-sunny-panda" }), tail = tailA },
-    { name = "workflows/wf_abc123/agent-b2.jsonl", mtime = now - 500,
-      firstLine = core.json.encode({ agentId = "b2", slug = "deep-research-otter" }) },
-    { name = "notes.txt", mtime = now },            -- ignored (not an agent file)
-  }
-  local tree = core.subagentTree(files, now, { activeWindow = 45 })
-  eq("subagentTree: counts agents only", tree.count, 2)
-  eq("subagentTree: running within window", tree.runningCount, 1)
-  check("subagentTree: active flag", tree.active == true)
-  eq("subagentTree: newest first", tree.agents[1].agentId, "a1")
-  eq("subagentTree: keeps relative name (for drill-in)", tree.agents[1].name, "agent-a1.jsonl")
-  eq("subagentTree: lastLine snippet", tree.agents[1].lastLine, "Scanning the payments module")
-  eq("subagentTree: workflow grouping", tree.agents[2].wfId, "wf_abc123")
-  eq("subagentTree: kind=workflow", tree.agents[2].kind, "workflow")
-  check("subagentTree: workflows map counts",
-        tree.workflows["wf_abc123"] ~= nil and tree.workflows["wf_abc123"].count == 1)
-  -- a workflow agent's label comes from its first prompt, not its (random) fleet slug
-  local treeP = core.subagentTree({
-    { name = "workflows/wf_x/agent-p1.jsonl", mtime = now,
-      firstLine = core.json.encode({ agentId = "p1", slug = "great-prancy-hippo",
-        message = { content = { { type = "text", text = "Author a new OpenAPI spec file" } } } }) },
-  }, now, { activeWindow = 45 })
-  eq("subagentTree: label uses the agent's prompt, not the slug",
-     treeP.agents[1].label, "Author a new OpenAPI spec file")
-
   local function al(t) return core.json.encode({ type = "assistant", message = { content = { { type = "text", text = t } } } }) end
   local recentTail = al("first step") .. "\n" .. core.json.encode({ type = "user", message = { content = "x" } }) .. "\n" .. al("second step")
   local recent = core.transcriptRecent(recentTail, 12, 200)
@@ -7631,13 +7572,6 @@ do
   eq("transcriptRecent: newest last", recent[2], "second step")
   eq("transcriptRecent: empty tail -> {}", #core.transcriptRecent("", 12), 0)
   eq("transcriptRecent: caps to n", #core.transcriptRecent(al("a").."\n"..al("b").."\n"..al("c"), 2), 2)
-
-  check("subagentNameOk: direct agent file", core.subagentNameOk("agent-a1.jsonl") == true)
-  check("subagentNameOk: workflow agent file", core.subagentNameOk("workflows/wf_abc123/agent-b2.jsonl") == true)
-  check("subagentNameOk: rejects traversal", core.subagentNameOk("../../etc/passwd") == false)
-  check("subagentNameOk: rejects absolute", core.subagentNameOk("/etc/passwd") == false)
-  check("subagentNameOk: rejects non-agent file", core.subagentNameOk("notes.txt") == false)
-  check("subagentNameOk: rejects empty", core.subagentNameOk("") == false)
 
   -- DR4: run score + regression trend (from ledger signals)
   local function ev(sid, t, extra) local e = { session_id = sid, type = t }; for k, v in pairs(extra or {}) do e[k] = v end; return e end
@@ -7724,6 +7658,13 @@ do
   check("vscodeOpenArgs: non-cold has NO trust flag", not hasArg(core.vscodeOpenArgs(oldSpec), "--disable-workspace-trust"))
   check("vscodeOpenArgs: project is the last arg", core.vscodeOpenArgs(newSpec)[#core.vscodeOpenArgs(newSpec)] == "/p/Farter")
 
+  -- (these fixtures used to be shared with the Agents tab's subagentTree tests, pruned 2026-11-17)
+  local now = 100000
+  local files = {
+    { name = "agent-a1.jsonl", mtime = now - 5 },
+    { name = "workflows/wf_abc123/agent-b2.jsonl", mtime = now - 500 },
+    { name = "notes.txt", mtime = now },            -- ignored (not an agent file)
+  }
   local bg = core.backgroundActivity(files, now, { activeWindow = 45 })
   check("backgroundActivity: active", bg.active == true)
   eq("backgroundActivity: count of recent", bg.count, 1)

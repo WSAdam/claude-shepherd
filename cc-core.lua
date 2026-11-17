@@ -23492,7 +23492,6 @@ M.DETAIL_TABS = {
   { id = "stories",    label = "User Stories" },  -- gated: shows only when spec/product/user-stories.md exists
   { id = "onpurpose",  label = "On purpose" },    -- gated: a local session in a git repo (adding creates DECISIONS.md)
   { id = "compare",    label = "Compare" },     -- 2026-10-27: replaces Requirements; the same board on every card
-  { id = "subagents",  label = "Agents" },
   { id = "queue",      label = "Queue" },
 }
 M.DETAIL_TAB_DEFAULT = "activity"
@@ -25391,105 +25390,6 @@ function M.subagentsDir(transcriptPath)
   local base = transcriptPath:match("^(.*)%.jsonl$")
   if not base or base == "" then return nil end
   return base .. "/subagents"
-end
-
--- Parse a subagent transcript's FIRST line -> { agentId, slug, prompt }. nil for
--- non-JSON / no agentId. The slug is an auto-generated fleet name; `prompt` is the
--- agent's first user message (the actual task it was handed) -- a much better label,
--- since workflow agents all share a random slug ("great-prancy-hippo").
-function M.subagentMeta(firstLine)
-  if type(firstLine) ~= "string" or not firstLine:find("^%s*{") then return nil end
-  local okj, obj = pcall(function() return M.json.decode(firstLine) end)
-  if not okj or type(obj) ~= "table" then return nil end
-  local id = obj.agentId or obj.agent_id
-  if not id or tostring(id) == "" then return nil end
-  local slug = obj.slug
-  -- The first line is the agent's first user message; pull its text as the prompt.
-  -- content is either a bare string or an array of blocks -- take the first text block.
-  local prompt
-  local msg = obj.message
-  if type(msg) == "table" then
-    local c = msg.content
-    if type(c) == "string" then prompt = c
-    elseif type(c) == "table" then
-      for _, blk in ipairs(c) do
-        if type(blk) == "table" and blk.type == "text" and type(blk.text) == "string" and blk.text ~= "" then
-          prompt = blk.text; break
-        end
-      end
-    end
-  end
-  return { agentId = tostring(id), slug = (type(slug) == "string" and slug ~= "") and slug or nil,
-           prompt = (type(prompt) == "string" and prompt ~= "") and prompt or nil }
-end
-
--- A display label for a subagent row. Prefers the agent's first PROMPT (the real
--- task) -- collapsed to one line and truncated -- because the auto-slug is often a
--- random fleet name shared across a whole Workflow fan-out. Falls back to a humanized
--- slug, then a short agentId. Pure.
-function M.subagentLabel(slug, agentId, prompt)
-  if type(prompt) == "string" then
-    local s = prompt:gsub("%s+", " "):gsub("^ +", ""):gsub(" +$", "")
-    if #s > 80 then s = s:sub(1, 80):gsub("%s+%S*$", "") .. "…" end
-    if s ~= "" then return s end
-  end
-  if type(slug) == "string" and slug ~= "" then
-    return (slug:gsub("%-+", " "))
-  end
-  local id = tostring(agentId or "")
-  return id ~= "" and ("agent " .. id:sub(1, 8)) or "subagent"
-end
-
--- Validate a subagent file name supplied by the client before it's joined onto the
--- session's subagents dir (the drill-in security boundary): agent-<id>.jsonl, or one
--- workflows/wf_<id>/agent-<id>.jsonl level. Rejects traversal / absolute paths. Pure.
-function M.subagentNameOk(name)
-  if type(name) ~= "string" or name == "" then return false end
-  if name:find("%.%.") or name:find("^/") then return false end
-  if name:match("^agent%-%w+%.jsonl$") then return true end
-  if name:match("^workflows/wf[_%-][%w_%-]+/agent%-%w+%.jsonl$") then return true end
-  return false
-end
-
--- Structure FX-provided subagent file descriptors into a fan-out tree.
--- `files` = list of { name, mtime, firstLine?, tail? } where `name` is the path
--- RELATIVE to the subagents dir (workflow agents look like
--- "workflows/wf_<id>/agent-<x>.jsonl"). opts.activeWindow (default 45s): an
--- mtime within now-window => "running". Returns { agents = { {agentId, slug,
--- label, kind, wfId?, mtime, running, lastLine} (newest first) }, count,
--- runningCount, active, workflows = { wfId -> {running, count} } }.
-function M.subagentTree(files, now, opts)
-  opts = opts or {}
-  now = tonumber(now) or 0
-  local win = tonumber(opts.activeWindow) or 45
-  local out = { agents = {}, count = 0, runningCount = 0, active = false, workflows = {} }
-  for _, f in ipairs(type(files) == "table" and files or {}) do
-    local name = type(f) == "table" and f.name
-    if type(name) == "string" and name:match("agent%-[^/]+%.jsonl$") then
-      local wfId = name:match("workflows/(wf[_%-][%w_%-]+)/")
-      local meta = f.firstLine and M.subagentMeta(f.firstLine) or nil
-      local agentId = (meta and meta.agentId) or name:match("(agent%-%w+)%.jsonl$") or name
-      local slug = meta and meta.slug
-      local mtime = tonumber(f.mtime) or 0
-      local running = (now > 0) and (now - mtime <= win) or false
-      local lastLine = f.tail and M.transcriptSnippet(f.tail, opts.snippetLen or 120) or nil
-      out.agents[#out.agents + 1] = {
-        agentId = agentId, slug = slug, label = M.subagentLabel(slug, agentId, meta and meta.prompt),
-        kind = wfId and "workflow" or "agent", wfId = wfId, name = name,
-        mtime = mtime, running = running, lastLine = lastLine,
-      }
-      out.count = out.count + 1
-      if running then out.runningCount = out.runningCount + 1; out.active = true end
-      if wfId then
-        local w = out.workflows[wfId] or { running = false, count = 0 }
-        w.count = w.count + 1
-        if running then w.running = true end
-        out.workflows[wfId] = w
-      end
-    end
-  end
-  table.sort(out.agents, function(a, b) return (a.mtime or 0) > (b.mtime or 0) end)
-  return out
 end
 
 -- 2026-09-28: how many background shell jobs a session still has running, from its transcript

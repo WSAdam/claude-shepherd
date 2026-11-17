@@ -2237,12 +2237,7 @@ do
         and src:find("statusWords(it) + (it.since", 1, true) ~= nil)
   check("bg-status: stale suffix/dimming suppressed while background-running",
         src:find("it.stale && !bgRunning(it)", 1, true) ~= nil)
-  -- Agents tab groups the Workflow fan-out under one header with a running/total rollup.
-  check("agents-tab: subagent rows grouped by workflow",
-        src:find("sa-grp", 1, true) ~= nil and src:find("byG[gid]", 1, true) ~= nil)
-  check("agents-tab: workflow group header shows a running/total rollup",
-        src:find("runN + ' running'", 1, true) ~= nil
-        and src:find("grp.agents.length + ' agent'", 1, true) ~= nil)
+  -- (the Agents tab's workflow grouping went with the tab, pruned 2026-11-17)
 end
 
 -- ---- Worklist: click an item to open it in the add/edit modal ----
@@ -5724,7 +5719,7 @@ do
   local ids = {}
   for _, t in ipairs(okCore and core.DETAIL_TABS or {}) do ids[#ids + 1] = t.id end
   check("compare: a Compare tab where Requirements was  (" .. table.concat(ids, ",") .. ")",
-        table.concat(ids, ","):find("onpurpose,compare,subagents", 1, true) ~= nil)
+        table.concat(ids, ","):find("onpurpose,compare", 1, true) ~= nil)   -- 2026-11-17: Agents after it was pruned
   check("compare: it loads when the tab opens, never on the 1s tick", src:find('send("compare-load", "");', 1, true) ~= nil)
   check("compare: the bridge handles load, Refresh and the user list", src:find('if a == "compare-load" then', 1, true) ~= nil
         and src:find('if a == "compare-refresh" then', 1, true) ~= nil and src:find('if a == "compare-users" then', 1, true) ~= nil)
@@ -5810,6 +5805,15 @@ do
         and src:find('a == "detail-timeline"', 1, true) == nil and src:find("function FX.snapshotLines", 1, true) == nil)
   check("pruned: the 📜 Timeline button still opens the session's timeline in the audit view",
         src:find('onclick="openSessionTimeline()"', 1, true) ~= nil and src:find('if a == "open-session-timeline" then', 1, true) ~= nil)
+  -- Agents (the subagents tab)
+  check("pruned: no Agents tab in core.DETAIL_TABS", not ids.subagents)
+  check("pruned: no Agents panel or renderer",
+        src:find('data-tab="subagents"', 1, true) == nil and src:find('id="d-subagents"', 1, true) == nil
+        and src:find("function renderDetailSubagents", 1, true) == nil)
+  check("pruned: no Agents bridge actions",
+        src:find('a == "detail-subagents"', 1, true) == nil and src:find('a == "detail-subagent"', 1, true) == nil)
+  check("pruned: the card's ⚙ running badge still counts subagents and shell jobs",
+        src:find("var n = (it.bg_count || 0) + (it.bg_jobs || 0);", 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

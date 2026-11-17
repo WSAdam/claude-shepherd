@@ -296,7 +296,6 @@ session is never in the snapshot.
 - **On purpose**: the repo's `DECISIONS.md`, what the project does on purpose (below).
 - **Compare**: a weekly leaderboard of you against up to 5 GitHub users (below). The same board on
   every card.
-- **Agents**: the session's subagents and Workflows (below).
 - **Queue**: the session's task queue ([Automation → Task queue](automation.md#task-queue)).
 
 The expensive tabs load only when opened. The **⋯** button hides tabs you don't want; your choice
@@ -332,15 +331,9 @@ background (a few `gh` calls at a time, never blocking the panel), again on **Re
 when the list changes. A check that fails says why on the tab and tries again an hour later.
 Everything lives in `~/.claude/cc-compare.json`.
 
-### Agents tab and background work
+### Background work
 
-When a session spawns subagents or runs a Workflow, the **Agents** tab lists each one, **grouped
-under a per-Workflow header with a running/total rollup** (`⚙ Workflow wf_… · N agents ·
-M running`). Each row is labeled by the agent's **actual task prompt**, not its auto-generated slug,
-with a green running dot and its latest "Doing:" line. Click a row to read that agent's recent
-output. It's read from the `subagents/` folder Claude Code writes beside the transcript; no extra
-hooks.
-
+Shepherd reads the `subagents/` folder Claude Code writes beside the transcript (no extra hooks).
 While background work is running, the tile shows a green **⚙ N** pill, and a done or idle session
 reads **Running N agents** instead of "Ready for you", so a session busy behind the scenes isn't
 mistaken for one waiting on you (`subagents.activeWindow`, default 45s).

@@ -576,27 +576,19 @@ function FX.fileSize(path)
   return size
 end
 
--- DR1/DR2: scan a session's subagents/ dir into descriptors for core.subagentTree /
--- core.backgroundActivity. Claude Code writes one transcript per delegated subagent
--- (agent-<id>.jsonl, first line carries agentId + slug) and per-Workflow fleets under
--- workflows/wf_<id>/. withContent=false (the hot per-tile badge path) returns just
--- {name, mtime}; withContent=true (on-demand, detail panel) also reads each file's
--- first line + tail. Recurses ONE level into workflows/wf_*/. Self-gates: a missing
--- dir (FX.readDir pcall-fails) yields {}.
-local SUBAGENT_TAIL_BYTES = 8192
-function FX.subagentScan(dir, withContent)
+-- DR1/DR2: scan a session's subagents/ dir into {name, mtime} descriptors for
+-- core.backgroundActivity (the card's ⚙ running badge). Claude Code writes one transcript
+-- per delegated subagent (agent-<id>.jsonl) and per-Workflow fleets under
+-- workflows/wf_<id>/. Recurses ONE level into workflows/wf_*/. Self-gates: a missing
+-- dir (FX.readDir pcall-fails) yields {}. (The Agents tab that also read each file's
+-- content was pruned 2026-11-17.)
+function FX.subagentScan(dir)
   local out = {}
   if not dir then return out end
   local function addFile(relName, abs)
     local a = hs.fs.attributes(abs)
     if not a or a.mode ~= "file" then return end
-    local rec = { name = relName, mtime = a.modification or 0 }
-    if withContent then
-      local f = io.open(abs, "r")
-      if f then rec.firstLine = f:read("*l"); f:close() end
-      rec.tail = FX.readTail(abs, SUBAGENT_TAIL_BYTES)
-    end
-    out[#out + 1] = rec
+    out[#out + 1] = { name = relName, mtime = a.modification or 0 }
   end
   for _, name in ipairs(FX.readDir(dir)) do
     if name:match("^agent%-.*%.jsonl$") then
@@ -16403,40 +16395,6 @@ local function handleBridgeMsg(msg)
       .. ", " .. jsString(sid) .. ", " .. jsString("timeline") .. ")") end)
     return
   end
-  if a == "detail-subagents" then
-    -- DR1 Agents tab: the selected session's spawned subagents (delegated agents +
-    -- Workflow fleets), read from its subagents/ tree. Selection/tab-triggered, never
-    -- on the 1s tick. Replies null when there's no tree to show (the JS notes it).
-    local key = tostring(payload.v or "")
-    local it = byKey[key]
-    local dir = it and it.transcript_path and not it.remote and core.subagentsDir(it.transcript_path)
-    if not dir then
-      pcall(function() wv:evaluateJavaScript("window.ccSubagents(" .. jsString(key) .. ", null)") end)
-      return
-    end
-    local tree = core.subagentTree(FX.subagentScan(dir, true), FX.now(),
-      { activeWindow = tonumber(core.config(loadConfig(), "subagents.activeWindow", 45)) or 45 })
-    pcall(function() wv:evaluateJavaScript("window.ccSubagents("
-      .. jsString(key) .. ", " .. hs.json.encode(tree) .. ")") end)
-    return
-  end
-  if a == "detail-subagent" then
-    -- DR1 drill-in: one subagent's recent activity ("what it's working on"). `name`
-    -- (payload.text) MUST pass core.subagentNameOk (agent-<id>.jsonl, optionally one
-    -- workflows/wf_<id>/ level) before it's joined onto the session's subagents dir --
-    -- so a traversal/arbitrary path can never be read.
-    local key = tostring(payload.v or "")
-    local name = tostring(payload.text or "")
-    local it = byKey[key]
-    local dir = it and it.transcript_path and not it.remote and core.subagentsDir(it.transcript_path)
-    local function reply(lines)
-      pcall(function() wv:evaluateJavaScript("window.ccSubagentDetail("
-        .. jsString(key) .. ", " .. jsString(name) .. ", " .. hs.json.encode(lines or {}) .. ")") end)
-    end
-    if not (dir and core.subagentNameOk(name)) then reply({}); return end
-    reply(core.transcriptRecent(FX.readTail(dir .. "/" .. name, 16384), 14, 220))
-    return
-  end
   if a == "detail-changes" then
     -- L5 Changes tab: the selected session's working-tree status. Resolves the
     -- repo root (cached) and reads `git status --porcelain=v1 -z`; pure
@@ -17646,22 +17604,6 @@ local HTML = [[
   .ds-spark > i { width:3px; background:var(--accent-2); border-radius:1px; display:inline-block; }
   .ds-bits { color:var(--muted); }
   .ds-dim { color:var(--dim); font-style:italic; }
-  /* DR1 Agents tab: subagent fan-out rows */
-  .sa-head { font-size:11px; color:var(--muted); margin:2px 0 6px; }
-  .sa-grp { font-size:10px; color:var(--accent-text); text-transform:uppercase; letter-spacing:.04em;
-            margin:10px 0 4px; padding-bottom:3px; border-bottom:1px solid var(--border-weak); }
-  .sa-grp:first-of-type { margin-top:2px; }
-  .sa-row { display:flex; align-items:center; gap:6px; padding:5px 6px; border-radius:6px; cursor:pointer; }
-  .sa-row:hover, .sa-row.open { background:var(--surface-2); }
-  .sa-dot { width:8px; height:8px; border-radius:50%; background:#3a3d49; flex:0 0 auto; }
-  .sa-dot.run { background:var(--ok); animation:pulse 1.2s infinite; }
-  .sa-name { font-size:12px; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .sa-wf { font-size:9px; color:var(--accent-text); border:1px solid #34435a; border-radius:5px; padding:0 4px; white-space:nowrap; }
-  .sa-badge { font-size:9px; color:var(--ok); margin-left:auto; flex:0 0 auto; }
-  .sa-doing { font-size:11px; color:var(--muted); margin:0 0 4px 20px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .sa-doing.sa-idle { color:var(--dim); font-style:italic; }
-  .sa-detail { margin:0 0 9px 20px; }
-  .sa-detail .tl-pre { white-space:pre-wrap; word-break:break-word; }
   #settings-btn { background:var(--surface); color:var(--text-2); border:1px solid var(--border);
            border-radius:8px; font-size:13px; padding:3px 8px; cursor:pointer; }
 
@@ -19620,9 +19562,6 @@ local HTML = [[
     </div>
     <div class="d-panel" data-tab="onpurpose">
       <div id="d-onpurpose"></div>
-    </div>
-    <div class="d-panel" data-tab="subagents">
-      <div id="d-subagents"></div>
     </div>
     <div class="d-panel" data-tab="queue">
       <div id="queue-row">
@@ -23912,87 +23851,10 @@ local HTML = [[
           send("detail-onpurpose", selectedKey);          // ccOnPurpose repaints
         }
         renderOnPurpose();
-      } else if(detailTab === "subagents"){
-        if(SUBAGENTS.key !== selectedKey){
-          SUBAGENTS = { key: selectedKey, tree: null };  // pending (dedupes re-fetch)
-          send("detail-subagents", selectedKey);         // ccSubagents repaints
-        }
-        renderDetailSubagents();
       } else if(detailTab === "queue"){
         if(!queueListOpen){ var it2 = findItem(selectedKey); if(it2 && (it2.queue||0) > 0){ toggleQueueList(); } }
       }
     }
-    // ---- DR1 Agents tab: this session's subagent fan-out, clickable to drill in ----
-    var SUBAGENTS  = { key:null, tree:null };   // tree===null while a fetch is in flight
-    var SUB_OPEN   = {};   // agent name -> expanded
-    var SUB_DETAIL = {};   // agent name -> recent activity lines (fetched on expand)
-    window.ccSubagents = function(key, tree){
-      if(key !== selectedKey) return;                 // stale guard
-      SUBAGENTS = { key:key, tree:tree }; SUB_OPEN = {}; SUB_DETAIL = {};
-      renderDetailSubagents();
-    };
-    window.ccSubagentDetail = function(key, name, lines){
-      if(key !== selectedKey) return;
-      SUB_DETAIL[name] = lines || [];
-      renderDetailSubagents();
-    };
-    function toggleSubagent(el){
-      var name = el.getAttribute("data-name"); if(!name) return;
-      if(SUB_OPEN[name]){ delete SUB_OPEN[name]; }
-      else { SUB_OPEN[name] = true; if(SUB_DETAIL[name] === undefined){ send("detail-subagent", selectedKey, name); } }
-      renderDetailSubagents();
-    }
-    function renderDetailSubagents(){
-      var box = document.getElementById("d-subagents"); if(!box) return;
-      if(SUBAGENTS.key !== selectedKey){ box.innerHTML = ""; return; }   // stale guard
-      var tree = SUBAGENTS.tree;
-      if(tree === null){ box.innerHTML = '<div class="tl-empty">Loading subagents…</div>'; return; }
-      var agents = (tree && tree.agents) || [];
-      if(!agents.length){ box.innerHTML = '<div class="tl-empty">No subagents — this session hasn\'t delegated to a subagent or run a workflow.</div>'; return; }
-      var html = '<div class="sa-head">' + (tree.runningCount ? ('⚙ ' + tree.runningCount + ' running · ') : '')
-               + agents.length + ' subagent' + (agents.length === 1 ? '' : 's') + '</div>';
-      // Group workflow agents under a per-workflow header (a Workflow fan-out shares
-      // one wf_<id>) with a running/total rollup; standalone subagents get their own
-      // group. mtime order (newest-first) is preserved within each group.
-      var groups = [], byG = {};
-      agents.forEach(function(ag){
-        var gid = ag.wfId || "_solo";
-        var grp = byG[gid];
-        if(!grp){ grp = { wf: ag.wfId || null, agents: [] }; byG[gid] = grp; groups.push(grp); }
-        grp.agents.push(ag);
-      });
-      function rowHtml(ag){
-        var open = !!SUB_OPEN[ag.name];
-        var h = '<div class="sa-row' + (open ? ' open' : '') + '" data-name="' + esc(ag.name || '') + '" onclick="toggleSubagent(this)">'
-              + '<span class="sa-dot' + (ag.running ? ' run' : '') + '"></span>'
-              + '<span class="sa-name">' + esc(ag.label || ag.agentId || 'subagent') + '</span>'
-              + (ag.running ? '<span class="sa-badge">running</span>' : '')
-              + '</div>';
-        if(!open){
-          h += ag.lastLine ? '<div class="sa-doing">' + esc(ag.lastLine) + '</div>'
-                           : '<div class="sa-doing sa-idle">(no output captured yet)</div>';
-        } else {
-          var det = SUB_DETAIL[ag.name];
-          if(det === undefined){ h += '<div class="sa-detail"><div class="tl-empty">Loading activity…</div></div>'; }
-          else if(!det.length){ h += '<div class="sa-detail"><div class="tl-empty">No assistant output captured yet.</div></div>'; }
-          else { h += '<div class="sa-detail"><pre class="tl-pre">' + esc(det.join("\n")) + '</pre></div>'; }
-        }
-        return h;
-      }
-      groups.forEach(function(grp){
-        if(grp.wf){
-          var runN = 0; grp.agents.forEach(function(a){ if(a.running) runN++; });
-          html += '<div class="sa-grp">⚙ Workflow <span class="sa-wf">' + esc(grp.wf) + '</span> · '
-                + grp.agents.length + ' agent' + (grp.agents.length === 1 ? '' : 's')
-                + ' · ' + (runN ? (runN + ' running') : 'idle') + '</div>';
-        } else if(groups.length > 1){
-          html += '<div class="sa-grp">Subagents · ' + grp.agents.length + '</div>';
-        }
-        grp.agents.forEach(function(ag){ html += rowHtml(ag); });
-      });
-      box.innerHTML = html;
-    }
-
     // ---- L5 Changes tab: per-session git working-tree status + per-file diff --
     // Lazy on tab-activation (+ manual ↻ Refresh), per-session, stale-guarded.
     // data === null while a fetch is in flight; {files,summary,root} | {noRepo} |
@@ -30071,7 +29933,7 @@ function FX._refreshBody()
     -- set on stale tiles to ever engage.
     if it.transcript_path and not it.remote then
       local bg = core.backgroundActivity(
-        FX.subagentScan(core.subagentsDir(it.transcript_path), false),
+        FX.subagentScan(core.subagentsDir(it.transcript_path)),
         now, { activeWindow = tonumber(core.config(cfg, "subagents.activeWindow", 45)) or 45 })
       it.bg_active = bg.active
       it.bg_count = bg.count

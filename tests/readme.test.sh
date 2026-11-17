@@ -205,7 +205,8 @@ local core = dofile(arg[1])
 for _, t in ipairs(core.DETAIL_TABS) do print(t.label) end
 LUA
 n="$(grep -c . "$TMP/tabs.txt")"
-if [ "$n" -ge 10 ]; then got=yes; else got="only $n"; fi
+# 2026-11-17: 7 tabs after the prune (Rewind, On purpose, Agents, Queue went); the floor only proves the read worked
+if [ "$n" -ge 6 ]; then got=yes; else got="only $n"; fi
 assert_eq "core.DETAIL_TABS was read" "yes" "$got"
 untold=""
 while IFS= read -r label; do

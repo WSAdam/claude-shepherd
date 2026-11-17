@@ -597,7 +597,7 @@ custom lock and two field bug fixes. All pure logic + tests in cc-core; all depl
   lock: `⌘⌥⌃⇧U` chord + `_G.__ccLockRelease()` (SSH) + reload all release it. **The whole lock block is
   wrapped in a `do … end`** — its locals (LOCK_FILE/lockHasher/lockState/lockRelease) would otherwise
   blow the main chunk's 200-local cap; only `FX.lockEngage` (table member) is reachable from the handler.
-- **DR1 — Subagent fan-out (Agents tab)** — Adam's sessions write `…/<sessionUuid>/subagents/agent-*.jsonl`
+- **DR1 — Subagent fan-out (Agents tab; the tab was pruned 2026-11-17, the ⚙ running badge stays)** — Adam's sessions write `…/<sessionUuid>/subagents/agent-*.jsonl`
   (first line carries `agentId`+`slug`+ the agent's first `message.content` = its task prompt) +
   `subagents/workflows/wf_*/`, NOT in-transcript `Task`/`isSidechain` lines (0 of those exist locally —
   verified). `core.subagentsDir`/`subagentTree`/`subagentMeta`/`subagentLabel` (prefers the prompt over the

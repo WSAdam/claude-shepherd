@@ -131,7 +131,7 @@ install's [defaults](../defaults/cc-config.json) differ.
 | `schedLock.enabled` / `refreshSeconds` | `true` / `60` (at least 30) | | [Scheduled-tasks lock](troubleshooting.md#a-card-flags-a-scheduled-tasks-lock) |
 | `timeLost.enabled` / `refreshSeconds` / `days` | `true` / `120` / `7` | | [Where the time went](usage-and-cost.md#where-the-time-went) |
 | `score.weights` | `{ "error": 18, "deny": 6, "loop": 12, "respawn": 14 }` | | [Run score](usage-and-cost.md#run-score) |
-| `subagents.activeWindow` / `jobMaxMinutes` | `45` (seconds) / `30` | | [Agents tab and background work](fleet.md#agents-tab-and-background-work) |
+| `subagents.activeWindow` / `jobMaxMinutes` | `45` (seconds) / `30` | | [Background work](fleet.md#background-work) |
 
 A starting point for the most common switches:
 
