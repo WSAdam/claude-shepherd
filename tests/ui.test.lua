@@ -4772,35 +4772,7 @@ do
         and not (ann:sub(rdAt, (ann:find("\n", rdAt, true) or #ann))):find("receipt", 1, true))
 end
 
--- ---- On purpose tab (2026-09-29) ----
--- Build program unit 33: a detail tab (id onpurpose) shows the repo's DECISIONS.md and adds an
--- entry through the hash-guarded save. Gated like User Stories -- but on the session being in a
--- local git repo, not on the file, so the first entry can create it. The load and the save live in
--- FX (tests/onpurpose.test.lua drives them on a real repo); here, only that the panel is wired.
-do
-  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
-  local src = f and f:read("*a") or ""
-  if f then f:close() end
-  check("onpurpose: HTML panel exists",
-        src:find('data-tab="onpurpose"', 1, true) ~= nil and src:find('id="d-onpurpose"', 1, true) ~= nil)
-  check("onpurpose: the load and the save go through FX",
-        src:find('if a == "detail-onpurpose" then', 1, true) ~= nil and src:find("FX.onPurposeLoad(byKey[key])", 1, true) ~= nil
-        and src:find('if a == "onpurpose-save" then', 1, true) ~= nil and src:find("FX.onPurposeSave(byKey[key], payload)", 1, true) ~= nil)
-  check("onpurpose: the per-item flag comes from the tick",
-        src:find("it.onpurpose = FX.onPurposeOffered(it) or nil", 1, true) ~= nil)
-  local _, gates = src:gsub('if%(t%.id === "onpurpose" && !itemHasOnPurpose%(selectedKey%)%) return;', "")
-  eq("onpurpose: gated in the tab bar and the tab menu", gates, 2)
-  check("onpurpose: a restored tab falls back when the session isn't in a repo",
-        src:find('if(detailTab === "onpurpose" && !itemHasOnPurpose(key)) detailTab = "activity";', 1, true) ~= nil)
-  check("onpurpose: the tab appears/disappears mid-session when that flips",
-        src:find("lastSelectedHasOnPurpose", 1, true) ~= nil and src:find('if(detailTab === "onpurpose" && !hp) detailTab = "activity";', 1, true) ~= nil)
-  check("onpurpose: lazy-loads on tab activation (not the 1Hz tick)",
-        src:find('send("detail-onpurpose", selectedKey);', 1, true) ~= nil)
-  check("onpurpose: the add posts the hash it read",
-        src:find('a:"onpurpose-save", v:selectedKey, hash:', 1, true) ~= nil)
-  check("onpurpose: its state resets per selection",
-        src:find("ONPURPOSE = { key:null, data:null, flash:null, draft:null };  // per-session", 1, true) ~= nil)
-end
+-- ---- On purpose tab (2026-09-29): pruned 2026-11-17; its absence is pinned under "Pruned detail tabs" ----
 
 -- ---- find-only audit preset (2026-09-29) ----
 -- Build program unit 38: the 🔍 Audit (find-only) chip spawns core.auditSpawnPlan's session, and an
@@ -5719,7 +5691,7 @@ do
   local ids = {}
   for _, t in ipairs(okCore and core.DETAIL_TABS or {}) do ids[#ids + 1] = t.id end
   check("compare: a Compare tab where Requirements was  (" .. table.concat(ids, ",") .. ")",
-        table.concat(ids, ","):find("onpurpose,compare", 1, true) ~= nil)   -- 2026-11-17: Agents after it was pruned
+        table.concat(ids, ","):find("stories,compare", 1, true) ~= nil)   -- 2026-11-17: On purpose and Agents around it were pruned
   check("compare: it loads when the tab opens, never on the 1s tick", src:find('send("compare-load", "");', 1, true) ~= nil)
   check("compare: the bridge handles load, Refresh and the user list", src:find('if a == "compare-load" then', 1, true) ~= nil
         and src:find('if a == "compare-refresh" then', 1, true) ~= nil and src:find('if a == "compare-users" then', 1, true) ~= nil)
@@ -5814,6 +5786,16 @@ do
         src:find('a == "detail-subagents"', 1, true) == nil and src:find('a == "detail-subagent"', 1, true) == nil)
   check("pruned: the card's ⚙ running badge still counts subagents and shell jobs",
         src:find("var n = (it.bg_count || 0) + (it.bg_jobs || 0);", 1, true) ~= nil)
+  -- On purpose (the DECISIONS.md tab)
+  check("pruned: no On purpose tab in core.DETAIL_TABS", not ids.onpurpose)
+  check("pruned: no On purpose panel, renderer or tick gate",
+        src:find('data-tab="onpurpose"', 1, true) == nil and src:find('id="d-onpurpose"', 1, true) == nil
+        and src:find("function renderOnPurpose", 1, true) == nil and src:find("it.onpurpose =", 1, true) == nil)
+  check("pruned: no On purpose bridge actions or FX",
+        src:find('a == "detail-onpurpose"', 1, true) == nil and src:find('a == "onpurpose-save"', 1, true) == nil
+        and src:find("function FX.onPurposeSave", 1, true) == nil and src:find("function FX.onPurposeLoad", 1, true) == nil)
+  check("pruned: the handoff note and the coach still reach DECISIONS.md",
+        src:find("function FX.decisionsFile(cwd)", 1, true) ~= nil and src:find("function FX.coachDecision(root, i, act)", 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

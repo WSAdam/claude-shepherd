@@ -80,12 +80,7 @@ assert_eq "a crossing's line is esc()'d"          "yes" "$(has "<div class=\"ib-
 assert_eq "a crossing's author is esc()'d"        "yes" "$(has "esc(r.from || \"\") + ' in ' + esc(r.fromRepo || \"\")")"
 assert_eq "a crossing's title box is esc()'d"     "yes" "$(has "'\" value=\"' + esc(v.title || \"\")")"
 assert_eq "a crossing's text box is esc()'d"      "yes" "$(has "'\">' + esc(bx.text) + '</textarea>'")"
-# On purpose (2026-09-29): DECISIONS.md is anyone's text -- onPurposeHtml's `op.` (an entry) and
-# the form's draft never reach HTML raw (tests/onpurpose-view.test.js runs it)
-assert_eq "an On purpose entry's what is esc()'d"   "yes" "$(has 'esc(op.what)')"
-assert_eq "an On purpose entry's why is esc()'d"    "yes" "$(has 'esc(op.why)')"
-assert_eq "an On purpose entry's date is esc()'d"   "yes" "$(has 'esc(op.date)')"
-assert_eq "an On purpose entry's notes are esc()'d" "yes" "$(has 'esc(op.notes)')"
+# (On purpose's onPurposeHtml went with its tab, pruned 2026-11-17)
 
 # 2. esc() itself still entity-encodes the HTML metacharacters (not gutted to a no-op)
 assert_eq "esc() encodes &"  "yes" "$(has '.replace(/&/g,"&amp;")')"

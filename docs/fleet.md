@@ -293,7 +293,6 @@ session is never in the snapshot.
   to expand its colorized, rename-aware diff. Read-only, local sessions only, with **↻ Refresh**.
   Only read-only git runs against the repo (`rev-parse`, `status`, `diff`).
 - **User Stories**: shown only when the project has `spec/product/user-stories.md` (below).
-- **On purpose**: the repo's `DECISIONS.md`, what the project does on purpose (below).
 - **Compare**: a weekly leaderboard of you against up to 5 GitHub users (below). The same board on
   every card.
 - **Queue**: the session's task queue ([Automation → Task queue](automation.md#task-queue)).
@@ -363,7 +362,7 @@ To **generate** these files for a project that doesn't have them yet, see
 [spec/product/spec.md](../spec/product/spec.md) and
 [spec/product/user-stories.md](../spec/product/user-stories.md) are a worked example.
 
-### On purpose tab
+### On purpose
 
 Sessions and reviews tend to "fix" a project's deliberate choices, because nothing says they're
 deliberate. A `DECISIONS.md` at the repo root says so, one entry per choice:
@@ -375,13 +374,8 @@ Why: install.test.sh proves the Makefile itself, so a stub would test nothing.
 Date: 2026-09-29
 ```
 
-The **On purpose** tab is shown for any local session in a git repo, even before the file exists.
-It lists each entry's what, why and date, and a form adds one (**What**, **Why**, **Date**,
-defaulting to today). The first entry creates `DECISIONS.md` with a short header. An add is appended
-at the end of the file, and the rest of the file is left as it was. Like the User Stories save, the add
-re-reads the file first and is **refused if it changed since the tab read it**. Your entry stays in
-the form, so **Reload** and **Add** again. The file is plain Markdown, so you can edit it by hand too.
-A file without `##` entries is shown as text.
+The file is plain Markdown: write entries by hand, or add one the [coach](automation.md#the-coach) proposes.
+(The detail panel's On purpose tab was removed 2026-11-17.)
 
 Who reads it:
 

@@ -5130,50 +5130,14 @@ function FX.writeFileAtomic(path, content)
   return true
 end
 
--- On purpose (build program unit 33, 2026-09-29): the repo's DECISIONS.md -- what the project does
--- on purpose -- read and added to from the detail tab. The path is always the session's own git
--- root + DECISIONS.md (nothing from the panel reaches it). The tab is offered to any local session
--- in a repo, so the first Add creates the file; core.decisionsSaveDecision owns the guard (refuse
--- if the file changed since the panel read it) and FX.writeFileAtomic the write.
-function FX.onPurposeOffered(it)
-  return type(it) == "table" and not it.remote and type(it.cwd) == "string" and it.cwd ~= ""
-    and FX.gitRoot(it.cwd) ~= nil
-end
+-- The repo's DECISIONS.md -- what the project does on purpose (build program unit 33, 2026-09-29):
+-- its path when the session's git root has one, for the handoff note. (The On purpose detail tab
+-- that read and added to it was pruned 2026-11-17; the coach still proposes entries.)
 function FX.decisionsFile(cwd)
   local root = type(cwd) == "string" and cwd ~= "" and FX.gitRoot(cwd) or nil
   local path = root and (root .. "/" .. core.DECISIONS_FILE) or nil
   return (path and FX.fileExists(path)) and path or nil
 end
-function FX.onPurposeLoad(it)
-  if not FX.onPurposeOffered(it) then return { norepo = true } end
-  local path = FX.gitRoot(it.cwd) .. "/" .. core.DECISIONS_FILE
-  local content = FX.fileExists(path) and FX.readFile(path) or nil
-  local doc = core.parseDecisions(content)
-  local d = { path = path, exists = content ~= nil, entries = doc.entries, hash = core.decisionsHash(content) }
-  if content and #doc.entries == 0 and content:match("%S") then d.preview = content:sub(1, core.DECISIONS_MAX.preview) end
-  return d
-end
-function FX.onPurposeSave(it, payload)
-  if not FX.onPurposeOffered(it) then return { ok = false, error = "no-repo" } end
-  payload = type(payload) == "table" and payload or {}
-  local path = FX.gitRoot(it.cwd) .. "/" .. core.DECISIONS_FILE
-  local current = FX.fileExists(path) and FX.readFile(path) or nil
-  -- Like stories-save, the hash is an optimistic guard, not a lock: a write landing between this
-  -- re-read and the rename would still lose. One local user on one panel; a lock would be overkill.
-  local dec = core.decisionsSaveDecision(current, tostring(payload.hash or ""),
-    { what = payload.what, why = payload.why, date = payload.date }, os.date("%Y-%m-%d", FX.now()))
-  if not dec.ok then
-    print("[cc-dashboard] ⚠️ On purpose: didn't add to " .. path .. " (" .. tostring(dec.error) .. ")")
-    return { ok = false, error = dec.error }
-  end
-  if not FX.writeFileAtomic(path, dec.text) then
-    print("[cc-dashboard] ❌ On purpose: couldn't write " .. path)
-    return { ok = false, error = "write-failed" }
-  end
-  print("[cc-dashboard] ✅ On purpose: added an entry to " .. path)
-  return { ok = true, data = FX.onPurposeLoad(it) }
-end
-
 -- Caffeinate / keep-awake (F2). Reading state needs no privileges; toggling does.
 -- Read the live keep-awake flag without sudo (pmset -g is unprivileged). Returns
 -- true/false, or nil if the flag couldn't be read (caller keeps the UI as-is).
@@ -9142,8 +9106,8 @@ function FX.coachUnskip(root, i, what)
   return true
 end
 
--- A proposed DECISIONS.md entry: added through On purpose's own guard (the hash the coach read), or
--- skipped. Added, not committed -- like an entry from the On purpose tab.
+-- A proposed DECISIONS.md entry: added through core.decisionsSaveDecision's guard (the hash the
+-- coach read), or skipped. Added, not committed.
 function FX.coachDecision(root, i, act)
   local rec, d = FX.coachItem(root, i, "decisions")
   if not rec or d.status ~= "pending" then return false end
@@ -16504,21 +16468,6 @@ local function handleBridgeMsg(msg)
     FX.comparePush()
     return
   end
-  if a == "detail-onpurpose" then
-    -- On purpose tab (unit 33): the repo's DECISIONS.md, from the session's own git root. Lazy:
-    -- tab activation and Reload only, never the tick.
-    local key = tostring(payload.v or "")
-    local d = FX.onPurposeLoad(byKey[key])
-    pcall(function() wv:evaluateJavaScript("window.ccOnPurpose(" .. jsString(key) .. ", " .. hs.json.encode(d) .. ")") end)
-    return
-  end
-  if a == "onpurpose-save" then
-    -- Add one entry: re-read, refuse if it changed since the panel read it, write atomically.
-    local key = tostring(payload.v or "")
-    local res = FX.onPurposeSave(byKey[key], payload)
-    pcall(function() wv:evaluateJavaScript("window.ccOnPurposeSaved(" .. jsString(key) .. ", " .. hs.json.encode(res) .. ")") end)
-    return
-  end
   if a == "detail-transcript" then
     -- F4 Transcript peek: the selected session's recent human-readable turns. Reads a
     -- bounded tail of its transcript JSONL; pure core.transcriptPeek extracts the user +
@@ -18416,27 +18365,6 @@ local HTML = [[
   #d-compare #cmp-new { width:150px; background:var(--surface-2); color:var(--text); border:1px solid var(--border);
                         border-radius:6px; padding:3px 7px; font:inherit; font-size:12px; }
   #d-compare .cmp-note { color:var(--muted); font-size:11px; margin:6px 0 2px; line-height:1.45; }
-  /* On purpose tab (unit 33): the repo's DECISIONS.md */
-  #d-onpurpose .op-head { display:flex; align-items:center; gap:8px; margin:2px 0 8px; }
-  #d-onpurpose .op-path { color:var(--muted); font-size:11px; flex:1; word-break:break-all; }
-  #d-onpurpose .op-btn { background:var(--surface); color:var(--accent-text); border:1px solid var(--accent);
-                         border-radius:7px; padding:3px 12px; font-size:12px; cursor:pointer; flex:0 0 auto; }
-  #d-onpurpose .op-flash { color:var(--text-2); font-size:11px; margin:0 0 8px; }
-  #d-onpurpose .op-row { padding:6px 4px; border-bottom:1px solid var(--border-weak); }
-  #d-onpurpose .op-what { color:var(--text); font-size:13px; font-weight:600; line-height:1.4; word-break:break-word; }
-  #d-onpurpose .op-why, #d-onpurpose .op-notes { color:var(--text-2); font-size:12px; line-height:1.45; margin-top:2px;
-                                                 white-space:pre-wrap; word-break:break-word; }
-  #d-onpurpose .op-date { color:var(--dim); font-size:11px; margin-top:2px; }
-  #d-onpurpose .op-raw { white-space:pre-wrap; word-break:break-word; font-family:ui-monospace,Menlo,monospace; font-size:11px;
-                         color:var(--text-2); background:var(--surface-2); border:1px solid var(--border-weak); border-radius:6px;
-                         padding:6px 8px; max-height:340px; overflow:auto; margin:0 0 8px; }
-  #d-onpurpose .op-form { margin:12px 0 2px; padding-top:8px; border-top:1px solid var(--border-weak); display:flex; flex-direction:column; gap:6px; }
-  #d-onpurpose .op-form-h { color:var(--accent-text); font-size:10px; text-transform:uppercase; letter-spacing:.04em; }
-  #d-onpurpose .op-in { font:inherit; font-size:12px; color:var(--text); background:var(--surface-2); border:1px solid var(--border);
-                        border-radius:6px; padding:5px 7px; box-sizing:border-box; width:100%; }
-  #d-onpurpose textarea.op-in { resize:vertical; line-height:1.45; }
-  #d-onpurpose .op-form-row { display:flex; gap:8px; align-items:center; }
-  #d-onpurpose .op-date-in { width:auto; flex:1; }
   #d-head { display:flex; align-items:center; gap:8px; }
   #d-dot  { width:10px; height:10px; border-radius:50%; background:var(--dc,var(--dim)); flex:0 0 auto; }
   #d-name { font-size:14px; font-weight:700; color:var(--text-strong); }
@@ -19559,9 +19487,6 @@ local HTML = [[
     <!-- Compare (2026-10-27; it replaced Requirements): you against up to 5 GitHub users, weekly -->
     <div class="d-panel" data-tab="compare">
       <div id="d-compare" onclick="compareAct(event)"></div>
-    </div>
-    <div class="d-panel" data-tab="onpurpose">
-      <div id="d-onpurpose"></div>
     </div>
     <div class="d-panel" data-tab="queue">
       <div id="queue-row">
@@ -22498,96 +22423,6 @@ local HTML = [[
       else if(verb === "refresh"){ comparePost({ a:"compare-refresh" }); }
     }
 
-    // ---- On purpose tab (build program unit 33, 2026-09-29): the repo's DECISIONS.md ----
-    // What the project does on purpose, one entry per ## heading, and a form that adds one. Offered
-    // to any local session in a git repo (it.onpurpose), so the first Add creates the file. The add
-    // carries the hash this panel read and Lua refuses it if the file changed since; the draft
-    // stays in the form (ONPURPOSE.draft, kept on every keystroke) so nothing typed is lost. Every
-    // word of the file is someone's text: all of it goes through esc().
-    var ONPURPOSE = { key:null, data:null, flash:null, draft:null };
-    function itemHasOnPurpose(key){ var it = findItem(key); return !!(it && it.onpurpose); }
-    function onPurposeHtml(d, flash, draft){
-      if(!d) return '<div class="tl-empty">Loading DECISIONS.md…</div>';
-      if(d.norepo) return '<div class="tl-empty">Not in a git repo: DECISIONS.md lives at a repo’s root.</div>';
-      var dr = draft || {}, dt = dr.date || "";
-      if(!dt){
-        var now = new Date(), mm = now.getMonth() + 1, dd = now.getDate();
-        dt = now.getFullYear() + "-" + (mm < 10 ? "0" : "") + mm + "-" + (dd < 10 ? "0" : "") + dd;
-      }
-      var html = '<div class="op-head"><span class="op-path">' + esc(d.path || "DECISIONS.md") + '</span>'
-        + '<button class="op-btn" onclick="onPurposeReload()" title="Read DECISIONS.md again">Reload</button></div>';
-      if(flash){ html += '<div class="op-flash">' + esc(flash) + '</div>'; }
-      var list = Array.isArray(d.entries) ? d.entries : [];
-      if(!d.exists){
-        html += '<div class="tl-empty">No DECISIONS.md yet. Adding the first entry creates it at the repo root.</div>';
-      } else if(!list.length){
-        html += d.preview ? '<pre class="op-raw">' + esc(d.preview) + '</pre>'
-                          : '<div class="tl-empty">DECISIONS.md has no ## entries yet.</div>';
-      }
-      list.forEach(function(op){
-        html += '<div class="op-row"><div class="op-what">' + esc(op.what) + '</div>'
-          + (op.why ? '<div class="op-why">' + esc(op.why) + '</div>' : '')
-          + (op.notes ? '<div class="op-notes">' + esc(op.notes) + '</div>' : '')
-          + (op.date ? '<div class="op-date">' + esc(op.date) + '</div>' : '')
-          + '</div>';
-      });
-      html += '<div class="op-form"><div class="op-form-h">Add what this project does on purpose</div>'
-        + '<input id="op-what" class="op-in" maxlength="200" placeholder="What (e.g. Tests shell out to the real make)" value="' + esc(dr.what) + '">'
-        + '<textarea id="op-why" class="op-in" maxlength="2000" rows="3" placeholder="Why it is on purpose">' + esc(dr.why) + '</textarea>'
-        + '<div class="op-form-row"><input id="op-date" class="op-in op-date-in" type="date" value="' + esc(dt) + '">'
-        + '<button class="op-btn" onclick="onPurposeAdd()">Add</button></div></div>';
-      return html;
-    }
-    function renderOnPurpose(){
-      var box = document.getElementById("d-onpurpose"); if(!box) return;
-      if(ONPURPOSE.key !== selectedKey){ box.innerHTML = ""; return; }
-      box.innerHTML = onPurposeHtml(ONPURPOSE.data, ONPURPOSE.flash, ONPURPOSE.draft);
-    }
-    window.ccOnPurpose = function(key, data){
-      if(key !== selectedKey) return;                          // stale guard
-      ONPURPOSE.key = key; ONPURPOSE.data = data || { norepo:true }; ONPURPOSE.flash = null;
-      renderOnPurpose();
-    };
-    window.ccOnPurposeSaved = function(key, res){
-      if(key !== selectedKey) return;
-      if(res && res.ok){
-        ONPURPOSE.data = res.data || ONPURPOSE.data; ONPURPOSE.draft = null; ONPURPOSE.flash = "Added ✓";
-      } else {
-        var er = (res && res.error) || "unknown";
-        var hint = er === "changed" ? " — DECISIONS.md changed since it was read. Your entry is still in the form: Reload, then Add again"
-                 : er === "no-what" ? " — say what is on purpose"
-                 : er === "no-why" ? " — say why it is on purpose"
-                 : er === "too-long" ? " — keep the what under 200 characters and the why under 2000"
-                 : "";
-        ONPURPOSE.flash = "⚠ Not added: " + er + hint;
-      }
-      renderOnPurpose();
-    };
-    function onPurposeAdd(){
-      var d = ONPURPOSE.data, dr = ONPURPOSE.draft || {};
-      if(!d || d.norepo || ONPURPOSE.key !== selectedKey) return;
-      if(!String(dr.what || "").trim() || !String(dr.why || "").trim()){
-        ONPURPOSE.flash = "⚠ Say what is on purpose, and why"; renderOnPurpose(); return;
-      }
-      var dt = document.getElementById("op-date");
-      try { window.webkit.messageHandlers.cc.postMessage(JSON.stringify({ a:"onpurpose-save", v:selectedKey, hash:d.hash,
-              what:dr.what, why:dr.why, date:(dt && dt.value) || dr.date || "" })); }
-      catch(e){ console.log("onpurpose-save error", e); }
-    }
-    function onPurposeReload(){
-      if(!selectedKey) return;
-      ONPURPOSE.key = selectedKey; ONPURPOSE.data = null; ONPURPOSE.flash = null; renderOnPurpose();
-      send("detail-onpurpose", selectedKey);                   // ccOnPurpose repaints, the draft kept
-    }
-    function onPurposeTyped(e){
-      var t = e.target; if(!t || !t.id || String(t.id).indexOf("op-") !== 0) return;
-      var box = document.getElementById("d-onpurpose"); if(!box || !box.contains(t) || ONPURPOSE.key !== selectedKey) return;
-      var dr = ONPURPOSE.draft || {};
-      if(t.id === "op-what") dr.what = t.value; else if(t.id === "op-why") dr.why = t.value; else if(t.id === "op-date") dr.date = t.value;
-      ONPURPOSE.draft = dr;
-    }
-    document.addEventListener("input", onPurposeTyped);
-    document.addEventListener("change", onPurposeTyped);
     function toggleSearch(){
       var b = document.getElementById("searchbar");
       var show = !b.classList.contains("show");
@@ -23721,7 +23556,6 @@ local HTML = [[
         tplOpen = false; renderTemplates();
         CHANGES = { key:null, data:null }; CH_DIFFS = {}; CH_OPEN = {};  // git Changes: per-session
         STORIES = { key:null, data:null, blocks:null, hash:null, dirty:false, editing:null, flash:null };  // per-session
-        ONPURPOSE = { key:null, data:null, flash:null, draft:null };  // per-session
         resetScoreReadout();   // DR4: clear the run-score readout on selection change
         closeTabMenu();
         loadTabState(key);          // restore this project's {selectedTab, unpinned}
@@ -23729,9 +23563,6 @@ local HTML = [[
         // "stories" but this project has none, fall back to the default view.
         if(detailTab === "stories" && !itemHasStories(key)) detailTab = "activity";
         lastSelectedHasStories = itemHasStories(key);   // seed the gated-tab tracker for ccUpdate
-        // On purpose is gated on a local repo (unit 33): the same fallback and tracker.
-        if(detailTab === "onpurpose" && !itemHasOnPurpose(key)) detailTab = "activity";
-        lastSelectedHasOnPurpose = itemHasOnPurpose(key);
       }
       selectedKey = key; renderDetail(); paintSelection();
       renderTabBar(); applyTabVisibility();  // built per-selection, NOT on the 1s tick
@@ -23788,7 +23619,6 @@ local HTML = [[
       DETAIL_TABS.forEach(function(t){
         if(detailUnpinned[t.id]) return;           // hidden for this project
         if(t.id === "stories" && !itemHasStories(selectedKey)) return;  // gated: file must exist
-        if(t.id === "onpurpose" && !itemHasOnPurpose(selectedKey)) return;  // gated: a local repo
         var b = document.createElement("button");
         b.className = "d-tab" + (t.id === detailTab ? " active" : "");
         b.textContent = t.label; b.title = t.label;
@@ -23845,12 +23675,6 @@ local HTML = [[
         // one is due) and paints what it has meanwhile; ccCompare repaints
         send("compare-load", "");
         renderCompare();
-      } else if(detailTab === "onpurpose"){
-        if(ONPURPOSE.key !== selectedKey){
-          ONPURPOSE = { key: selectedKey, data: null, flash: null, draft: null };   // pending (dedupes re-fetch)
-          send("detail-onpurpose", selectedKey);          // ccOnPurpose repaints
-        }
-        renderOnPurpose();
       } else if(detailTab === "queue"){
         if(!queueListOpen){ var it2 = findItem(selectedKey); if(it2 && (it2.queue||0) > 0){ toggleQueueList(); } }
       }
@@ -23974,7 +23798,6 @@ local HTML = [[
       h.textContent = "Tabs for this project"; m.appendChild(h);
       DETAIL_TABS.forEach(function(t){
         if(t.id === "stories" && !itemHasStories(selectedKey)) return;  // gated tab: not offered when the file is absent
-        if(t.id === "onpurpose" && !itemHasOnPurpose(selectedKey)) return;  // gated tab: only in a local repo
         var locked = (t.id === "activity");
         var lab = document.createElement("label"); if(locked) lab.className = "locked";
         var cb = document.createElement("input"); cb.type = "checkbox";
@@ -28460,7 +28283,6 @@ local HTML = [[
     var PANEL_BUNDLES = [];   // L2 policy-bundle names (detail-panel Policy dropdown)
     var lastSelectedStatus = null;
     var lastSelectedHasStories = null;   // tracks the selected tile's user-stories-file presence (gated tab)
-    var lastSelectedHasOnPurpose = null; // ...and whether it is in a local repo (the On purpose tab, unit 33)
     window.ccUpdate = function(items, providers, bundles){
       lastItems = items || [];
       if(providers !== undefined) PANEL_PROVIDERS = providers || [];
@@ -28486,12 +28308,6 @@ local HTML = [[
         renderTabBar(); applyTabVisibility(); maybeLoadActiveTab();
       }
       lastSelectedHasStories = sel ? hs : null;
-      var hp = sel ? !!sel.onpurpose : false;
-      if(sel && lastSelectedHasOnPurpose !== null && hp !== lastSelectedHasOnPurpose){
-        if(detailTab === "onpurpose" && !hp) detailTab = "activity";
-        renderTabBar(); applyTabVisibility(); maybeLoadActiveTab();
-      }
-      lastSelectedHasOnPurpose = sel ? hp : null;
     };
 
     // One tile's HTML. Extracted from ccUpdate so renderGrid can map the (filtered)
@@ -29948,9 +29764,6 @@ function FX._refreshBody()
     if it.cwd and it.cwd ~= "" and not it.remote then
       it.has_user_stories = FX.fileExists(it.cwd .. "/spec/product/user-stories.md") or nil
     end
-    -- On purpose tab gate (unit 33): a local session in a git repo, file or not -- the first Add
-    -- creates DECISIONS.md. FX.gitRoot is cached per cwd, so this never shells out in steady state.
-    it.onpurpose = FX.onPurposeOffered(it) or nil
 
     -- L5 OS-native banner on a fresh rising edge into approval/done (off by default;
     -- gated by bannerOn so we don't even build the decision when disabled).

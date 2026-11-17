@@ -1,11 +1,10 @@
 -- onpurpose.test.lua : a project's DECISIONS.md -- what it does on purpose (2026-09-29, build
 -- program unit 33). Sessions and reviews kept "fixing" deliberate choices, because nothing said
--- they were deliberate. The "On purpose" detail tab shows FX.gitRoot(cwd)/DECISIONS.md and adds an
--- entry (what, why, date) through the same hash-guarded save as User Stories: re-read, refuse if the
--- file changed since the panel read it, write atomically. It is offered even before the file exists
--- (adding creates it). The merge checker reads the BASE branch's copy (a change can't exempt
--- itself), and the handoff note names the file. Pure logic first, then the real FX block under a
--- STUBBED Hammerspoon, with git run for real in a temp repo.
+-- they were deliberate. An entry (what, why, date) is added through a hash-guarded save like User
+-- Stories': re-read, refuse if the file changed since it was read, write atomically (the coach uses
+-- it; the "On purpose" detail tab that did too was pruned 2026-11-17). The merge checker reads the
+-- BASE branch's copy (a change can't exempt itself), and the handoff note names the file. Pure
+-- logic first, then the real FX block under a STUBBED Hammerspoon, with git run for real in a temp repo.
 
 local HERE = debug.getinfo(1, "S").source:sub(2):match("(.*/)") or "./"
 local ROOT = HERE .. "../"
@@ -122,12 +121,6 @@ dec = core.decisionsSaveDecision(bare, core.cheapHash(bare), entry, "2026-09-30"
 check("save: a file with no final newline doesn't glue the entry onto its last line",
       dec.ok and dec.text:find("Why: b\n\n## Tests shell out", 1, true) ~= nil)
 
--- ---- the tab ------------------------------------------------------------------------------------
-local ids, afterStories = {}, nil
-for i, t in ipairs(core.DETAIL_TABS) do ids[t.id] = t; if t.id == "stories" then afterStories = core.DETAIL_TABS[i + 1] end end
-check("DETAIL_TABS: an On purpose tab, id onpurpose", ids.onpurpose and ids.onpurpose.label == "On purpose")
-check("DETAIL_TABS: ...next to User Stories", afterStories and afterStories.id == "onpurpose")
-
 -- ---- the readers --------------------------------------------------------------------------------
 local reqT = { dir = "/r/A/wt", commonDir = "/r/A/.git", branch = "feat/x", base = "main", sha = "abc123", range = "main...abc123" }
 local p = core.checkerPrompt(reqT, {})
@@ -218,59 +211,6 @@ local ok, err = pcall(dofile, ROOT .. "claude-dashboard.lua")
 check("the dashboard loads under the stub", ok)
 if not ok then print("       " .. tostring(err)); print(string.format("-- onpurpose.test.lua: %d run, %d failed --", run, failed)); os.exit(1) end
 local FX = _G.__ccDashboard.fx
-
-local it = { key = "k1", cwd = SUB }                 -- a session in a subfolder of the repo
-local plain = { key = "k2", cwd = PLAIN }
-local remote = { key = "k3", cwd = SUB, remote = true }
-
-eq("offered: a local session in a git repo", FX.onPurposeOffered(it), true)
-eq("offered: ...even before DECISIONS.md exists", readAll(FILE), nil)
-eq("offered: not outside a repo", FX.onPurposeOffered(plain), false)
-eq("offered: not for a remote session (its cwd is on another machine)", FX.onPurposeOffered(remote), false)
-eq("offered: not without a cwd", FX.onPurposeOffered({ key = "k4" }), false)
-
-local d = FX.onPurposeLoad(it)
-eq("load: the file is at the repo's root, not the session's folder", d.path, FILE)
-eq("load: no file yet", d.exists, false)
-eq("load: ...read as the missing file's hash", d.hash, core.DECISIONS_ABSENT)
-eq("load: ...and no entries", #d.entries, 0)
-eq("load: outside a repo there's nothing to show", FX.onPurposeLoad(plain).norepo, true)
-eq("load: ...nor for a remote session", FX.onPurposeLoad(remote).norepo, true)
-
-local r = FX.onPurposeSave(it, { hash = d.hash, what = "Tests shell out to the real make", why = "they prove the Makefile", date = "2026-09-29" })
-eq("add: the first entry creates DECISIONS.md", r.ok, true)
-check("add: ...at the repo root", (readAll(FILE) or ""):find("\n## Tests shell out to the real make\n", 1, true) ~= nil)
-eq("add: ...and hands back the file as it now reads", r.data and r.data.entries and r.data.entries[1] and r.data.entries[1].what, "Tests shell out to the real make")
-eq("add: ...with its new hash", r.data and r.data.hash, core.cheapHash(readAll(FILE) or ""))
-eq("add: no temp file is left behind", sh("ls -a '" .. REPO .. "' | grep -c tmp"):match("^(%d+)"), "0")
-
--- 2026-09-29: the stale-panel case the guard exists for -- a hand edit lands after the panel read
--- the file; the panel's add must be refused and the hand edit kept.
-local stale = r.data.hash
-local handEdit = readAll(FILE) .. "\n## Added by hand in the editor\n\nWhy: because\n"
-writeFile(FILE, handEdit)
-r = FX.onPurposeSave(it, { hash = stale, what = "From the stale panel", why = "x" })
-eq("save guard: a file changed since it was read is not written", r.error, "changed")
-eq("save guard: ...and the hand edit is kept, byte for byte", readAll(FILE), handEdit)
-r = FX.onPurposeSave(it, { hash = FX.onPurposeLoad(it).hash, what = "After a reload", why = "y", date = "2026-09-30" })
-eq("save guard: after a reload the add goes through", r.ok, true)
-eq("save guard: ...keeping the hand edit too", #FX.onPurposeLoad(it).entries, 3)
-os.remove(FILE)
-eq("save guard: deleted since it was read -> refused", FX.onPurposeSave(it, { hash = r.data.hash, what = "a", why = "b" }).error, "changed")
-eq("save guard: ...and not recreated", readAll(FILE), nil)
-eq("save: outside a repo nothing is written", FX.onPurposeSave(plain, { hash = "absent", what = "a", why = "b" }).error, "no-repo")
-eq("save: ...nor for a remote session", FX.onPurposeSave(remote, { hash = "absent", what = "a", why = "b" }).error, "no-repo")
-eq("save: ...and no stray file appears outside the repo", readAll(PLAIN .. "/DECISIONS.md"), nil)
-eq("save: a bad entry is refused before anything is written",
-   FX.onPurposeSave(it, { hash = core.DECISIONS_ABSENT, what = "", why = "b" }).error, "no-what")
-eq("save: ...so the file is still missing", readAll(FILE), nil)
-
--- a big hand-kept file that has no ## entries still shows, cut
-writeFile(FILE, ("free-form line\n"):rep(1000))
-d = FX.onPurposeLoad(it)
-eq("load: a file with no ## entries has none", #d.entries, 0)
-check("load: ...and shows its text instead, cut to 4000 characters", type(d.preview) == "string" and #d.preview == 4000)
-os.remove(FILE)
 
 -- the handoff note names the file when the repo has one
 eq("decisionsFile: nothing while the repo has no DECISIONS.md", FX.decisionsFile(SUB), nil)

@@ -20008,14 +20008,15 @@ end
 -- ---- On purpose: a project's DECISIONS.md (build program unit 33, 2026-09-29) ----------
 -- Sessions and reviews kept "fixing" a project's deliberate choices, because nothing said they
 -- were deliberate. DECISIONS.md at the repo root lists them, one `## <what>` per entry with
--- `Why:` and `Date:` lines. The "On purpose" detail tab shows it and appends an entry through
--- the same guard as the User Stories save: the panel echoes the hash it read, and the save
--- refuses if the file changed since (a missing file has its own hash, so a file created or
--- deleted meanwhile is a change too). Sessions get a pointer at SessionStart (_cc_ctx_onpurpose
--- in cc-lib.sh), the merge checker reads the base branch's copy, the handoff note names it.
+-- `Why:` and `Date:` lines. The coach appends an entry through the same guard as the User
+-- Stories save: it echoes the hash it read, and the save refuses if the file changed since (a
+-- missing file has its own hash, so a file created or deleted meanwhile is a change too).
+-- Sessions get a pointer at SessionStart (_cc_ctx_onpurpose in cc-lib.sh), the merge checker
+-- reads the base branch's copy, the handoff note names it. (The "On purpose" detail tab that
+-- showed it and added entries was pruned 2026-11-17; parseDecisions reads what a save wrote.)
 M.DECISIONS_FILE = "DECISIONS.md"
 M.DECISIONS_ABSENT = "absent"
-M.DECISIONS_MAX = { what = 200, why = 2000, preview = 4000 }
+M.DECISIONS_MAX = { what = 200, why = 2000 }
 M.DECISIONS_HEADER = "# Decisions\n\nWhat this project does on purpose. Read this before changing anything it lists: "
   .. "each entry is a deliberate choice, not a bug to fix.\n"
 
@@ -23490,7 +23491,6 @@ M.DETAIL_TABS = {
   { id = "usage",      label = "Usage" },
   { id = "changes",    label = "Changes" },
   { id = "stories",    label = "User Stories" },  -- gated: shows only when spec/product/user-stories.md exists
-  { id = "onpurpose",  label = "On purpose" },    -- gated: a local session in a git repo (adding creates DECISIONS.md)
   { id = "compare",    label = "Compare" },     -- 2026-10-27: replaces Requirements; the same board on every card
   { id = "queue",      label = "Queue" },
 }
@@ -27171,7 +27171,7 @@ M.FEATURES = {
     what = "When a project has spec/product/user-stories.md, a gated tab shows its stories by capability area — add, edit, and save them in place.",
     why = "Curate the product's user stories next to the sessions building it, without leaving the panel." },
   { key = "onpurpose", cat = "Control", new = true, title = "On purpose",
-    what = "A repo's DECISIONS.md lists what the project does on purpose: one ## entry per choice, with Why: and Date: lines. The On purpose tab in the detail panel shows it for any local session in a git repo and adds an entry (what, why, date); the first one creates the file, and an add is refused if the file changed since the tab read it. Sessions get a pointer to it at every start, /clear and compaction, the merge checker reads the base branch's copy and doesn't flag what it lists, and handoff notes name it.",
+    what = "A repo's DECISIONS.md lists what the project does on purpose: one ## entry per choice, with Why: and Date: lines. Sessions get a pointer to it at every start, /clear and compaction, the merge checker reads the base branch's copy and doesn't flag what it lists, handoff notes name it, and the coach can propose entries.",
     why = "Sessions and reviews stop \"fixing\" choices you made deliberately." },
   { key = "remote", cat = "Control", title = "Remote control",
     what = "New sessions can be driven from claude.ai or the Claude app, not just this Mac.",

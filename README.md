@@ -50,8 +50,8 @@ Every feature below has a reference page one click away. The panel lists the sam
 - [**Needs a live run**](docs/fleet.md#my-list): `- [~]` and `(needs live run)` lines get a ▶ chip; `[~]` lines wait in To verify.
 - [**Playbooks in My List**](docs/fleet.md#my-list): any markdown checklist you pick imports into a project's tab; [**Run selected**](docs/fleet.md#my-list) works through picked items one fresh session at a time and checks off what got done.
 - [**User stories**](docs/fleet.md#user-stories-tab): view and edit a project's `spec/product/user-stories.md` in a detail-panel tab.
-- [**On purpose**](docs/fleet.md#on-purpose-tab): a repo's `DECISIONS.md` says what it does on
-  purpose; sessions and the merge checker read it, and a detail-panel tab adds to it.
+- [**On purpose**](docs/fleet.md#on-purpose): a repo's `DECISIONS.md` says what it does on
+  purpose; sessions and the merge checker read it, and the coach can propose entries.
 - [**Audit ledger & insights**](docs/usage-and-cost.md#the-audit-ledger): an optional local log of
   everything that happens, with fleet insights, decision provenance and session history.
 - [**Cost & token analytics**](docs/usage-and-cost.md#cost-and-tokens): per-session and fleet token

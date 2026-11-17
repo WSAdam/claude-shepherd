@@ -736,7 +736,7 @@ instructions every session in it reads first. It suggests; nothing changes until
   today and what they are expected to do once it is applied (**Today** / **Expected after**, so you
   can judge later whether it worked), the text it replaces (or where an addition goes) and the
   evidence behind it, plus up to 3 `DECISIONS.md` entries for
-  choices sessions keep "fixing". It never proposes undoing a [DECISIONS.md](fleet.md#on-purpose-tab)
+  choices sessions keep "fixing". It never proposes undoing a [DECISIONS.md](fleet.md#on-purpose)
   entry. An answer with no usable JSON is **couldn't run**; "nothing to change" is an answer too.
 - **When:** from any session's **🧭 Coach** button (the detail panel) for its repo, at any time;
   and weekly for every repo with a card, when `coach.enabled` is on (default off). The weekly run
@@ -784,7 +784,7 @@ instructions every session in it reads first. It suggests; nothing changes until
   was written. It's refused when that part is already in `CLAUDE.md`. A rewrite never gets it: it
   needs the text it replaces. Applying one edit doesn't block the next. **Skip** puts one aside, and **Bring back** on a skipped
   one puts it back with the ones waiting (a skipped `DECISIONS.md` entry too). A `DECISIONS.md` entry is
-  added through the On purpose tab's own guard, not committed. While it runs, the overlay counts how long it has been reading and says when it gives up
+  added through a guard that refuses it if the file changed since the coach read it, not committed. While it runs, the overlay counts how long it has been reading and says when it gives up
   (`coach.timeoutSeconds`, default 10 minutes). A quiet chip shows while the coach
   reads or waits, and **🧭 ⚠** when its last run couldn't run (the overlay says why, with **Run the
   coach again**).
