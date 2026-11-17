@@ -178,9 +178,11 @@ disk, `FX.alert`, interrupted turns, FSEvents). These are the others.
   (`FX.restartVerifyDead`). Its two callers are `FX.restartOne` (Restart fleet) and
   `FX.pastResumeLaunch` (History's Resume, Adam's call 2026-10-04). `tests/ui.test.lua` pins both.
 - **The context bar tracks the editor, not the raw window.** `core.contextFractionFor` divides by
-  `window * context.autoCompactFraction` (default 0.92, an undocumented approximation kept across a
-  Settings Save). A `[1m]` model reads a 1M window. Colour comes from `core.contextBand` (7 bands,
-  mirrored in the JS `barLevel`).
+  Claude Code's compaction point (`core.compactThreshold` at `compact.atPct`) when Shepherd's
+  auto-compact is on, else by `window * context.autoCompactFraction` (default 0.92, an undocumented
+  approximation kept across a Settings Save). Opus 5.x and Fable read 1M with no opt-in (2026-11-17:
+  sessions peak at ~832k); any other `[1m]` model reads 1M too. Colour comes from `core.contextBand`
+  (7 bands, mirrored in the JS `barLevel`).
 - **Two different "remote controls".** `spawn.kittyRemote` / `kittyAutoRemote` is Kitty's `kitty @`
   (Shepherd drives the window headlessly). `remoteControl.*` is Claude Code's own Remote Control:
   `onSpawn` adds `--remote-control` (local, native-Anthropic sessions only), and `sweepOnStartup`

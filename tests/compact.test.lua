@@ -58,7 +58,8 @@ eq("a lead below 1 falls back to 5", core.compactConfig({ compact = { notesLeadP
 eq("200k at 85%: compaction at 153,000 tokens", core.compactThreshold(200000, 85), 153000)
 eq("1M at 85%: 833,000", core.compactThreshold(1000000, 85), 833000)
 eq("a pct above Claude Code's own default can't raise it (200k at 100%: 167,000)", core.compactThreshold(200000, 100), 167000)
-local d = core.compactDue(core.compactConfig({ compact = { enabled = true } }), {}, "claude-opus-5-5", 50000, {})
+-- 2026-11-17: requirement changed -- Opus 5.5 runs 1M with no [1m] now, so Haiku is the 200k session here.
+local d = core.compactDue(core.compactConfig({ compact = { enabled = true } }), {}, "claude-haiku-4-5", 50000, {})
 check("a 200k session gets a due-at", type(d) == "table")
 d = d or {}
 eq("...the notes due at 144,000 tokens (5 points of the effective window before)", d.due, 144000)
@@ -323,14 +324,15 @@ eq("a Save with it on puts 85 back", envNow(), '"85"')
 -- ---- the due-at for each live session ----
 sh("mkdir -p " .. q(HOME .. "/tr"))
 local TR = HOME .. "/tr/s1.jsonl"
-writeFile(TR, json.encode({ type = "assistant", message = { role = "assistant", model = "claude-opus-5-5",
+-- 2026-11-17: requirement changed -- Opus 5.5 runs 1M with no [1m] now, so these sessions are Sonnet 5.5 (200k unless set to [1m]).
+writeFile(TR, json.encode({ type = "assistant", message = { role = "assistant", model = "claude-sonnet-5-5",
   usage = { input_tokens = 10, cache_read_input_tokens = 40000, cache_creation_input_tokens = 0, output_tokens = 5 },
   content = { { type = "text", text = "hi" } } } }) .. "\n")
 local tiles = {
-  { key = "s1", name = "p", status = "working", cwd = HOME, transcript_path = TR, model = "claude-opus-5-5" },
-  { key = "s2", name = "p", status = "done", cwd = HOME, transcript_path = TR, model = "claude-opus-5-5" },
-  { key = "r1", name = "p", status = "done", cwd = HOME, transcript_path = TR, model = "claude-opus-5-5", remote = { host = "box" } },
-  { key = "n1", name = "p", status = "idle", cwd = HOME, model = "claude-opus-5-5" },
+  { key = "s1", name = "p", status = "working", cwd = HOME, transcript_path = TR, model = "claude-sonnet-5-5" },
+  { key = "s2", name = "p", status = "done", cwd = HOME, transcript_path = TR, model = "claude-sonnet-5-5" },
+  { key = "r1", name = "p", status = "done", cwd = HOME, transcript_path = TR, model = "claude-sonnet-5-5", remote = { host = "box" } },
+  { key = "n1", name = "p", status = "idle", cwd = HOME, model = "claude-sonnet-5-5" },
   { key = "u1", name = "p", status = "idle", cwd = HOME, transcript_path = HOME .. "/tr/u1.jsonl" },
   { key = "e1", name = "p", status = "error", cwd = HOME, transcript_path = TR, model = "<synthetic>" },
 }

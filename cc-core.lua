@@ -10284,6 +10284,11 @@ function M.contextLimitFor(cfg, model, opts)
   local m = tostring(model or ""):lower()
   -- Opus 4.6/4.7/4.8 + Sonnet 4.6 have a 1M window on Claude Code paid plans.
   if m:find("opus%-4") or m:find("sonnet%-4") then return 1000000 end
+  -- 2026-11-17: so do Opus 5.x and Fable, with no [1m] opt-in -- Adam's sessions on both peak at
+  -- ~832k, just under the 833k compaction point. "opus-<generation>" only: a dated id
+  -- ("claude-3-opus-20240229") has a date there, not a generation.
+  local opusGen = tonumber(m:match("opus%-(%d+)"))
+  if (opusGen and opusGen >= 5 and opusGen < 100) or m:find("fable", 1, true) then return 1000000 end
   -- 2026-09-28: the session's configured model opts into 1M with "[1m]" (opts.oneM, from
   -- core.configuredModelOneM). Transcripts never carry the suffix, so it can't come from `model`.
   -- Opus and Sonnet only; an unknown (empty) live model trusts the opt-in.
@@ -10366,7 +10371,16 @@ end
 -- accounts for the output reserve the editor measures against.
 function M.contextFractionFor(cfg, model, tokens, opts)
   local window = math.max(M.contextLimitFor(cfg, model, opts), M.nextContextTier(tokens))
-  local limit = window * M.autoCompactFraction(cfg)
+  -- 2026-11-17: with Shepherd's auto-compact on, Claude Code compacts at a point Shepherd knows
+  -- exactly (CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, M.compactThreshold), so 100% is that point. The
+  -- calibrated fraction is only the fallback when the threshold is Claude Code's own.
+  local cc = M.compactConfig(cfg)
+  local limit
+  if cc.enabled then
+    limit = M.compactThreshold(window, cc.atPct)
+  else
+    limit = window * M.autoCompactFraction(cfg)
+  end
   return M.contextFraction(tokens, limit), limit
 end
 

@@ -18,8 +18,8 @@ Every tile in the Cards and Contrast layouts shows the last turn's prompt size (
 divided by the model's context window, with the percentage on the bar. It tells you which session
 to `/compact`.
 
-- The window is **model-aware**: 1M for Opus 4.x and Sonnet 4.x model ids (their window on Claude
-  Code), and for any Opus or Sonnet session set to Claude Code's 1M-context option (a model ending
+- The window is **model-aware**: 1M for Opus 4.x/5.x, Fable and Sonnet 4.x model ids (their window
+  on Claude Code), and for any Opus or Sonnet session set to Claude Code's 1M-context option (a model ending
   in `[1m]`, like `opus[1m]`). Transcripts only record the bare model id, so the option is read
   where Claude Code reads it: the session's own model, then the project's
   `.claude/settings.local.json` and `settings.json`, then `~/.claude/settings.json`. A `/model`
@@ -27,9 +27,11 @@ to `/compact`.
   …"), and the bar follows the newest one, to `[1m]` or away from it, on the next usage pass.
   Otherwise 200k. A provider's `contextLimit` overrides it, and a prompt larger than the assumed window
   rounds it up to the next tier (200k / 1M / 2M), so a session never reads a false 100%.
-- To match Claude Code's own "% until auto-compact", the bar divides by
-  `window × context.autoCompactFraction` (default `0.92`; the exact threshold is undocumented, so
-  this is a close approximation).
+- 100% is the point the session auto-compacts. With Shepherd's auto-compact on (`compact.enabled`)
+  that point is known exactly: Claude Code's own threshold at `compact.atPct` (833,000 tokens of a
+  1M window at 85%, 153,000 of 200k). Otherwise the bar divides by
+  `window × context.autoCompactFraction` (default `0.92`; Claude Code's own default threshold is
+  undocumented, so this is a close approximation).
 - The colour steps through **7 bands**: calm below 50%, a new colour every 10% (50/60/70/80/90), and
   a distinct **critical** band for the last 5%.
 - It is computed on the 60-second usage pass (and live on the one-second loop for active sessions),

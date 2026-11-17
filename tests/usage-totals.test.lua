@@ -291,12 +291,14 @@ do
     writeFile(TRANSCRIPT, json.encode({ type = "user", message = { role = "user",
       content = "<local-command-stdout>Set model to `" .. model .. "`</local-command-stdout>" } }) .. "\n", "a")
   end
+  -- 2026-11-17: requirement changed -- Opus 5.5 runs 1M with no [1m] now, so the session's latest turn is Sonnet 5.5's.
+  writeFile(TRANSCRIPT, rec("msg_sonnet55", "text", uB, "claude-sonnet-5-5") .. "\n", "a")
   local okS, FXs = boot()
   check("a boot before any switch loads", okS)
   FXs.computeUsage()
   local base = frac()
   check("before any switch the bar is measured against 200k  (" .. tostring(base) .. ")", type(base) == "number" and base > 0.2)
-  switchTo("claude-opus-5-5[1m]")
+  switchTo("claude-sonnet-5-5[1m]")
   FXs.computeUsage()
   local wide = frac()
   check("a /model switch to [1m] widens the window five-fold, on the very next pass  (" .. tostring(wide) .. ")",
@@ -308,7 +310,7 @@ do
   FXr.computeUsage()
   eq("after a reload the transcript resumes past the switch", firstRead(readsR, TRANSCRIPT), fileSize(TRANSCRIPT))
   check("...and the window is still the 1M one  (" .. tostring(frac()) .. ")", type(frac()) == "number" and math.abs(frac() - base / 5) < 1e-9)
-  switchTo("claude-opus-5-5")
+  switchTo("claude-sonnet-5-5")
   FXr.computeUsage()
   check("a /model switch away from [1m] narrows it again  (" .. tostring(frac()) .. ")", type(frac()) == "number" and math.abs(frac() - base) < 1e-9)
 end

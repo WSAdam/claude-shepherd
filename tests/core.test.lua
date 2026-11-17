@@ -11900,7 +11900,8 @@ do
   check("1m: Opus 5.5 set to [1m] at 190k tokens reads ~21%, not 100%  (got " .. tostring(frac) .. ")",
         frac > 0.20 and frac < 0.22)
   eq("1m: its window is 1M", core.contextLimitFor({}, "claude-opus-5-5", { oneM = true }), 1000000)
-  eq("1m: without the opt-in it stays 200k", core.contextLimitFor({}, "claude-opus-5-5"), 200000)
+  -- 2026-11-17: requirement changed -- Opus 5.5 now runs 1M with no opt-in (see the 2026-11-17 banner), so Sonnet 5 carries this.
+  eq("1m: without the opt-in it stays 200k", core.contextLimitFor({}, "claude-sonnet-5"), 200000)
   eq("1m: sonnet with the opt-in gets 1M", core.contextLimitFor({}, "claude-sonnet-5", { oneM = true }), 1000000)
   eq("1m: haiku never gets 1M", core.contextLimitFor({}, "claude-haiku-4-5", { oneM = true }), 200000)
   eq("1m: an unknown (empty) live model with the opt-in gets 1M", core.contextLimitFor({}, "", { oneM = true }), 1000000)
@@ -17183,6 +17184,36 @@ do
   check("Clear status: the file is re-checked -- a hold that appeared since the menu opened refuses",
         none == nil and tostring(hold):find("held on the card", 1, true) ~= nil)
   check("Clear status: an unreadable file writes nothing", core.clearedStatus("{torn", now) == nil)
+end
+
+-- ---- Opus 5.x and Fable 5.x run a 1M window with no [1m] opt-in (2026-11-17) ----
+-- 2026-11-17: Claude Code runs Opus 5.5 and Fable 5.2 at 1M by default (Adam's sessions peak at ~832k, just under the 833k compaction point, with no [1m] set anywhere); contextLimitFor gave them 200k, so a 186k Opus 5.5 session pinned its card at 100% and its notes came due at 144k.
+do
+  eq("1M default: Opus 5.5 with no opt-in reads a 1M window", core.contextLimitFor({}, "claude-opus-5-5"), 1000000)
+  eq("1M default: Fable 5.2 with no opt-in reads a 1M window", core.contextLimitFor({}, "claude-fable-5-2"), 1000000)
+  eq("1M default: a dated Opus id is not read as a generation", core.contextLimitFor({}, "claude-3-opus-20240229"), 200000)
+  eq("1M default: Haiku 5.5 stays 200k", core.contextLimitFor({}, "claude-haiku-5-5"), 200000)
+  eq("1M default: Sonnet 5.5 with no opt-in stays 200k (nothing shows it runs 1M by default)",
+     core.contextLimitFor({}, "claude-sonnet-5-5"), 200000)
+  -- the fixture: the Shepherd card's 17h-old session (f0240ddc), last turn 185,674 cache read + 699 cache write + 2 input
+  local frac = core.contextFractionFor({}, "claude-opus-5-5", 186375)
+  check("1M default: a 186k Opus 5.5 session doesn't read 100% (got " .. tostring(frac) .. ")", frac < 0.5)
+  local d = core.compactDue(core.compactConfig({ compact = { enabled = true } }), {}, "claude-opus-5-5", 186375, {}) or {}
+  eq("1M default: its compact notes come due at 784,000 tokens, not 144,000", d.due, 784000)
+  eq("1M default: ...with compaction at 833,000", d.compactAt, 833000)
+end
+
+-- ---- With Shepherd's auto-compact on, the bar's 100% is where Claude Code compacts (2026-11-17) ----
+-- 2026-11-17: the bar divided by 92% of the window (920k on 1M) while Claude Code compacts at 833k under CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=85, so a session about to compact read 90%.
+do
+  local on = { compact = { enabled = true, atPct = 85 } }
+  local frac, lim = core.contextFractionFor(on, "claude-opus-5-5", 832496)
+  eq("compact bar: with compaction on, the limit is Claude Code's compaction point", lim, 833000)
+  check("compact bar: a session about to compact reads ~100% (got " .. tostring(frac) .. ")", frac > 0.99)
+  local _, lim200 = core.contextFractionFor(on, "claude-haiku-4-5", 100000)
+  eq("compact bar: on a 200k window it is 153,000", lim200, 153000)
+  local _, limOff = core.contextFractionFor({}, "claude-opus-5-5", 100000)
+  eq("compact bar: with compaction off, the calibrated 92% of the window still applies", limOff, 920000)
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
