@@ -185,11 +185,11 @@ do
   local hasTab, at, cmpAt = false, nil, nil
   for i, t in ipairs(core.DETAIL_TABS) do
     if t.id == "reqs" then hasTab = true end
-    if t.id == "onpurpose" then at = i end
+    if t.id == "stories" then at = i end   -- 2026-11-17: On purpose, which sat between them, was pruned
     if t.id == "compare" then cmpAt = i end
   end
   check("the Requirements tab is gone from the detail tabs", not hasTab)
-  check("...and Compare sits where it was, after On purpose", at ~= nil and cmpAt == at + 1)
+  check("...and Compare sits where it was, after User Stories", at ~= nil and cmpAt == at + 1)
 end
 
 -- ---- REQ ids named in text ----
