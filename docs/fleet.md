@@ -320,7 +320,8 @@ counts commits in every repo that login can read, public or private:
 - **Right-click a name** (on the board or its chip) to give that person a nickname: type it and
   press Return, or Escape to cancel. The GitHub login stays on hover; an empty nickname goes back
   to it.
-- **Click a name** to see the repos they wrote to in that period, busiest first. Click **Commits** or
+- **Click a name** to see the repos they wrote to in that period, busiest first; click a repo's name
+  to open it on GitHub (only a repo Shepherd's own check found opens). Click **Commits** or
   **Lines** to rank by it, and switch between **This week**, **Last week** and **30 days** (today and
   the 29 days before, with a thin bar per day).
 

@@ -345,6 +345,12 @@ defaults), sessions compact earlier, and write their own notes first.
   exact next steps, the decisions and why, the files and commands involved. The card stays working
   while it writes them. It isn't asked while `stop_hook_active` is set (a block already kept that
   turn going), or in plan mode, where it can't write a file; the next turn end asks instead.
+- **Idle compaction comes first.** Claude Code's own idle compaction (`idleCompaction` in
+  `settings.json`, on by default) compacts a session of 200,000 tokens or more after about 54 idle
+  minutes, before its 1-hour prompt cache expires, so the next message doesn't re-send the whole
+  context at full price. On a 1M window that is long before the notes are due, so those compactions
+  carry no notes. `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS` raises the 200k floor; `"idleCompaction":
+  false` turns it off.
 - **The compaction.** Every compaction (automatic or `/compact`) runs `cc-status.sh precompact`.
   Claude Code adds a PreCompact hook's output to the summary's instructions, so with notes saved the
   summary is told they come back whole and needn't repeat them.

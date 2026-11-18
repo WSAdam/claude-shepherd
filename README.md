@@ -60,7 +60,7 @@ Every feature below has a reference page one click away. The panel lists the sam
   usage, with a warning at every point past 90%.
 - [**Commits today and this week**](docs/usage-and-cost.md#commits-today-and-this-week): your
   commits and lines changed per day and project, from local git, each linked to its session.
-- [**Compare**](docs/fleet.md#compare-tab): a weekly leaderboard of your commits and lines against up to 5 GitHub users, from every repo your `gh` login can read; click a name for their repos.
+- [**Compare**](docs/fleet.md#compare-tab): a weekly leaderboard of your commits and lines against up to 5 GitHub users, from every repo your `gh` login can read; click a name for their repos, and a repo to open it on GitHub.
 - [**Where the time went**](docs/usage-and-cost.md#where-the-time-went): time lost to waits, limits, stalls and errors.
 - [**How often each skill works**](docs/providers-and-integrations.md#how-often-each-skill-works): runs and ok-rate per skill, from how each run's turn ended; your own label wins.
 - [**Shift report**](docs/usage-and-cost.md#shift-report): a summary of what the fleet did while you were away.
