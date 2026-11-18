@@ -16308,6 +16308,19 @@ local function handleBridgeMsg(msg)
     FX.comparePush()
     return
   end
+  if a == "compare-open-repo" then
+    -- a repo name in a person's drill-in (2026-11-18): the panel sends the name; the URL is built from
+    -- Shepherd's own state (core.compareRepoUrl) and passes the http(s) guard before it opens
+    local repo = tostring(payload.repo or "")
+    local url = core.compareRepoUrl(FX.compareState(), repo)
+    if url and core.isOpenableUrl(url) then
+      print("[cc-dashboard] 🔍 compare: opening " .. url)
+      pcall(function() hs.urlevent.openURL(url) end)
+    else
+      print("[cc-dashboard] ⚠️ compare: not opening " .. repo .. " (not a repo on the board)")
+    end
+    return
+  end
   if a == "detail-transcript" then
     -- F4 Transcript peek: the selected session's recent human-readable turns. Reads a
     -- bounded tail of its transcript JSONL; pure core.transcriptPeek extracts the user +
@@ -18196,6 +18209,9 @@ local HTML = [[
   #d-compare .cmp-repos { margin:6px 0 0 28px; }
   #d-compare .cmp-repo { display:flex; gap:10px; align-items:baseline; font-size:12px; padding:2px 0; color:var(--text-2); }
   #d-compare .cmp-rname { flex:1; min-width:0; word-break:break-all; color:var(--text); }
+  /* 2026-11-18: a repo name is a button that opens the repo on GitHub, styled as the text it was */
+  #d-compare button.cmp-rname { background:none; border:0; padding:0; font:inherit; text-align:left; cursor:pointer; }
+  #d-compare button.cmp-rname:hover { color:var(--accent); text-decoration:underline; }
   #d-compare .cmp-users { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin:12px 0 4px; }
   #d-compare .cmp-ulabel { color:var(--muted); font-size:11px; }
   #d-compare .cmp-chip { display:inline-flex; align-items:center; gap:4px; background:var(--surface-2); border:1px solid var(--border);
@@ -22013,7 +22029,9 @@ local HTML = [[
           if(!repos.length) html += '<div class="cmp-repo">No commits your login can see '
             + (isMonth ? 'in the last 30 days' : st.week === "last" ? 'last week' : 'this week') + '.</div>';
           repos.forEach(function(rp){
-            html += '<div class="cmp-repo"><span class="cmp-rname">' + esc(rp.repo) + '</span><span>' + esc(rp.commits || 0)
+            // 2026-11-18: the name opens the repo on GitHub (compare-open-repo; Lua builds the URL)
+            html += '<div class="cmp-repo"><button class="cmp-rname" data-cmp="repo:' + esc(rp.repo) + '" title="Open '
+              + esc(rp.repo) + ' on GitHub">' + esc(rp.repo) + '</button><span>' + esc(rp.commits || 0)
               + ' commit' + (rp.commits === 1 ? '' : 's') + '</span><span class="cmp-add">+' + esc(rp.add || 0)
               + '</span><span class="cmp-del">−' + esc(rp.del || 0) + '</span></div>';
           });
@@ -22098,6 +22116,7 @@ local HTML = [[
       if(verb === "week"){ COMPARE.week = (arg === "last" || arg === "month") ? arg : "this"; renderCompare(); }
       else if(verb === "sort"){ COMPARE.sort = arg === "lines" ? "lines" : "commits"; renderCompare(); }
       else if(verb === "open"){ COMPARE.open[arg] = !COMPARE.open[arg]; renderCompare(); }
+      else if(verb === "repo"){ comparePost({ a:"compare-open-repo", repo: arg }); }
       else if(verb === "rm"){ comparePost({ a:"compare-users", users: users.filter(function(u){ return u !== arg; }) }); }
       else if(verb === "add"){
         var inp = document.getElementById("cmp-new");

@@ -234,4 +234,19 @@ api.compareAct(target("open:WSAdam"));
 api.compareAct(target("week:this"));
 check("This week switches back", api.get().week === "this" && (els["d-compare"].innerHTML.match(/class="cmp-bar/g) || []).length === 14);
 
+// 10. a repo name opens the repo (2026-11-18, Adam: "can we make clicking any of these repo names a link to
+// open that repo?"). The panel posts the name only; Lua builds the URL (core.compareRepoUrl).
+api.set("data", data);
+api.compareAct(target("open:jonkopp17"));
+h = els["d-compare"].innerHTML;
+check("each repo name under a person is a button", /<button class="cmp-rname" data-cmp="repo:Org\/crm-sdk"/.test(h));
+check("...that says where it goes", h.indexOf('title="Open Org/crm-sdk on GitHub"') >= 0);
+check("...escaped in the attribute too", h.indexOf('data-cmp="repo:Org/&lt;b&gt;mail&lt;/b&gt;"') >= 0 && h.indexOf("<b>") < 0);
+posted.length = 0;
+api.compareAct(target("repo:Org/crm-sdk"));
+check("clicking it asks Shepherd to open that repo", posted.length === 1 && posted[0].a === "compare-open-repo"
+      && posted[0].repo === "Org/crm-sdk");
+check("...and leaves the drill-in open", api.get().open.jonkopp17 === true && els["d-compare"].innerHTML.indexOf("Org/crm-sdk") >= 0);
+api.compareAct(target("open:jonkopp17"));
+
 done();

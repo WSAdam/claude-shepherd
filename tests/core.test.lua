@@ -17105,5 +17105,24 @@ do
   eq("compact bar: with compaction off, the calibrated 92% of the window still applies", limOff, 920000)
 end
 
+-- ---- A repo name on the Compare board opens it on GitHub (2026-11-18) ----
+-- Adam, 2026-11-18: "can we make clicking any of these repo names a link to open that repo?" The panel
+-- sends only the name; Shepherd builds the URL itself, for a repo its own check found.
+do
+  local A, B, C = string.rep("a", 40), string.rep("b", 40), string.rep("c", 40)
+  local st = core.parseCompareState(core.encodeCompareState({ users = {}, self = "WSAdam", commits = {
+    [A] = { login = "WSAdam", repo = "WSAdam/pilot", at = 1, add = 1, del = 0 },
+    [B] = { login = "Rafa", repo = "theTechGoose/v2", at = 2, add = 1, del = 0 },
+    [C] = { login = "Rafa", repo = "evil/../x", at = 3, add = 1, del = 0 } } }))
+  eq("compare repo link: a repo on the board opens at github.com/<owner>/<name>",
+     core.compareRepoUrl(st, "WSAdam/pilot"), "https://github.com/WSAdam/pilot")
+  eq("compare repo link: ...anyone's repo, not only yours", core.compareRepoUrl(st, "theTechGoose/v2"), "https://github.com/theTechGoose/v2")
+  eq("compare repo link: a name the check never found opens nothing", core.compareRepoUrl(st, "Org/other"), nil)
+  eq("compare repo link: a name no GitHub path can carry opens nothing, even from the state", core.compareRepoUrl(st, "evil/../x"), nil)
+  eq("compare repo link: a scheme posing as a name opens nothing", core.compareRepoUrl(st, "javascript:alert(1)//x"), nil)
+  eq("compare repo link: no name, or no state, opens nothing", core.compareRepoUrl(st, nil), nil)
+  eq("compare repo link: ...no state", core.compareRepoUrl(nil, "WSAdam/pilot"), nil)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

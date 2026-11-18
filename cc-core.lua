@@ -25348,6 +25348,17 @@ do
              weeks = { this = period(win.thisStart, 7), last = period(win.lastStart, 7),
                        month = period(win.monthStart, M.COMPARE_MONTH_DAYS) } }
   end
+
+  -- A repo name clicked on the board (2026-11-18) -> its GitHub page, or nil. Only a repo Shepherd's
+  -- own check found (a commit in st names it), and only an owner/name a URL path can carry: the
+  -- panel sends a name, never a URL.
+  function M.compareRepoUrl(st, repo)
+    if type(st) ~= "table" or type(st.commits) ~= "table" or not repoOk(repo) then return nil end
+    for _, c in pairs(st.commits) do
+      if type(c) == "table" and c.repo == repo then return "https://github.com/" .. repo end
+    end
+    return nil
+  end
 end
 
 -- ============================================================================

@@ -5693,6 +5693,22 @@ do
   check("compare: uninstall --purge removes its file", unsrc:find("cc-compare.json", 1, true) ~= nil)
 end
 
+-- ---- A repo name on the Compare board opens it on GitHub (2026-11-18) ----
+-- Adam, 2026-11-18: repo names in a person's drill-in open the repo. The JS sends the name; the
+-- handler opens only what core.compareRepoUrl builds from Shepherd's own state, through the http(s) guard.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local h = src:match('\n  if a == "compare%-open%-repo" then(.-)\n  end\n') or ""
+  check("compare repo link: the bridge handles compare-open-repo", #h > 0)
+  check("compare repo link: ...the URL comes from core.compareRepoUrl over Shepherd's own state",
+        h:find("core.compareRepoUrl(FX.compareState(),", 1, true) ~= nil)
+  check("compare repo link: ...and passes the http(s) guard before it opens",
+        h:find("core.isOpenableUrl(url)", 1, true) ~= nil and h:find("hs.urlevent.openURL(url)", 1, true) ~= nil)
+  check("compare repo link: ...never a URL the panel sent", not h:find("payload.url", 1, true))
+end
+
 -- ---- The usage footer says why it has no official numbers (2026-11-02) ----
 -- 2026-11-02: it blamed a missing login token for a 200 whose five_hour was null. core.officialUsageWhy
 -- decides the reason and usage-foot.test.js runs the footer; these pin the Lua that feeds it.
