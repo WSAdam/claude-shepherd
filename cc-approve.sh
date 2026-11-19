@@ -368,10 +368,15 @@ NONCE="$$.$NOW"
 # re-publishes an `ask` pending between the two writes and the merge leaks it
 # all over again.
 # pending.alwaysAsk (2026-09-28) names the always-ask rule that held the request, if one did.
+# pending.change (2026-11-19, round 4 #3): an Edit / Write / MultiEdit's capped change, so the card
+# shows the text an Approve would allow (cc_pending_change, as cc-status.sh records it).
+CHANGE_JSON="$(cc_pending_change "$INPUT")"
+[ -n "$CHANGE_JSON" ] || CHANGE_JSON="null"
 ARM_PATCH="$(jq -nc \
   --arg sid "$SESSION_ID" --arg name "$NAME" --arg cwd "$CWD" \
   --argjson now "$NOW" --arg tool "$TOOL" --arg sum "$SUMMARY" --arg nonce "$NONCE" --arg aa "$ALWAYS_ASK" \
-  '{session_id:$sid, name:$name, cwd:$cwd, status:"approval", updated:$now, since:$now, gate:"waiting", gate_nonce:$nonce, pending:({tool:$tool, summary:$sum, message:$sum, nonce:$nonce} + (if $aa == "" then {} else {alwaysAsk:$aa} end))}')"
+  --argjson ch "$CHANGE_JSON" \
+  '{session_id:$sid, name:$name, cwd:$cwd, status:"approval", updated:$now, since:$now, gate:"waiting", gate_nonce:$nonce, pending:({tool:$tool, summary:$sum, message:$sum, nonce:$nonce} + (if $aa == "" then {} else {alwaysAsk:$aa} end) + (if $ch == null then {} else {change:$ch} end))}')"
 ARM_FILE="$(cc_file "$KEY")"
 arm_gate() {
   local tmp cur

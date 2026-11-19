@@ -1580,4 +1580,20 @@ assert_eq "fence: ...nor own git" \
 assert_eq "fence: defaults/cc-config.json turns gate.fence on" "true" \
   "$(jq -r '.gate.fence' "$ROOT/defaults/cc-config.json")"
 
+# ---- the gate's card shows the change it would allow (2026-11-19) ----
+# Mining round 4 #3: an armed Edit said only "Wants: <path>", so Approve authorized text Adam never
+# saw. The armed pending carries the same capped change cc-status.sh records (cc_pending_change).
+date +%s > "$HB"
+EDITREQ="$(jq -nc '{session_id:"gd1", cwd:"/x/p", tool_name:"Edit",
+  tool_input:{file_path:"/x/p/a.txt", old_string:"old line", new_string:"new line"}}')"
+( printf '%s' "$EDITREQ" | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=5 \
+    bash "$APP" > "$TMP/out_gd1" 2>/dev/null ) &
+bg=$!
+wait_block "$TMP/gd1.json"
+i=0; while [ "$i" -lt 100 ] && [ -z "$(jq -r '.pending.nonce // empty' "$TMP/gd1.json" 2>/dev/null)" ]; do sleep 0.05; i=$((i+1)); done
+assert_eq "an armed Edit's card carries the change it would allow" "edit|old line|new line" \
+  "$(jq -r '[.pending.change.kind, .pending.change.old, .pending.change.new] | join("|")' "$TMP/gd1.json" 2>/dev/null)"
+answer gd1 deny
+wait $bg
+
 finish

@@ -7416,7 +7416,9 @@ do
   -- 2026-11-19: 54 -> 53, REQUIREMENT CHANGE: queue hold and the Queues view ("queuehold", flagged new) were removed.
   -- 2026-11-19: 53 -> 52, REQUIREMENT CHANGE: task packets ("packets", flagged new) were removed.
   -- 2026-11-19: 52 -> 51, REQUIREMENT CHANGE: playbooks in My List ("playbooks", flagged new) were removed.
-  eq("FEATURES: the 51 new features are flagged", newCount, 51)
+  -- 2026-11-19: 51 -> 52 for an approval card's change shown as a diff ("changediff", flagged new).
+  eq("FEATURES: the 52 new features are flagged", newCount, 52)
+  check("FEATURES: lists an approval card's change as a diff", keys.changediff == true)
   check("FEATURES: lists the Compare tab", keys.compare == true)
   check("FEATURES: lists crossings", keys.crossings == true)
   check("FEATURES: no queue hold (removed 2026-11-19)", not keys.queuehold)

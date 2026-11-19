@@ -35,6 +35,9 @@ assert_eq "user-story area heading is esc()'d"   "yes" "$(has 'esc(g.area)')"
 # commit stats (2026-09-25): commit subjects are anyone's text, and project names are relabels
 assert_eq "commit subject is esc()'d"            "yes" "$(has 'esc(c.subject')"
 assert_eq "commit project name is esc()'d"       "yes" "$(has 'esc(r.name')"
+# an approval card's change (2026-11-19, round 4 #3): an Edit / Write's text is anyone's
+# (tests/change-diff.test.js runs the real changeDiffHtml)
+assert_eq "a pending change's diff lines are esc()'d" "yes" "$(has 'esc(r.t + " " + r.s)')"
 # (2026-11-19: pinned links' chips went with them -- REQUIREMENT CHANGE)
 # overlap radar (2026-09-29): its lines carry branch and file names, which anyone can pick
 assert_eq "an Instances row's overlap line is esc()'d"      "yes" "$(has 'esc(im.overlap)')"

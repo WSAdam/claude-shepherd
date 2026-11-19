@@ -148,6 +148,7 @@ PROMPT_ACTIVE=""   # a genuine native prompt is up (Notification) -> mark pendin
 PENDING_TOOL=""
 PENDING_MSG=""
 ASK_JSON=""
+CHANGE_JSON=""     # an Edit / Write / MultiEdit's capped change (cc_pending_change), for the card's diff
 
 case "$EVENT" in
   sessionstart)
@@ -198,6 +199,8 @@ case "$EVENT" in
       PENDING_MSG="$(cc_get "$INPUT" '.tool_input.questions[0].question')"
     fi
     [ -n "$PENDING_MSG" ] || PENDING_MSG="$(summarize_tool "$INPUT" "$PENDING_TOOL")"
+    # 2026-11-19 (round 4 #3): the change itself, capped, so the card can show what Approve allows
+    case "$PENDING_TOOL" in Edit|Write|MultiEdit) CHANGE_JSON="$(cc_pending_change "$INPUT")" ;; esac
     ;;
   notification)
     NTYPE="$(cc_get "$INPUT" '.notification_type')"
@@ -439,6 +442,10 @@ if [ -n "$SET_PENDING" ]; then
   # Attach the AskUserQuestion questions/options so the panel can render them.
   if [ -n "$ASK_JSON" ]; then
     PATCH="$(printf '%s' "$PATCH" | jq -c --argjson ask "$ASK_JSON" '.pending.ask = $ask')"
+  fi
+  # ...and an Edit / Write / MultiEdit's change (cc_pending_change), for the card's diff
+  if [ -n "${CHANGE_JSON:-}" ]; then
+    PATCH="$(printf '%s' "$PATCH" | jq -c --argjson ch "$CHANGE_JSON" '.pending.change = $ch')"
   fi
 fi
 

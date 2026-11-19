@@ -150,6 +150,34 @@ W="p2"; WCWD="/srv/web"; WF="$TMP/$W.json"
 ev permissionrequest "{\"session_id\":\"$W\",\"cwd\":\"$WCWD\",\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"/srv/web/index.html\"}}"
 assert_json "permissionrequest Write -> file_path" "$WF" '.pending.summary' "/srv/web/index.html"
 
+# ---- the change an Edit / Write / MultiEdit asks to make rides on the pending (2026-11-19) ----
+# Mining round 4 #3 (Adam picked it): the card said only "Wants: <path>", so an Approve authorized
+# text Adam never saw. A capped copy of the change rides on pending.change for the panel's diff.
+CE="p2e"; CEF="$TMP/$CE.json"
+ev permissionrequest "$(jq -nc --arg s "$CE" '{session_id:$s, cwd:"/srv/web", tool_name:"Edit",
+  tool_input:{file_path:"/srv/web/a.js", old_string:"let x = 1;\nkeep();", new_string:"let x = 2;\nkeep();"}}')"
+assert_json "permissionrequest Edit -> pending.change carries the old and the new text" "$CEF" \
+  '[.pending.change.kind, .pending.change.old, .pending.change.new] | join("|")' "$(printf 'edit|let x = 1;\nkeep();|let x = 2;\nkeep();')"
+assert_json "...the card's summary is still the path" "$CEF" '.pending.summary' "/srv/web/a.js"
+assert_json "...and it isn't marked cut" "$CEF" '.pending.change.cut' "false"
+CW="p2w"; CWF="$TMP/$CW.json"
+ev permissionrequest "$(jq -nc --arg s "$CW" '{session_id:$s, cwd:"/srv/web", tool_name:"Write",
+  tool_input:{file_path:"/srv/web/new.txt", content:"hello\nworld"}}')"
+assert_json "permissionrequest Write -> pending.change carries the new file" "$CWF" \
+  '[.pending.change.kind, .pending.change.new] | join("|")' "$(printf 'write|hello\nworld')"
+CM="p2m"; CMF="$TMP/$CM.json"
+ev permissionrequest "$(jq -nc --arg s "$CM" '{session_id:$s, cwd:"/srv/web", tool_name:"MultiEdit",
+  tool_input:{file_path:"/srv/web/b.js", edits:[{old_string:"a", new_string:"b"}, {old_string:"c", new_string:"d"}]}}')"
+assert_json "permissionrequest MultiEdit -> each edit's old and new text" "$CMF" \
+  '[.pending.change.kind, (.pending.change.edits | length), .pending.change.edits[1].old, .pending.change.edits[1].new] | map(tostring) | join("|")' "multi|2|c|d"
+CL="p2l"; CLF="$TMP/$CL.json"
+LONGC="$(head -c 9000 /dev/zero | tr '\0' 'x')"
+ev permissionrequest "$(jq -nc --arg s "$CL" --arg c "$LONGC" '{session_id:$s, cwd:"/srv/web", tool_name:"Write",
+  tool_input:{file_path:"/srv/web/big.txt", content:$c}}')"
+assert_json "a long change is capped, and says it was cut" "$CLF" \
+  '[(.pending.change.new | length) <= 4000, .pending.change.cut] | map(tostring) | join("|")' "true|true"
+assert_json "a Bash prompt carries no change" "$PF" '(.pending.change // "none")' "none"
+
 # generic notification still sets pending when none exists yet
 G="p3"; GCWD="/srv/x"; GF="$TMP/$G.json"
 ev sessionstart "{\"session_id\":\"$G\",\"cwd\":\"$GCWD\"}"

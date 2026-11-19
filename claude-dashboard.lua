@@ -14687,6 +14687,16 @@ local HTML = [[
     max-height:calc(1.45em * 5); overflow-y:auto; overflow-wrap:anywhere; padding-right:4px; }
   #d-activity { color:var(--accent-text); }
   #d-pending  { color:var(--danger); }
+  /* 2026-11-19 (round 4 #3): the change an Edit / Write asks to make, under Wants -- capped, scrolls */
+  #d-change { display:none; margin:6px 0 0; padding:4px 0; border:1px solid var(--border); border-radius:6px;
+    font-family:ui-monospace,Menlo,monospace; font-size:11px; line-height:1.4;
+    max-height:calc(1.4em * 14); overflow:auto; background:var(--surface); }
+  #d-change div { white-space:pre-wrap; overflow-wrap:anywhere; padding:0 8px; }
+  #d-change .dc-del { color:var(--danger); background:color-mix(in srgb, var(--danger) 10%, transparent); }
+  #d-change .dc-add { color:var(--ok); background:color-mix(in srgb, var(--ok) 10%, transparent); }
+  #d-change .dc-ctx { color:var(--dim); }
+  #d-change .dc-head { color:var(--accent-text); font-weight:600; padding-top:4px; }
+  #d-change .dc-note { color:var(--dim); font-style:italic; }
   #d-actions { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
   #d-actions button { background:var(--surface); color:var(--text); border:1px solid var(--border);
                       border-radius:8px; font-size:12px; padding:5px 10px; cursor:pointer; }
@@ -15370,6 +15380,7 @@ local HTML = [[
     <div id="d-tab-menu"></div>
     <div class="d-panel" data-tab="activity">
       <div id="d-pending"></div>
+      <div id="d-change"></div>
       <div id="d-ask"></div>
       <div id="d-activity"></div>
       <div id="d-prompt"></div>
@@ -18803,6 +18814,13 @@ local HTML = [[
       if(text != null) e.textContent = String(text);
       return e;
     }
+    // 2026-11-19 (round 4 #3): the pending change's diff (changeDiffHtml escapes every line)
+    function renderChange(it){
+      var ch = document.getElementById("d-change");
+      if(!ch) return;
+      ch.innerHTML = changeDiffHtml(it.pending && it.pending.change);
+      ch.style.display = ch.innerHTML ? "block" : "none";
+    }
     function renderAsk(it){
       var el = document.getElementById("d-ask");
       var ask = it.pending && it.pending.ask;
@@ -19384,6 +19402,7 @@ local HTML = [[
         pend.textContent = "Wants: " + it.pending.summary + (it.gate === "waiting" ? "  (hands-free approve)" : "");
         pend.style.display = "block";
       } else { pend.style.display = "none"; }
+      renderChange(it);   // 2026-11-19 (round 4 #3): an Edit / Write's change under Wants
       var ac = document.getElementById("d-activity");
       if(st === "error"){ ac.textContent = "Error: " + (it.error_message || "API error — stopped"); ac.style.display="block"; }
       else if(it.activity){ ac.textContent = (st==="approval" ? "Why: " : "Doing: ") + it.activity; ac.style.display="block"; }
@@ -22151,6 +22170,64 @@ local HTML = [[
       return String(s == null ? "" : s)
         .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
         .replace(/"/g,"&quot;").replace(/'/g,"&#39;");
+    }
+
+    // 2026-11-19 (mining round 4 #3, Adam picked it): the change an Edit / Write / MultiEdit asks to
+    // make, drawn under "Wants:" -- the card said only the path, so an Approve authorized text Adam
+    // never saw. The hooks put a capped copy on pending.change (cc_pending_change). A line diff: an
+    // LCS over at most 200 lines a side; the rest is counted, not drawn. rows: { t: "-"|"+"|" ", s }.
+    function changeLineDiff(a, b){
+      var CAP = 200;
+      var sa = String(a == null ? "" : a), sb = String(b == null ? "" : b);
+      var A = sa === "" ? [] : sa.split("\n"), B = sb === "" ? [] : sb.split("\n");
+      var more = Math.max(0, A.length - CAP) + Math.max(0, B.length - CAP);
+      if(A.length > CAP) A = A.slice(0, CAP);
+      if(B.length > CAP) B = B.slice(0, CAP);
+      var n = A.length, m = B.length, W = m + 1;
+      var L = new Array((n + 1) * W).fill(0);
+      for(var i = n - 1; i >= 0; i--){
+        for(var j = m - 1; j >= 0; j--){
+          L[i * W + j] = (A[i] === B[j]) ? L[(i + 1) * W + j + 1] + 1 : Math.max(L[(i + 1) * W + j], L[i * W + j + 1]);
+        }
+      }
+      var rows = [], x = 0, y = 0;
+      while(x < n && y < m){
+        if(A[x] === B[y]){ rows.push({ t: " ", s: A[x] }); x++; y++; }
+        else if(L[(x + 1) * W + y] >= L[x * W + y + 1]){ rows.push({ t: "-", s: A[x] }); x++; }
+        else { rows.push({ t: "+", s: B[y] }); y++; }
+      }
+      while(x < n){ rows.push({ t: "-", s: A[x] }); x++; }
+      while(y < m){ rows.push({ t: "+", s: B[y] }); y++; }
+      return { rows: rows, more: more };
+    }
+    // The diff's html: every line through esc(). "" when there is no change to show.
+    function changeDiffHtml(ch){
+      if(!ch || typeof ch !== "object") return "";
+      function row(r){
+        var cls = r.t === "-" ? "dc-del" : (r.t === "+" ? "dc-add" : "dc-ctx");
+        return '<div class="' + cls + '">' + esc(r.t + " " + r.s) + '</div>';
+      }
+      function note(t){ return '<div class="dc-note">' + esc(t) + '</div>'; }
+      function block(d){
+        return d.rows.map(row).join("") + (d.more > 0 ? note("… " + d.more + " more lines not shown") : "");
+      }
+      var out = "";
+      if(ch.kind === "edit"){
+        out = (ch.all ? note("replace all: changes every occurrence") : "") + block(changeLineDiff(ch.old, ch.new));
+      } else if(ch.kind === "write"){
+        out = block(changeLineDiff("", ch.new));
+      } else if(ch.kind === "multi"){
+        var eds = Array.isArray(ch.edits) ? ch.edits : [];
+        var total = Number(ch.n) || eds.length;
+        out = eds.map(function(e, k){
+          return '<div class="dc-head">' + esc("edit " + (k + 1) + " of " + total) + '</div>'
+            + block(changeLineDiff(e && e.old, e && e.new));
+        }).join("");
+      } else {
+        return "";
+      }
+      if(ch.cut) out += note("… the change is longer: not all of it is shown here");
+      return out;
     }
 
     // Per-session risk badge (Feature E): only med/high show — low stays silent to

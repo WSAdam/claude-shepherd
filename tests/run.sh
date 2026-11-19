@@ -151,6 +151,9 @@ echo ""
 echo "== node: My List review -- double-clicking a review heads-up opens the project's To verify list, every other card still jumps; the 📋 badge is text only (behavioral, runs the shipped tileActivate) =="
 node "$DIR/review-open.test.js" || fail=1
 echo ""
+echo "== node: an approval card's change -- an Edit / Write / MultiEdit drawn as a capped line diff under Wants, every line escaped, a cut change says so (behavioral, runs the shipped changeLineDiff / changeDiffHtml) =="
+node "$DIR/change-diff.test.js" || fail=1
+echo ""
 echo "== node: tile presses in a real browser (skips without Playwright) =="
 node "$DIR/tile-press.browser.test.js" || fail=1
 echo ""

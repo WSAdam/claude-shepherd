@@ -105,6 +105,26 @@ const WAITING = { key: "k1", name: "astro", label: "CB Sentinel Astro", status: 
           m.scrollH > m.h + 1 && (m.overflowY === "auto" || m.overflowY === "scroll") && m.text > 1000);
   }
 
+  // 2026-11-19 (round 4 #3): an Edit's change is drawn under Wants, capped at 14 lines, and scrolls
+  const OLD = Array.from({ length: 40 }, (_, i) => "line " + i).join("\n");
+  const NEW = OLD.replace("line 3", "line three").replace("line 30", "<b>line thirty</b>");
+  const ch = await page.evaluate((it) => {
+    window.ccUpdate([it]);
+    selectedKey = it.key;
+    renderDetail(); setDetailTab("activity", false);
+    const el = document.getElementById("d-change");
+    const cs = getComputedStyle(el);
+    return { display: cs.display, h: el.getBoundingClientRect().height, scrollH: el.scrollHeight,
+             lh: parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.4, bold: el.querySelectorAll("b").length,
+             dels: el.querySelectorAll(".dc-del").length, adds: el.querySelectorAll(".dc-add").length };
+  }, Object.assign({}, WAITING, { pending: { summary: "/tmp/astro/a.js", tool: "Edit",
+      change: { kind: "edit", old: OLD, new: NEW, cut: false } }, activity: "Edit: /tmp/astro/a.js" }));
+  check("an Edit's change shows under Wants  (display " + ch.display + ")", ch.display === "block");
+  check("...with its removed and added lines  (" + ch.dels + " out, " + ch.adds + " in)", ch.dels === 2 && ch.adds === 2);
+  check("...the change's own markup is text, never html", ch.bold === 0);
+  check("...at most 14 lines tall, then it scrolls  (h=" + ch.h.toFixed(1) + " line=" + ch.lh.toFixed(1) + ")",
+        ch.h <= ch.lh * 14 + 12 && ch.scrollH > ch.h + 1);
+
   const short = await page.evaluate((it) => window.__measure(Object.assign({}, it, {
     pending: { summary: "git status" }, activity: "Bash: git status" })), WAITING);
   for (const id of ["d-pending", "d-activity"]) {

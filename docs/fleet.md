@@ -210,7 +210,11 @@ file. So each worktree Shepherd starts a session for gets its own **port** and *
 [Controls](controls.md#the-detail-panel). Its views sit in a **tab strip**:
 
 - **Activity** (the default): status, the **Wants** (the exact command) and **Why** (the
-  assistant's reasoning before a request; each stops at five lines and scrolls past that), the agent's
+  assistant's reasoning before a request; each stops at five lines and scrolls past that). For an
+  Edit, Write or MultiEdit, the **change** sits under Wants as a line diff: the lines it takes out
+  (red) and puts in (green), as plain text, 14 lines tall with a scroll bar. Each hook keeps the first
+  4,000 characters of each text (`CC_CHANGE_CAP`), and a longer change says so. A MultiEdit shows its
+  first 8 edits, each under its own heading. Then the agent's
   current **plan and TODO list** (its latest `TodoWrite` or plan-mode plan), a live **activity
   peek** ("Doing: …", the latest assistant line), and session lineage.
 - **Transcript**: up to the 60 most recent messages from the last 128 KB of the transcript, oldest

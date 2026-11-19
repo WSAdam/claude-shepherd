@@ -22046,6 +22046,10 @@ M.FEATURES = {
   { key = "gate", cat = "Control", title = "Headless approvals",
     what = "When a session wants a risky tool it pauses, and you approve or deny right from the panel; unanswered, it safely falls back.",
     why = "You stay in control without editor windows popping up — and it never silently auto-runs." },
+  -- 2026-11-19: mining round 4 #3 (Adam picked it)
+  { key = "changediff", cat = "Control", new = true, title = "The change, on the approval card",
+    what = "When a session asks to Edit, Write or MultiEdit a file, the detail panel shows the change under Wants: the lines it takes out and puts in, every line as plain text, capped at 14 lines with a scroll bar (a long change says it isn't all shown). A MultiEdit shows each edit under its own heading.",
+    why = "Approve allows exactly that text -- now you see it before you click, not just the file's path." },
   { key = "alwaysask", cat = "Control", new = true, title = "Always-ask commands",
     what = "git push, rm -rf, history rewrites (reset --hard, clean -f, branch -D, worktree remove --force, checkout -- .), any publish, gh release create, gh pr merge and a Cloudflare production deploy (wrangler deploy, through npx or pnpm dlx too, and npm run deploy) wait for your click on the card, even with the gate off, and no auto-allow or repeat approval can pass them. With Shepherd closed, Claude Code's own prompt asks instead. Add your own in Settings.",
     why = "The commands you can't take back never run on autopilot -- even inside cd x && ..., sh -c or sudo." },

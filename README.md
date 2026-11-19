@@ -137,6 +137,8 @@ the fleet idle alert; every other automatic behaviour here waits for its switch.
 
 - [**Headless approvals**](docs/approvals-and-policies.md#headless-approvals-the-gate): risky tools
   wait for your Approve or Deny in the panel, with no window switching.
+- [**The change, on the approval card**](docs/fleet.md#the-detail-panel): an Edit or Write shows the
+  lines it takes out and puts in under Wants, so you see what Approve allows.
 - [**Always-ask commands**](docs/approvals-and-policies.md#always-ask-commands): `git push`,
   `rm -rf`, history rewrites and publish always wait for your click; no policy passes them.
 - [**Worktree fence**](docs/approvals-and-policies.md#worktree-fence): a session can't edit another

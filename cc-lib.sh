@@ -209,6 +209,33 @@ cc_get() {
   printf '%s' "$1" | jq -r "${2} // empty" 2>/dev/null || printf ''
 }
 
+# 2026-11-19 (mining round 4 #3): the change an Edit / Write / MultiEdit asks to make, capped, for
+# the card's diff (pending.change). The card said only "Wants: <path>", so an Approve authorized
+# text Adam never saw. Prints {kind:"edit", old, new, all, cut} | {kind:"write", new, cut} |
+# {kind:"multi", n, edits:[{old, new}...], cut}, or nothing for any other tool. CC_CHANGE_CAP chars
+# per text (default 4000); a MultiEdit keeps its first 8 edits and splits the cap between them.
+# Usage: CHANGE="$(cc_pending_change "$INPUT")"
+cc_pending_change() {
+  cc_have_jq || return 0
+  local cap="${CC_CHANGE_CAP:-4000}"
+  case "$cap" in ''|*[!0-9]*) cap=4000 ;; esac
+  printf '%s' "$1" | jq -c --argjson cap "$cap" '
+    def c($n): (if type == "string" then . else "" end) | .[0:$n];
+    def long($n): if type == "string" then length > $n else false end;
+    .tool_name as $t | (.tool_input // {}) as $i
+    | if $t == "Edit" then
+        {kind:"edit", old:($i.old_string | c($cap)), new:($i.new_string | c($cap)),
+         all:($i.replace_all == true), cut:(($i.old_string | long($cap)) or ($i.new_string | long($cap)))}
+      elif $t == "Write" then {kind:"write", new:($i.content | c($cap)), cut:($i.content | long($cap))}
+      elif $t == "MultiEdit" then
+        (($i.edits // []) | if type == "array" then . else [] end) as $e
+        | ([($cap / ([($e | length), 1] | max) | floor), 200] | max) as $per
+        | {kind:"multi", n:($e | length),
+           edits:[ $e[0:8][] | {old:(.old_string | c($per)), new:(.new_string | c($per))} ],
+           cut:((($e | length) > 8) or any($e[0:8][]; (.old_string | long($per)) or (.new_string | long($per))))}
+      else empty end' 2>/dev/null || true
+}
+
 # Escape a string so it is safe to embed BETWEEN double quotes in a JSON literal.
 # Used by the jq-absent fallback path (cc-status.sh) so a cwd/name containing a
 # double-quote, backslash, control char, or newline still produces valid JSON.
