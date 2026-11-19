@@ -9,8 +9,9 @@ and the limits of acting on a window you're not looking at.
 
 - **Single-click** a tile to select it (opens the detail panel).
 - **Double-click** a tile to **jump** to its window; on a project card, to the instance that needs
-  you most. Both are decided the moment the button goes down, so they land even while a busy fleet
-  re-renders the grid under the pointer.
+  you most. The detail panel switches to **Activity** too, so an Approve is right there. Both are
+  decided the moment the button goes down, so they land even while a busy fleet re-renders the grid
+  under the pointer.
 - **Right-click** a tile for the context menu (below).
 
 The **header** has **New** (the new-session dialog), **☕** (keep awake), **🔒** (lock the screen),

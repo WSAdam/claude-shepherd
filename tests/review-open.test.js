@@ -44,7 +44,7 @@ if (!keySrc || !actSrc || !openSrc || !badgeSrc) {
 
 // a minimal world for the sliced functions
 function world(items) {
-  const w = { sent: [], toggled: 0, rendered: 0, stored: {}, badge: { textContent: "", title: "", style: {}, classList: null } };
+  const w = { sent: [], toggled: 0, rendered: 0, stored: {}, tabSets: [], badge: { textContent: "", title: "", style: {}, classList: null } };
   const cls = new Set();
   w.badge.classList = { toggle: (c, on) => { if (on) cls.add(c); else cls.delete(c); }, contains: (c) => cls.has(c) };
   const env = {
@@ -56,15 +56,17 @@ function world(items) {
     document: { getElementById: (id) => (id === "mylist-badge" ? w.badge : null) },
     window: { localStorage: { setItem: (k, v) => { w.stored[k] = v; } } },
     worklistMode: false, worklistScope: "generic", worklistLane: "all",
+    setDetailTab: (id, persist) => w.tabSets.push({ id: id, persist: persist }),
   };
   const fn = new Function("env",
     "var send = env.send, findItem = env.findItem, cardKeysFor = env.cardKeysFor, document = env.document, window = env.window;"
     + "var worklistMode = env.worklistMode, worklistScope = env.worklistScope, worklistLane = env.worklistLane;"
     + "function toggleWorklist(){ env.toggleWorklist(); worklistMode = true; }"
     + "function renderWorklist(){ env.renderWorklist(); }"
+    + "var detailTab = 'compare'; function setDetailTab(id, persist){ env.setDetailTab(id, persist); detailTab = id; }"
     + keySrc + openSrc + actSrc + badgeSrc
     + "return { tileReviewKey: tileReviewKey, tileActivate: tileActivate, wlOpenReview: wlOpenReview,"
-    + " setReviewBadge: setReviewBadge, state: function(){ return { scope: worklistScope, lane: worklistLane, mode: worklistMode }; } };");
+    + " setReviewBadge: setReviewBadge, state: function(){ return { scope: worklistScope, lane: worklistLane, mode: worklistMode, tab: detailTab }; } };");
   w.api = fn(env);
   return w;
 }
@@ -108,6 +110,20 @@ check("nothing over the line: the badge goes away", w.badge.textContent === "" &
 w.api.setReviewBadge(null);
 check("a null push is safe", w.badge.textContent === "");
 check("setReviewBadge never writes innerHTML", badgeSrc.indexOf("innerHTML") < 0);
+
+// 2026-11-19 (Adam: "when i double click to highlight and move to a new card we auto select the activity
+// option ... so i don't then need to click the activity tab as well before clicking approve")
+w = world({ k1: { needsYou: "needs", needsYouSource: "approval", status: "approval" } });
+w.api.tileActivate("k1", "repo:/cs/.git");
+check("a double-click jump shows the Activity tab, where Approve is", w.api.state().tab === "activity"
+      && w.tabSets.length === 1 && w.tabSets[0].id === "activity" && w.tabSets[0].persist === true);
+check("...and still jumps", w.sent.length === 1 && w.sent[0].a === "focus-group");
+w = world({ k1: { needsYou: "no", status: "working" } });
+w.api.tileActivate("k1", null);
+check("...a stackless tile too", w.api.state().tab === "activity" && w.sent.length === 1 && w.sent[0].a === "focus");
+w = world({ k1: REVIEW });
+w.api.tileActivate("k1", "repo:/cs/.git");
+check("the My List review heads-up opens My List and leaves the tab alone", w.tabSets.length === 0 && w.api.state().mode === true);
 
 console.log("-- review-open.test.js: " + run + " run, " + failed + " failed --");
 process.exit(failed ? 1 : 0);

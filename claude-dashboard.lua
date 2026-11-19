@@ -28174,6 +28174,9 @@ local HTML = [[
     function tileActivate(key, stack){
       var rk = tileReviewKey(findItem(key));
       if(rk){ wlOpenReview(rk); return; }
+      // 2026-11-19 (Adam): a double-click jump shows the Activity tab, where Approve is -- no extra
+      // click on the tab first. Saved as the project's tab, as a click on it would be.
+      if(detailTab !== "activity") setDetailTab("activity", true);
       if(stack){ send("focus-group", stack, JSON.stringify(cardKeysFor(stack))); return; }
       send("focus", key);
     }
