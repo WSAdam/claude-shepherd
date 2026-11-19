@@ -96,32 +96,10 @@ each time the session finishes, so a session works through a backlog unattended
   window. No window match and it stays queued, and the ledger records `task_feed_skipped`.
 - **Queues follow the project**, so a respawned or `/clear`-ed session inherits its folder's pending
   tasks.
-- **Edit in place**: in **☰ → 📑 Queues** (below), reorder (▲▼), hold or remove (✕) entries.
-  Each edit carries the task text you clicked, so if the queue changed underneath, the edit is
-  refused and the list refreshed instead of moving the wrong task. (The detail panel's Queue tab,
-  with its own editor and **Feed next**, was removed 2026-11-17.)
+- **No editor**: the detail panel's Queue tab (2026-11-17) and ☰ → Queues (2026-11-19) were removed;
+  a queue file in `~/.claude/cc-queue/` can be edited by hand.
 - **Bulk paste**: paste a multi-line list and press Queue. It splits into one task per line
   (bullets and numbering stripped, blanks dropped) after a confirm.
-
-### Queue hold and the Queues view
-
-- **Hold one line**: **Hold** on a line in the Queues view parks it.
-  Auto-feed and the [router](#project-routing) skip a held line; it keeps its
-  place, and the next line that isn't held goes first. **Release** lets it feed again from where
-  it sits. With every line held, nothing is fed. The card reads
-  `+3 queued (1 held)`.
-- **In the file**: the flag rides with the line. A held line is stored as
-  `{ "text": "…", "held": true }` in `~/.claude/cc-queue/<queue>.json`; every other line stays a
-  plain string, so a queue with nothing held keeps the old shape and an older file reads as
-  before. A held `@packet` line keeps its packet.
-- **☰ → 📑 Queues** lists every queue file in one place: the project, the live sessions whose
-  queue it is (click one to open its card), each line held or not, the line that feeds next, and
-  whether the queue is routed. A [packet](#task-packets) line shows its last cited-code check:
-  unchanged or moved at which commit, and how long ago. The view only reads that check; it runs
-  when the line is next to feed. Each line has Hold / Release, ▲ ▼, and ✕, which asks first.
-  Each click carries the line's text, so an edit to a queue that changed
-  underneath is refused and the list refreshed. A queue file that won't read is listed as such
-  and left alone; queues with nothing in them aren't listed.
 
 ### Task packets
 
@@ -142,9 +120,8 @@ the time it's fed. A **packet** carries its evidence, and isn't fed once that ev
   - Unchanged: the session gets the task, each cited range as it was read (with its commit),
     the repro and done-when. A packet isn't template-expanded.
   - Changed or gone: it isn't fed. The card says `📦 cited code moved: path:from-to`, the ledger
-    records `packet_moved` once, and the packet stays at the head until you remove it (✕) or the
-    code matches again. A queue that can't be read, or a packet that isn't saved, is flagged the
-    same way.
+    records `packet_moved` once, and the packet stays at the head until the code matches again. A
+    queue that can't be read, or a packet that isn't saved, is flagged the same way.
   - Still being checked: the feed waits. Auto-feed tries again while the session stays done.
 - **Batches**: a unit in a batch file can name a packet (`"packet": "p3"`), one saved from a
   session in the repo's main checkout. Before its tab opens, Shepherd checks it at the repo's

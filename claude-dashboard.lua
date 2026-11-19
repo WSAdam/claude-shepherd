@@ -9561,7 +9561,7 @@ end
 
 -- ---- The decisions inbox (2026-09-29) was removed 2026-11-19 (Adam: "inbox feature can get clipped"):
 -- cc-decide.sh, ~/.claude/cc-decide, the card stamps, ☰ → Inbox and its badge all went with it.
--- FX.allItems, which lived in its block, stays: crossings, tickets, the coach and the Queues view use it.
+-- FX.allItems, which lived in its block, stays: crossings, tickets and the coach use it.
 
 -- Every card on the panel, hidden ones included.
 function FX.allItems()
@@ -9878,87 +9878,6 @@ function FX.pushTickets()
   pcall(function() wv:evaluateJavaScript(js) end)
 end
 
--- ---- The Queue view (2026-10-03, mining round 2 unit D4b) ----------------------------------
--- ☰ → Queues: every ~/.claude/cc-queue/*.json, whose it is, each line held or not, and an @packet
--- line's last drift check (core.queueViewRows). Read-only: a file that won't decode is listed as
--- unreadable and left alone (FX.readQueue would set it aside), and no packet check is started --
--- the view shows the verdict the feed-time check left in FX._packetVerdicts. Pushed each tick only
--- while the view is open, and right after each click.
-FX._queueView = { open = false }
-function FX.queueViewRows()
-  local entries, verdicts = {}, {}
-  for k, v in pairs(FX._packetVerdicts or {}) do
-    local _, qk, id, at = tostring(k):match("^(.-)\0(.-)\0(.-)\0(.*)$")   -- FX.packetKey's root\0qk\0id\0at
-    if qk then
-      local slot = qk .. "\0" .. id .. "\0" .. at
-      if not verdicts[slot] or (tonumber(v.at) or 0) > (tonumber(verdicts[slot].at) or 0) then verdicts[slot] = v end
-    end
-  end
-  for _, fn in ipairs(FX.readDir(QUEUE_DIR)) do
-    local qk = core.queueFileKey(fn)
-    if qk then
-      local okd, q = pcall(core.json.decode, FX.readFile(QUEUE_DIR .. "/" .. fn) or "")
-      if not okd or type(q) ~= "table" then
-        entries[#entries + 1] = { qk = qk, unreadable = true }
-      else
-        local e = { qk = qk, q = q }
-        local tasks = {}
-        for _, l in ipairs(core.queueLines(q)) do tasks[#tasks + 1] = l.text end
-        if next(core.packetIdsIn(tasks)) then
-          e.packets, e.verdicts = FX.readPackets(qk), {}
-          for id, p in pairs(e.packets.packets or {}) do
-            e.verdicts[id] = verdicts[qk .. "\0" .. id .. "\0" .. tostring(type(p) == "table" and p.at or "")]
-          end
-        end
-        entries[#entries + 1] = e
-      end
-    end
-  end
-  return core.queueViewRows(entries, FX.allItems(), FX.now())
-end
--- A click in the view: hold / release / up / down / remove one line of the queue file `req.qk`,
--- with the line's text as the stale-list guard (core.queueSetHeld / queueMove / queueRemoveAt).
--- Refused for a key that isn't a queue's or a queue that isn't there (never creates one).
--- -> ok, why.
-function FX.queueViewEdit(req)
-  req = type(req) == "table" and req or {}
-  local qk, op = req.qk, tostring(req.op or "")
-  if not core.queueKeyOk(qk) then return false, "that isn't a queue" end
-  if not FX.readFile(QUEUE_DIR .. "/" .. qk .. ".json") then return false, "that queue isn't there any more" end
-  local q, q2, ok, removed = FX.readQueue(qk), nil, false, nil
-  if op == "hold" or op == "release" then
-    q2, ok = core.queueSetHeld(q, req.idx, op == "hold", req.task)
-  elseif op == "up" or op == "down" then
-    q2, ok = core.queueMove(q, req.idx, (op == "up") and -1 or 1, req.task)
-  elseif op == "remove" then
-    q2, removed = core.queueRemoveAt(q, req.idx, req.task)
-    ok = removed ~= nil
-  else
-    return false, "unknown edit " .. op
-  end
-  if not ok then
-    print("[cc-queue] queue view: " .. op .. " refused for " .. qk .. " -- the queue changed underneath; refreshed")
-    return false, "the queue changed underneath"
-  end
-  FX.writeQueue(qk, q2)
-  if removed then FX.dropPacket(qk, (core.packetRef(removed))) end
-  print("[cc-queue] ✅ queue view: " .. op .. " line " .. tostring(req.idx) .. " of " .. qk)
-  for _, it in ipairs(FX.allItems()) do
-    if core.queueKey(it) == qk then
-      ledgerFor(it, { type = "queue_edit", op = op, by = "queue view",
-                      task = removed and tostring(removed):sub(1, 200) or nil })
-      break
-    end
-  end
-  return true
-end
--- ...to the panel (ccQueues): every tick while the view is open, or `force`d right after a click.
-function FX.pushQueueView(force)
-  if not wv or not (FX._queueView.open or force) then return end
-  local rows = FX.queueViewRows()
-  local js = "ccQueues(" .. ((#rows == 0) and "[]" or core.json.encode(rows)) .. ")"
-  pcall(function() wv:evaluateJavaScript(js) end)
-end
 -- "Open a tab for it" (the board, or a card's badge): a new Claude tab in the ticket's repo, its
 -- prompt taking the ticket -- typed, never sent (FX.openClaudeTab). The ticket records it, so the
 -- router leaves it to that tab for core.TICKET.tabGraceSeconds. Only for a ticket nobody holds.
@@ -13314,7 +13233,7 @@ local function handleBridgeMsg(msg)
   end
   -- Bulk paste from the Queue button (roadmap #5b): one task per line (core.queueSplitLines).
   -- (The Queue tab's editor -- list / move / remove / hold, Feed next, + Packet and the route
-  -- toggles -- was pruned 2026-11-17; ☰ → Queues edits every queue.)
+  -- toggles -- was pruned 2026-11-17, and ☰ → Queues 2026-11-19.)
   if a == "queue-add-bulk" then
     local key = tostring(payload.v or "")
     local item = byKey[key]
@@ -13326,21 +13245,6 @@ local function handleBridgeMsg(msg)
       print("[cc-queue] bulk-queued " .. #tasks .. " task(s) for " .. qk)
       if item then ledgerFor(item, { type = "queue_edit", op = "bulk_add", count = #tasks }) end
     end
-    return
-  end
-  -- 2026-10-03 (D4b): ☰ → Queues, every session's queue in one place (FX.queueViewRows). A click
-  -- names the queue file's key, the line's number and its text; FX.queueViewEdit checks all three.
-  if a == "queues-open" then FX._queueView.open = true; pcall(FX.pushQueueView, true); return end
-  if a == "queues-close" then FX._queueView.open = false; return end
-  if a == "queue-view-edit" then
-    local okr, req = pcall(hs.json.decode, payload.text or "{}")
-    req = (okr and type(req) == "table") and req or {}
-    req.qk = tostring(payload.v or "")
-    local ok, why = FX.queueViewEdit(req)
-    if not ok and why ~= "the queue changed underneath" then
-      pcall(function() FX.alert("Claude Shepherd: queue not changed -- " .. tostring(why)) end)
-    end
-    pcall(FX.pushQueueView, true)
     return
   end
   -- Saved task templates (roadmap #5c; L3): named reusable task strings in
@@ -16521,7 +16425,7 @@ local HTML = [[
 #trace .ov-foot span{ min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .tr-dry{ display:none; padding:8px 16px; border-bottom:1px solid var(--border); color:var(--st-approval); font-weight:600; }
 .tr-dry.on{ display:block; }
-/* the shared row styles (the 📥 Inbox's, 2026-09-29; the Inbox went 2026-11-19): Tickets, Queues and Coach */
+/* the shared row styles (the 📥 Inbox's, 2026-09-29; the Inbox went 2026-11-19): Tickets and Coach */
 .ib-empty{ color:var(--dim); padding:20px 0; text-align:center; }
 .ib-row{ border:1px solid var(--border); border-radius:9px; padding:10px 12px; margin-bottom:10px; background:var(--surface); }
 .ib-q{ color:var(--text); font-size:13px; font-weight:600; white-space:pre-wrap; overflow-wrap:anywhere; }
@@ -16546,25 +16450,6 @@ local HTML = [[
 .tk-note{ color:var(--text); }
 #tm-tickets-badge{ display:none; background:var(--accent); color:var(--bg); border-radius:8px; font-size:9px;
   padding:0 4px; font-variant-numeric:tabular-nums; margin-left:auto; }
-/* 📑 Queues (2026-10-03, D4b): every session's queue, fleet-wide (the Inbox's row styles) */
-#queues{ position:fixed; inset:0; background:var(--bg-overlay); z-index:12; display:none; flex-direction:column; font-size:12px; }
-#queues.show{ display:flex; }
-#queues .ov-head{ display:flex; align-items:center; justify-content:space-between; padding:12px 16px; border-bottom:1px solid var(--border); font-weight:600; color:var(--text); }
-#queues .ov-body{ flex:1; overflow-y:auto; padding:14px 16px; }
-#queues .ov-foot{ padding:10px 16px; border-top:1px solid var(--border); color:var(--dim); font-size:11px; }
-.qv-sess{ background:none; border:none; padding:0; color:var(--accent-text); cursor:pointer; font-size:11px; }
-.qv-sess:hover{ text-decoration:underline; }
-.qv-line{ display:flex; align-items:center; gap:4px; padding:3px 0; border-top:1px solid var(--border-weak); flex-wrap:wrap; }
-.qv-line.held .qv-text{ color:var(--dim); }
-.qv-text{ flex:1; min-width:120px; color:var(--text-2); overflow-wrap:anywhere; }
-.qv-line button{ background:none; border:1px solid var(--border); color:var(--text-3); border-radius:5px; padding:0 5px; cursor:pointer; font-size:11px; }
-.qv-line button:disabled{ opacity:.3; cursor:default; }
-.qv-line button.qv-x{ color:#e88; border-color:#3a2c2f; }
-.qv-hold{ font-size:9px; font-weight:700; color:#8fd0f0; border:1px solid #8fd0f0; border-radius:4px; padding:0 3px; }
-.qv-next{ font-size:9px; color:var(--accent-text); }
-.qv-pk{ width:100%; padding-left:18px; font-size:11px; color:var(--dim); overflow-wrap:anywhere; }
-.qv-pk-moved, .qv-pk-missing, .qv-pk-unreadable{ color:var(--st-approval); }
-.qv-bad, .qv-none{ color:var(--dim); }
 /* 🧭 Coach (2026-09-29): a repo's suggested CLAUDE.md edits (the Inbox's row styles) */
 #coach{ position:fixed; inset:0; background:var(--bg-overlay); z-index:12; display:none; flex-direction:column; font-size:12px; }
 #coach.show{ display:flex; }
@@ -16959,7 +16844,6 @@ local HTML = [[
         <button id="menu-btn" onclick="toggleMenu(event)" title="Views — search, insights, audit, notifications">☰<span id="notify-badge"></span></button>
         <div id="toolmenu">
           <button class="tm-item" onclick="menuPick('tickets')" title="Work sessions filed for other repos (cc-ticket.sh)"><span class="tm-ic">🎫</span> Tickets<span id="tm-tickets-badge" title="Tickets no session can take"></span></button>
-          <button class="tm-item" onclick="menuPick('queues')" title="Every session's queue in one place: hold or release a line, reorder, remove"><span class="tm-ic">📑</span> Queues</button>
           <button class="tm-item" onclick="menuPick('search')"><span class="tm-ic">🔍</span> Filter sessions</button>
           <button class="tm-item" onclick="menuPick('fsearch')"><span class="tm-ic">🔎</span> Find in fleet</button>
           <button class="tm-item" onclick="menuPick('insights')"><span class="tm-ic">📊</span> Fleet insights</button>
@@ -17690,12 +17574,6 @@ local HTML = [[
     <div class="ov-head"><span>🎫 Tickets</span><button class="s-x" onclick="closeTickets()">✕</button></div>
     <div class="ov-body" id="tk-body"></div>
     <div class="ov-foot"><span>Work sessions filed for other repos with cc-ticket.sh. Every filing, reply and close note waits for your approval first -- on its session's card, or here when that session has no card. Shepherd offers each approved ticket to a live session of its repo -- the least busy, never one waiting on you; one that nobody there can take waits here and on that repo's card.</span></div>
-  </div>
-
-  <div id="queues">
-    <div class="ov-head"><span>📑 Queues</span><button class="s-x" onclick="closeQueueView()">✕</button></div>
-    <div class="ov-body" id="qv-body"></div>
-    <div class="ov-foot"><span>Every session's queue, one per project folder. A held line keeps its place and isn't fed -- not by auto-feed, Feed next or the router -- until you release it; the next line that isn't held goes first. A packet line shows its last cited-code check, which runs only when it's next to feed. Queues with nothing in them aren't listed.</span></div>
   </div>
 
   <div id="coach">
@@ -24533,7 +24411,6 @@ local HTML = [[
       closeMenu();
       if(which === "search") toggleSearch();
       else if(which === "tickets") openTickets();
-      else if(which === "queues") openQueueView();
       else if(which === "fsearch") openFleetSearch();
       else if(which === "insights") openInsights();
       else if(which === "audit") openAudit();
@@ -24791,107 +24668,6 @@ local HTML = [[
       return true;
     }
     document.addEventListener("keydown", function(e){ if(e.key === "Escape") closeTickets(); });
-    // ---- 📑 Queues (2026-10-03, mining round 2 unit D4b) ------------------------
-    // Every session's queue in one place (core.queueViewRows, pushed by FX.pushQueueView while the
-    // view is open and right after each click): whose it is, each line and whether it's held, the
-    // line that feeds next, and an @packet line's last drift check -- read-only here; the check runs
-    // only when that line is next to feed. Every word came from a session or its queue, so each goes
-    // through esc(); a click sends only what QUEUES.rows holds -- the queue file's key, the line's
-    // number and its text as the stale-list guard -- never text read back out of the markup.
-    var QUEUES = { rows: [], latest: [], sig: "", open: false };
-    var QV_OPS = { hold: 1, release: 1, up: 1, down: 1, remove: 1, open: 1 };
-    var QV_PK = { missing: 1, nocites: 1, unchecked: 1, unreadable: 1, moved: 1, unchanged: 1 };
-    var QV_HOLD_TIP = "Hold: auto-feed, Feed next and the router skip this line until you release it. It keeps its place; the next line that isn't held goes first.";
-    var QV_RELEASE_TIP = "Release: this line can be fed again, from where it sits in the queue.";
-    function ccQueues(rows){
-      rows = Array.isArray(rows) ? rows : [];
-      var sig = JSON.stringify(rows);
-      if(sig === QUEUES.sig) return;
-      QUEUES.sig = sig; QUEUES.latest = rows;
-      if(QUEUES.open) renderQueueView(rows);
-    }
-    function queueViewHtml(rows){
-      if(!rows || !rows.length) return '<div class="ib-empty">No queued lines — queue a task from a session\'s detail panel.</div>';
-      return rows.map(function(r, ri){
-        var sessions = Array.isArray(r.sessions) ? r.sessions : [];
-        var lines = Array.isArray(r.lines) ? r.lines : [];
-        var who = sessions.length ? sessions.map(function(s, si){
-            return '<button class="qv-sess" data-r="' + ri + '" data-s="' + si + '" data-act="open" onclick="queueViewAct(event)"'
-              + ' title="Open this session\'s card">' + esc(s.name) + '</button>';
-          }).join(", ") : '<span class="qv-none">no live session</span>';
-        var meta = who;
-        if(!r.unreadable){
-          meta += ' · ' + lines.length + (lines.length === 1 ? ' line' : ' lines')
-            + (r.held ? ' · ' + esc(String(r.held)) + ' held' : '')
-            + (r.routed ? ' · routed' + (r.seq ? ', one at a time' : '') : '');
-        }
-        var h = '<div class="ib-row qv-row" data-row="' + ri + '"><div class="ib-q">' + esc(r.project || r.qk) + '</div>'
-          + '<div class="ib-meta">' + meta + '</div>';
-        if(r.unreadable) return h + '<div class="qv-bad">This queue file couldn\'t be read, so nothing in it is fed. Shepherd leaves it as it is.</div></div>';
-        h += lines.map(function(l, li){
-          var held = !!l.held;
-          var at = ' data-r="' + ri + '" data-l="' + li + '"';
-          var out = '<div class="qv-line' + (held ? ' held' : '') + '">'
-            + '<span class="qv-text" title="' + esc(l.text) + '">' + (li + 1) + '. ' + esc(l.text) + '</span>'
-            + (held ? '<span class="qv-hold" title="' + esc(QV_HOLD_TIP) + '">HOLD</span>' : '')
-            + (r.next === li + 1 ? '<span class="qv-next" title="Fed next">next</span>' : '')
-            + (held ? '<button' + at + ' data-act="release" onclick="queueViewAct(event)" title="' + esc(QV_RELEASE_TIP) + '">Release</button>'
-                    : '<button' + at + ' data-act="hold" onclick="queueViewAct(event)" title="' + esc(QV_HOLD_TIP) + '">Hold</button>')
-            + '<button' + at + ' data-act="up"' + (li === 0 ? ' disabled' : '') + ' onclick="queueViewAct(event)" title="Move up">▲</button>'
-            + '<button' + at + ' data-act="down"' + (li === lines.length - 1 ? ' disabled' : '') + ' onclick="queueViewAct(event)" title="Move down">▼</button>'
-            + '<button class="qv-x"' + at + ' data-act="remove" onclick="queueViewAct(event)" title="Remove (asks first)">✕</button>';
-          var p = l.packet;
-          if(p && typeof p === "object"){
-            var st = QV_PK.hasOwnProperty(p.state) ? p.state : "unchecked";
-            out += '<div class="qv-pk qv-pk-' + st + '">📦 ' + esc(p.id) + ': ' + esc(p.why)
-              + (p.head ? ' at ' + esc(p.head) : '')
-              + (typeof p.age === "number" ? ' · checked ' + esc(fmtAge(Math.floor(Date.now()/1000) - p.age)) + ' ago' : '')
-              + '</div>';
-          }
-          return out + '</div>';
-        }).join("");
-        return h + '</div>';
-      }).join("");
-    }
-    function queueViewAct(ev){
-      if(ev && ev.stopPropagation) ev.stopPropagation();
-      var t = ev && ev.target && ev.target.closest ? ev.target.closest("[data-act]") : null;
-      if(!t) return;
-      var act = t.getAttribute("data-act");
-      if(!QV_OPS.hasOwnProperty(act)) return;
-      var r = QUEUES.rows[parseInt(t.getAttribute("data-r"), 10)];
-      if(!r || typeof r.qk !== "string") return;
-      if(act === "open"){
-        var s = (Array.isArray(r.sessions) ? r.sessions : [])[parseInt(t.getAttribute("data-s"), 10)];
-        if(!s || typeof s.key !== "string") return;
-        closeQueueView(); selectTile(s.key);
-        return;
-      }
-      var li = parseInt(t.getAttribute("data-l"), 10);
-      var line = (Array.isArray(r.lines) ? r.lines : [])[li];
-      if(!line || typeof line.text !== "string") return;
-      if(act === "remove" && !confirm("Remove this line from " + (r.project || r.qk) + "'s queue?\n\n" + line.text)) return;
-      send("queue-view-edit", r.qk, JSON.stringify({ op: act, idx: li + 1, task: line.text }));
-    }
-    function renderQueueView(rows){
-      var body = document.getElementById("qv-body"); if(!body) return;
-      QUEUES.rows = rows;
-      body.innerHTML = queueViewHtml(rows);
-    }
-    function openQueueView(){
-      QUEUES.open = true;
-      document.getElementById("queues").classList.add("show");
-      renderQueueView(QUEUES.latest);
-      send("queues-open");
-    }
-    function closeQueueView(){
-      var el = document.getElementById("queues");
-      if(!el || !el.classList.contains("show")) return false;
-      el.classList.remove("show"); QUEUES.open = false;
-      send("queues-close");
-      return true;
-    }
-    document.addEventListener("keydown", function(e){ if(e.key === "Escape") closeQueueView(); });
     // ---- 🧭 Coach (2026-09-29, build program unit 32) ------------------------
     // One repo's run (core.coachView, pushed by FX.pushCoach when it opens and after every click):
     // each suggested CLAUDE.md edit -- section, why, the text it replaces, the new text, evidence --
@@ -25521,8 +25297,7 @@ local HTML = [[
       if(headsUp(it) && it.needsYouWhy){ meta = (meta ? meta + " · " : "") + it.needsYouWhy; }
       if(it.remote){ meta = (meta ? meta + " · " : "") + "⇄ " + (it.remote.host || "remote")
                             + (it.bridgeStale ? " (bridge offline)" : ""); }
-      if(it.queue > 0){ meta = (meta ? meta + " · " : "") + (it.routed ? "⇉" : "+") + it.queue + " queued"
-                          + (it.queueHeld ? " (" + Number(it.queueHeld) + " held)" : ""); }   // 2026-10-03 (D4b)
+      if(it.queue > 0){ meta = (meta ? meta + " · " : "") + (it.routed ? "⇉" : "+") + it.queue + " queued"; }
       else if(it.routed){ meta = (meta ? meta + " · " : "") + "⇉ routed"; }
       if(it.starved){ meta = (meta ? meta + " · " : "") + "⌛ queue starved"; }
       // 2026-09-29 (unit 26): the task packet at the head isn't fed -- its cited code moved (or it
@@ -26991,8 +26766,6 @@ function FX._refreshBody()
     local qk = FX.queueKeyFor(it)
     local q = FX.readQueue(qk)
     it.queue = core.queueDepth(q)
-    -- 2026-10-03 (D4b): held lines stay in the count; the card and the editor say how many are held
-    do local held = core.queueHeldCount(q); it.queueHeld = (held > 0) and held or nil end
     -- 2026-09-29 (unit 26): a task packet at the head is checked against THIS session's worktree
     -- in the background (FX.packetGate); a moved one flags the card, recorded once per episode.
     do
@@ -27887,7 +27660,6 @@ function FX._refreshBody()
     -- 2026-10-13: the 📋 My List badge (items to verify, while a project is over the review line)
     pcall(function() wv:evaluateJavaScript("setReviewBadge(" .. (FX._wlReview and FX._wlReview.badge or "null") .. ")") end)
     pcall(FX.pushTickets) -- 2026-09-29: the Tickets board's rows (cross-repo tickets)
-    pcall(FX.pushQueueView) -- 2026-10-03 (D4b): the Queues view's rows, only while it's open
   end
 
   -- Paint the Stream Deck from the SAME fully-decorated list the panel just got --

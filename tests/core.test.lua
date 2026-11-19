@@ -8513,10 +8513,11 @@ do
   -- 2026-11-19: 57 -> 56, REQUIREMENT CHANGE: cc-send ("send", flagged new) was removed.
   -- 2026-11-19: 56 -> 55, REQUIREMENT CHANGE: resume at the limit reset ("resume", flagged new) was removed.
   -- 2026-11-19: 55 -> 54, REQUIREMENT CHANGE: kept transcripts ("keeper", flagged new) were removed.
-  eq("FEATURES: the 54 new features are flagged", newCount, 54)
+  -- 2026-11-19: 54 -> 53, REQUIREMENT CHANGE: queue hold and the Queues view ("queuehold", flagged new) were removed.
+  eq("FEATURES: the 53 new features are flagged", newCount, 53)
   check("FEATURES: lists the Compare tab", keys.compare == true)
   check("FEATURES: lists crossings", keys.crossings == true)
-  check("FEATURES: lists queue hold and the Queues view", keys.queuehold == true)
+  check("FEATURES: no queue hold (removed 2026-11-19)", not keys.queuehold)
   check("FEATURES: lists past sessions", keys.pastsessions == true)
   check("FEATURES: lists the grey cards", keys.hookless == true)
   check("FEATURES: no kept transcripts (removed 2026-11-19, REQUIREMENT CHANGE)", keys.keeper == nil)

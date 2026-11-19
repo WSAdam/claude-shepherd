@@ -18,7 +18,7 @@ The **header** has **New** (the new-session dialog), **☕** (keep awake), **�
 the **☰** menu, **⚙** Settings, and the layout switcher. The small **⌨** button in the bottom-right
 corner shows every shortcut, read from the live bindings.
 
-The **☰** menu, top to bottom: Tickets ([cross-repo tickets](automation.md#cross-repo-tickets)), Queues ([every session's queue](automation.md#queue-hold-and-the-queues-view)), Filter sessions, Find in fleet,
+The **☰** menu, top to bottom: Tickets ([cross-repo tickets](automation.md#cross-repo-tickets)), Filter sessions, Find in fleet,
 Fleet insights, Audit ledger, Routines, Templates, Agents, MCPs & Skills, Policy bundles, Automation
 rules, Automation trace ([what automation did and would do](automation.md#dry-run-and-the-automation-trace)), Cost & tokens,
 Diagnostics, Features list, Shift report (while the ledger is on), Hidden sessions (while any are

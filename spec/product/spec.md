@@ -404,10 +404,6 @@ The capability ladder:
 - **Scheduled routines** (L7): cron/one-shot that fire the normal spawn or digest effects, or a
   `gate` action (**Check main is green**, §5); a scheduled spawn still respects `spawn.live`
   (dry-run). Nothing fires on schedule until `schedules.enabled`.
-- **Queues:** a queued line can be **held** in place (stored as `{text, held = true}`): auto-feed,
-  Feed next and the router feed the next line that isn't held, until it is released. ☰ → 📑 Queues
-  lists every session's queue (its sessions, held lines, a packet line's last cited-code check)
-  with Hold / Release, ▲ ▼ and ✕ (which asks first).
 - **Recovery:** manual + automatic **respawn** of a session frozen mid-turn (capped per folder);
   **Auto-Continue** of a session frozen on an API error (capped per folder); **escalation** nag
   when an approval waits too long. A session waiting on *you* is never auto-respawned. (☰ → ♻️
@@ -557,7 +553,7 @@ cc-ask/<key>.answer             panel→cc-ask.sh answer to a held question
 cc-labels.json / cc-groups.json relabels, group tags        (by project identity)
 cc-presets.json / cc-agents.json spawn presets, agent profiles
 cc-mcp.json                     MCP server defs (secrets as ${VAR} refs, never values)
-cc-queue/*.json (per project)   task queues: a line is a string, or {text, held = true} while held
+cc-queue/*.json (per project)   task queues: one string per line
 cc-templates.json               parameterized templates
 cc-worklist.json                the My-List checklist and its `playbooks` sources (by project identity)
 cc-config.json / cc-rules.json / cc-schedules.json  automation config
@@ -586,7 +582,7 @@ cc-keep/                        left by the transcript keeper (removed 2026-11-1
 - **Grid of tiles** (status, time-in-state, latest prompt, wants/why, context bar, badges such as
   ⚠ main is red and the coach's 🧭 chip), with **grey cards** in their own row under
   the grid. Header: New, ☕ keep-awake, 🔒 lock, the ☰ views menu, ⚙ settings, theme.
-- **☰ views menu:** 🎫 Tickets, **📑 Queues**, 🔍 Filter sessions, 🔎 Find in fleet,
+- **☰ views menu:** 🎫 Tickets, 🔍 Filter sessions, 🔎 Find in fleet,
   📊 Fleet insights, 📜 Audit ledger (with 🗂 History), ⏰ Routines, 📝 Templates, ✦ Agents,
   🔌 MCPs & Skills, 🛡 Policy bundles, ⚙️ Automation rules, ⚡ Automation trace, 💰 Cost & tokens, 🩺 Diagnostics, ✨ Features list, 📋 Shift report, 🔔 Notifications.
 - **Detail panel** with a tab strip — Activity, Transcript, Rewind, Decisions, Usage, Changes

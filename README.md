@@ -91,7 +91,7 @@ A fresh install turns on auto-continue, handoff notes, auto-compact and
 the fleet idle alert; every other automatic behaviour here waits for its switch.
 
 - [**Task queue & auto-feed**](docs/automation.md#task-queue): line up tasks per session, feed the
-  next when one finishes, and route a project's tasks to whichever session is free. [**Queue hold & fleet view**](docs/automation.md#queue-hold-and-the-queues-view): hold a line in place, and see every queue in one view.
+  next when one finishes, and route a project's tasks to whichever session is free.
 - [**Task packets**](docs/automation.md#task-packets): a queued task carries the code it cites,
   repro and done-when, and isn't fed while that code has moved.
 - [**Prompt templates**](docs/automation.md#prompt-templates): reusable, versioned prompts with
@@ -288,7 +288,7 @@ Full detail: [docs/approvals-and-policies.md](docs/approvals-and-policies.md#the
 | [Controls](docs/controls.md) | Clicks and menus, detail-panel buttons, shared windows, spawning, hotkeys, Stream Deck, awake and lock |
 | [Approvals and policies](docs/approvals-and-policies.md) | The safety model, the gate, always-ask commands, the worktree fence, policies, questions, the three Stop guards |
 | [Merging and batches](docs/merging-and-batches.md) | Worktree tabs, ready to merge, gates, gate blame, the main-green check, the checker, red-first, receipts, batches, brief pre-flight, grant grading, the overlap radar, main moved, the demo, the tab bridge |
-| [Automation](docs/automation.md) | When automation types, dry run, queue and packets, queue hold and the Queues view, templates, respawn, notes, the mailbox, tickets, rules, routines, the coach, the fleet idle alert, A/B compare |
+| [Automation](docs/automation.md) | When automation types, dry run, queue and packets, templates, respawn, notes, the mailbox, tickets, rules, routines, the coach, the fleet idle alert, A/B compare |
 | [Usage and cost](docs/usage-and-cost.md) | Context bars, plan usage, cost, commits, where the time went, the audit ledger and its views, past sessions and Resume |
 | [Providers and integrations](docs/providers-and-integrations.md) | Providers and models, agent profiles, the find-only audit, MCPs and skills, Remote Control, the SSH bridge |
 | [Make it yours](docs/customizing.md) | Layouts, themes, colours, sizing |

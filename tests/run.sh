@@ -556,12 +556,6 @@ echo ""
 echo "== node: grey cards -- a live session with no status file drawn grey in its own row under the grid, busy/idle and why, no data-key, every field escaped (behavioral, runs the shipped hooklessCardHtml / ccHookless) =="
 node "$DIR/hookless-card.test.js" || fail=1
 echo ""
-echo "== lua: held queue lines and the Queue view -- peek/pop skip a held line and it keeps its place, the flag round-trips with the line and an old queue file reads as before, every reader (auto-feed, router, packets) skips held lines, the view's rows and its edits over real cc-queue/ files, read-only packet drift (pure + behavioral) =="
-lua "$DIR/queue-hold.test.lua" || fail=1
-echo ""
-echo "== node: the Queue view and the editor's Hold / Release -- every field escaped, the line that feeds next, packet drift, a click sends only the row array's key, number and text, ✕ asks first (behavioral, runs the shipped functions) =="
-node "$DIR/queue-view.test.js" || fail=1
-echo ""
 echo "== lua: past sessions -- a transcript's first prompt, folder and surface (whole lines, walked with find), its newest AI title, the capped newest-first scan plan, rows merged with the ledger, verified dead (no card, no live session file, no process using its id), the resume plan, the kept copy restored for real and never over a file (pure) =="
 lua "$DIR/past-sessions.test.lua" || fail=1
 echo ""

@@ -379,7 +379,7 @@ green. See [the CHANGELOG section](CHANGELOG.md#2026-10-04--mining-round-2):
 - The coach: a lessons ledger, evidence runs and `cc-lesson.sh`, edit outcomes and Sharpen, a review
   of the repo's auto-memory, lessons across repos into the global CLAUDE.md.
 - Steering: the fleet idle alert, playbooks and Run selected
-  in My List (`cc-run.sh`), queue hold and the 📑 Queues view.
+  in My List (`cc-run.sh`).
 - Merging: brief pre-flight, gate blame, the main-moved notice, the main-green check (a routine with
   `"action": "gate"`), grant grading (a risky merge on a batch grant waits for Adam's click).
 - Unseen sessions: grey cards for live sessions with no status file; History listing every transcript
