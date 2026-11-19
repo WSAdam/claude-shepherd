@@ -2308,6 +2308,21 @@ do
   check("#27-pin: per-tile skip is ledgered",
         src:find('type = "nudge_skipped", reason = "approval"', 1, true) ~= nil)
   -- (#27's rule-nudge pins went with automation rules, 2026-11-19 -- requirement change)
+  -- 2026-11-19 (mining round 4, omux): the image nudge and the voice auto-send skipped the fire-time
+  -- check, so a paste-and-Return queued behind other chains could answer a prompt that appeared
+  -- meanwhile. Each re-checks inside its serialized slot, before it types anything.
+  do
+    local ip = src:find('dispatchSerialized(item, a, function()\n          if not FX.nudgeSafeNow(item) then', 1, true)
+    local paste = src:find("FX.pasteIntoWindow(winTarget(item), { text = payload.text and tostring(payload.text) or nil, imagePath = path })", 1, true)
+    check("image nudge re-checks for an approval prompt at fire time, before it pastes",
+          ip ~= nil and paste ~= nil and ip < paste and paste - ip < 800)
+    local vp = src:find('dispatchSerialized(target, "voice", function()\n        if not FX.nudgeSafeNow(target) then', 1, true)
+    local vtype = src:find("FX.typeIntoWindow(winTarget(target), text)", 1, true)
+    check("voice auto-send re-checks for an approval prompt at fire time, before it types",
+          vp ~= nil and vtype ~= nil and vp < vtype and vtype - vp < 600)
+    check("...and each says the text was NOT sent", src:find("is waiting for approval — image nudge NOT sent", 1, true) ~= nil
+          and src:find("is waiting for approval — voice text NOT sent", 1, true) ~= nil)
+  end
 
   -- #9: ledgerSnapshot's one-shot `changed` edge is latched (ledgerCache.dirty)
   -- so non-refresh callers (decision log, shift report, digest, per-tile banner)

@@ -13379,6 +13379,14 @@ local function handleBridgeMsg(msg)
         -- delivery that didn't happen,
         -- and tell the operator instead of dropping the nudge silently.
         dispatchSerialized(item, a, function()
+          if not FX.nudgeSafeNow(item) then
+            -- 2026-11-19 (round 4): the fire-time check the text nudge has -- a paste-and-Return
+            -- into a prompt that appeared meanwhile would answer it
+            ledgerFor(item, { type = "nudge_skipped", reason = "approval", text = tostring(payload.text or ""):sub(1, 200), image = true })
+            pcall(function() FX.alert("Claude Shepherd: " .. tostring(item.label or item.name)
+              .. " is waiting for approval — image nudge NOT sent") end)
+            return
+          end
           if FX.pasteIntoWindow(winTarget(item), { text = payload.text and tostring(payload.text) or nil, imagePath = path }) then
             ledgerFor(item, { type = "nudge", text = tostring(payload.text or ""):sub(1, 200), image = true })
           else
@@ -23762,6 +23770,12 @@ local function sdTranscribeAndSend(wav, cfg)
       -- delivery-gated (typeIntoWindow reports false on a skip), same contract
       -- as the Improve/audit-review callers.
       dispatchSerialized(target, "voice", function()
+        if not FX.nudgeSafeNow(target) then
+          -- 2026-11-19 (round 4): typed text ends in Return, which would answer a prompt that appeared
+          print("[cc-streamdeck] voice NOT sent: " .. tostring(target.name) .. " is waiting for approval")
+          FX.alert("🎙 Voice: " .. tostring(target.label or target.name) .. " is waiting for approval — voice text NOT sent")
+          return
+        end
         if FX.typeIntoWindow(winTarget(target), text) then
           FX.alert("🎙 → " .. tostring(target.label or target.name) .. ": " .. text:sub(1, 48))
         else
