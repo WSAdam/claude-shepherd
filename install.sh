@@ -251,6 +251,17 @@ if have_jq; then
       def entries: if type == "object" and ((.hooks? // null) | type) == "array" then .hooks[] else empty end;
       # "", "*" and no matcher all mean every tool (every error, every notification).
       def mkey: (if type == "object" then (.matcher? // "") else "" end) | if . == "*" then "" else . end;
+      # 2026-11-19 (mining round 4, muster): an entry of ours that is EXACTLY a template command
+      # for this event minus its trailing arguments (a cc-popup.sh entry wired before its
+      # approval/complete argument existed) is upgraded to that command. Matched by script name
+      # alone, the merge below read it as wired and left it on every run. Any other command a
+      # user wrote is left alone.
+      def upgrade_args($tc):
+        if type == "object" and ((.command? // null) | type) == "string" and (script_of != null)
+        then .command as $c
+          | ([ $tc[] | select(startswith($c + " ")) ] | first) as $t
+          | if $t != null then .command = $t else . end
+        else . end;
       .hooks //= {}
       | reduce ($tmpl.hooks | to_entries[]) as $e (.;
           # An event group that is not a list (a hand-edited object) is left exactly as
@@ -258,6 +269,10 @@ if have_jq; then
           # reported as unparseable. The shell warns about it after the merge.
           if ((.hooks[$e.key] // []) | type) != "array" then .
           else
+            ([ $e.value[] | entries | .command? | select(type == "string") ]) as $tc
+            | .hooks[$e.key] |= (if type == "array" then map(if type == "object" and ((.hooks? // null) | type) == "array"
+                                    then .hooks |= map(upgrade_args($tc)) else . end) else . end)
+            |
             # Per template group (2026-09-28: the per-entry upgrade knew only
             # cc-(status|approve|popup).sh and only PreToolUse'\''s per-tool groups were
             # migrated, so a new script on an event we already own, or a new matcher group

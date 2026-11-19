@@ -343,6 +343,42 @@ assert_json "#19: user's own group untouched by the per-entry upgrade" "$CDIR9/s
 assert_json "#19: cc-popup lands in OUR group, not the user's" "$CDIR9/settings.json" \
   '[.hooks.Stop[1].hooks[].command] | any(contains("cc-popup.sh"))' "true"
 
+# --- 2026-11-19 (mining round 4, muster): a cc-popup.sh entry wired before its approval /
+# complete argument existed stayed as it was on every make setup -- the merge matches hooks by
+# script name, so it read as wired -- and the popup hook never learned which event fired it.
+# An entry of ours that is exactly the template's command minus its trailing arguments is
+# upgraded to the template's; any other command a user wrote is left alone. ---
+CDIR10="$TMP/claude10"; HSDIR10="$TMP/hs10"; mkdir -p "$CDIR10"
+cat > "$CDIR10/settings.json" <<'JSON'
+{ "hooks": {
+    "Stop": [ { "hooks": [ { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" stop" },
+                           { "type": "command", "command": "bash \"$HOME/.claude/cc-popup.sh\" \"${CLAUDE_PROJECT_DIR:-$PWD}\"" } ] },
+              { "hooks": [ { "type": "command", "command": "echo mine" } ] } ],
+    "Notification": [ { "matcher": "", "hooks": [
+      { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" notification" },
+      { "type": "command", "command": "bash \"$HOME/.claude/cc-popup.sh\" \"${CLAUDE_PROJECT_DIR:-$PWD}\"" } ] } ],
+    "PermissionRequest": [ { "matcher": "", "hooks": [
+      { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" permissionrequest" },
+      { "type": "command", "command": "bash \"$HOME/.claude/cc-popup.sh\" \"${CLAUDE_PROJECT_DIR:-$PWD}\"" } ] } ]
+} }
+JSON
+CC_INSTALL_CLAUDE_DIR="$CDIR10" CC_INSTALL_HS_DIR="$HSDIR10" CC_INSTALL_NO_APP=1 \
+  bash "$ROOT/install.sh" >/dev/null 2>&1
+POP='bash "$HOME/.claude/cc-popup.sh" "${CLAUDE_PROJECT_DIR:-$PWD}"'
+assert_json "old cc-popup.sh entry gains its argument on make setup: Stop's says complete" "$CDIR10/settings.json" \
+  '[.hooks.Stop[].hooks[].command | select(contains("cc-popup.sh"))] | join("|")' "$POP complete"
+assert_json "...Notification's says approval" "$CDIR10/settings.json" \
+  '[.hooks.Notification[].hooks[].command | select(contains("cc-popup.sh"))] | join("|")' "$POP approval"
+assert_json "...and PermissionRequest's says approval" "$CDIR10/settings.json" \
+  '[.hooks.PermissionRequest[].hooks[].command | select(contains("cc-popup.sh"))] | join("|")' "$POP approval"
+assert_json "...a user's own Stop hook is untouched" "$CDIR10/settings.json" '.hooks.Stop[1].hooks[0].command' "echo mine"
+assert_json "...and cc-status.sh's own entries keep their argument" "$CDIR10/settings.json" \
+  '[.hooks.Stop[].hooks[].command | select(contains("cc-status.sh"))] | join("|")' 'bash "$HOME/.claude/cc-status.sh" stop'
+before10="$(cat "$CDIR10/settings.json")"
+CC_INSTALL_CLAUDE_DIR="$CDIR10" CC_INSTALL_HS_DIR="$HSDIR10" CC_INSTALL_NO_APP=1 \
+  bash "$ROOT/install.sh" >/dev/null 2>&1
+assert_eq "...and a re-run changes nothing" "$before10" "$(cat "$CDIR10/settings.json")"
+
 # --- #21: installs must replace files by same-dir rename (new inode), never an
 # in-place cp/redirect truncate -- a hook process mid-execution (a cc-approve.sh
 # waiter blocked in its 120s poll) keeps reading its old inode instead of garbled

@@ -14315,6 +14315,21 @@ do
     check("Diagnostics warns, naming the missing event, with make setup as the fix  (" .. tostring(warn and warn.detail) .. ")",
           warn ~= nil and warn.detail:find("PostToolUseFailure", 1, true) ~= nil and (warn.fix or ""):find("make setup", 1, true) ~= nil)
     eq("no settings.json at all: nothing wired", core.hookWiringStatus(nil).wired, 0)
+    -- 2026-11-19 (mining round 4, muster): an old cc-popup.sh entry wired before its approval /
+    -- complete argument existed read as wired, so Diagnostics never sent anyone to make setup
+    local oldPop = core.json.decode(core.json.encode(tpl))
+    for _, ev in ipairs({ "Stop", "Notification", "PermissionRequest" }) do
+      for _, g in ipairs(oldPop.hooks[ev] or {}) do
+        for _, h in ipairs(g.hooks or {}) do
+          if h.command:find("cc-popup.sh", 1, true) then h.command = 'bash "$HOME/.claude/cc-popup.sh" "${CLAUDE_PROJECT_DIR:-$PWD}"' end
+        end
+      end
+    end
+    local sp = core.hookWiringStatus(oldPop)
+    eq("old cc-popup.sh entries without their argument don't count as wired", sp.total - sp.wired, 3)
+    check("...each named with the argument it lacks  (" .. table.concat(sp.missing, ",") .. ")",
+          table.concat(sp.missing, ","):find("Stop (cc-popup.sh complete)", 1, true) ~= nil
+          and table.concat(sp.missing, ","):find("Notification (cc-popup.sh approval)", 1, true) ~= nil)
   end
 end
 

@@ -11638,11 +11638,13 @@ M.HOOK_WIRING = {
   { event = "PostToolUse", script = "cc-status.sh" },
   { event = "PostToolUseFailure", script = "cc-status.sh" },
   { event = "PermissionRequest", script = "cc-status.sh" },
-  { event = "PermissionRequest", script = "cc-popup.sh" },
+  -- 2026-11-19 (round 4): `arg` is the argument the entry must carry -- an old cc-popup.sh entry
+  -- without it read as wired
+  { event = "PermissionRequest", script = "cc-popup.sh", arg = "approval" },
   { event = "Notification", script = "cc-status.sh" },
-  { event = "Notification", script = "cc-popup.sh" },
+  { event = "Notification", script = "cc-popup.sh", arg = "approval" },
   { event = "Stop", script = "cc-status.sh" },
-  { event = "Stop", script = "cc-popup.sh" },
+  { event = "Stop", script = "cc-popup.sh", arg = "complete" },
   { event = "StopFailure", script = "cc-status.sh" },
   { event = "PreCompact", script = "cc-status.sh" },
   { event = "SessionEnd", script = "cc-status.sh" },
@@ -11651,14 +11653,26 @@ M.HOOK_WIRING = {
 -- How much of M.HOOK_WIRING a settings.json (decoded) carries: { wired, total, missing = {
 -- "<Event> (<script>)"... } in M.HOOK_WIRING order }. Pure.
 function M.hookWiringStatus(settings)
-  local have = {}
+  local have = {}   -- event\0script -> the commands that run it
   for _, r in ipairs(M.parseHookInventory(settings)) do
-    if r.script then have[r.event .. "\0" .. r.script] = true end
+    if r.script then
+      local k = r.event .. "\0" .. r.script
+      have[k] = have[k] or {}
+      table.insert(have[k], r.command or "")
+    end
+  end
+  local function carries(cmds, arg)
+    if not arg then return true end
+    for _, c in ipairs(cmds) do
+      if (" " .. c .. " "):find(" " .. arg .. " ", 1, true) then return true end
+    end
+    return false
   end
   local wired, missing = 0, {}
   for _, w in ipairs(M.HOOK_WIRING) do
-    if have[w.event .. "\0" .. w.script] then wired = wired + 1
-    else missing[#missing + 1] = w.event .. " (" .. w.script .. ")" end
+    local cmds = have[w.event .. "\0" .. w.script]
+    if cmds and carries(cmds, w.arg) then wired = wired + 1
+    else missing[#missing + 1] = w.event .. " (" .. w.script .. (w.arg and (" " .. w.arg) or "") .. ")" end
   end
   return { wired = wired, total = #M.HOOK_WIRING, missing = missing }
 end
