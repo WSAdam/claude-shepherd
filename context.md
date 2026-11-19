@@ -186,7 +186,8 @@ disk, `FX.alert`, interrupted turns, FSEvents). These are the others.
 - **Auto-continue is a bounded loop guard.** `core.stepAutoContinue` charges a per-folder budget that
   resets only on a clean `done`/`idle`, never on the `working` its own continue produces, and not on
   a turn that did nothing or only planned. From the second such turn in a row it backs off (2
-  minutes, doubling to 30). A usage limit is left to the resume path. Auto-respawn has the same edge
+  minutes, doubling to 30). A usage limit is never auto-continued; its card is a heads-up until Adam
+  continues it (the resume path was removed 2026-11-19). Auto-respawn has the same edge
   discipline. Both are off in code and on in `defaults/`.
 - **Launch flags** (they came with agent profiles and policy bundles, L1/L2, 2026-06-14; both were
   removed 2026-11-19, and the find-only audit and restart in place use what's left) rest on three facts:

@@ -9513,8 +9513,10 @@ do
   eq("...and so is a stale usage limit on one that has exited",
      kind({ key = "e", status = "error", error_reason = "budget_exceeded", procAlive = false,
             stale = true }), "fyi")
+  -- (2026-11-19: the example was a usage limit, which is a heads-up now -- below; any other error
+  -- still shows the rule)
   eq("...while a stale error on a session that is STILL RUNNING is not excused",
-     kind({ key = "e", status = "error", error_reason = "budget_exceeded", stale = true }), "needs")
+     kind({ key = "e", status = "error", error_reason = "unknown", stale = true }), "needs")
   eq("...and so does one on a frozen session",
      kind({ key = "e", status = "error", error_reason = "runtime_error", hung = true,
             errorEpisode = { since = NOW - 1, count = 1 } }), "needs")
@@ -9522,9 +9524,11 @@ do
             errorEpisode = { since = NOW - 1, count = 1 } }), "fyi")
   eq("an overloaded model is transient too", kind({ key = "e", status = "error",
             error_reason = "model_error", errorEpisode = { since = NOW - 1, count = 1 } }), "fyi")
-  -- a usage limit is something Adam genuinely acts on: wait, or switch. Never downgraded.
-  eq("a usage limit needs Adam straight away", kind({ key = "e", status = "error",
-            error_reason = "budget_exceeded", errorEpisode = { since = NOW - 1, count = 1 } }), "needs")
+  -- 2026-11-19 REQUIREMENT CHANGE: a usage limit was "something Adam genuinely acts on, never
+  -- downgraded". Asked once resume at the reset was removed, Adam chose "Heads-up, not red": waiting
+  -- out the reset is the usual answer, so it no longer outranks a working session.
+  eq("a usage limit is a heads-up, not Needs you", kind({ key = "e", status = "error",
+            error_reason = "budget_exceeded", errorEpisode = { since = NOW - 1, count = 1 } }), "fyi")
   eq("an unclassified error still needs Adam straight away", kind({ key = "e", status = "error",
             error_reason = "unknown", errorEpisode = { since = NOW - 1, count = 1 } }), "needs")
   eq("an error he cancelled himself is not news", kind({ key = "e", status = "error",
@@ -9541,8 +9545,9 @@ do
   eq("a live held question still leads its card", core.instanceTier(ask, {}, NOW), 0)
   eq("a live merge request still ranks with the approvals", core.instanceTier(req, {}, NOW), 1)
   eq("a live permission prompt still ranks with the approvals", core.instanceTier(appr, {}, NOW), 1)
+  -- (2026-11-19: the example was a usage limit, a heads-up now; any other persistent error keeps the rule)
   eq("a persistent error still ranks above a working session",
-     core.instanceTier({ key = "e", status = "error", error_reason = "budget_exceeded" }, {}, NOW), 2)
+     core.instanceTier({ key = "e", status = "error", error_reason = "unknown" }, {}, NOW), 2)
   local fyiTier = core.instanceTier({ key = "m", status = "done",
     merge = { phase = "merged", needsYou = true, gate = { state = "failed", code = 2 } } }, {}, NOW)
   eq("a heads-up gets the heads-up tier", fyiTier, core.TIER_FYI)
@@ -13175,11 +13180,12 @@ bug("loop signature of a search", function()
   eq("a Glob with nothing in it is still just its name", core.toolCallSig("Glob", {}), "Glob\1")
 end)
 
--- A usage-limited card reads as an error that needs Adam
+-- A usage-limited card reads as a heads-up
 bug("usage limit with a resume scheduled", function()
   -- 2026-09-30: with a resume scheduled at the reset the card was a heads-up. 2026-11-19, REQUIREMENT
-  -- CHANGE: resume at the limit reset was removed (Adam: "prune features I have no use for"), so a
-  -- usage limit is an error that needs him again, whatever a stale it.resume says.
+  -- CHANGE: resume at the limit reset was removed (Adam: "prune features I have no use for"), and
+  -- asked whether a usage limit should then go red, Adam chose "Heads-up, not red" -- whatever a
+  -- stale it.resume says.
   local NOW = 1000000
   local function limited(extra)
     local it = { key = "l", status = "error", error_reason = "budget_exceeded", errorEpisode = { since = NOW - 600, count = 1 } }
@@ -13187,11 +13193,14 @@ bug("usage limit with a resume scheduled", function()
     return it
   end
   check("core keeps no resume plan or card", core.resumeCard == nil and core.resumePlan == nil and core.RESUME == nil)
-  local kind, source = core.needsYouKind(limited(), NOW)
-  eq("a usage limit needs him", kind, "needs")
+  local kind, source, why, retrying = core.needsYouKind(limited(), NOW)
+  eq("a usage limit is a heads-up", kind, "fyi")
   eq("...from the error", source, "error")
-  eq("...even with a stale resume on the card", (core.needsYouKind(limited({ resume = { phase = "waiting", line = "resumes at 3:00pm" } }), NOW)), "needs")
-  eq("...and it ranks as Needs you (the error tier, above a heads-up)", core.instanceTier(limited(), {}, NOW), 2)
+  check("...saying why: it stopped at a usage limit  (" .. tostring(why) .. ")", type(why) == "string" and why:find("usage limit", 1, true) ~= nil)
+  eq("...and never reads Retrying: nothing retries it", retrying, nil)
+  eq("...even with a stale resume on the card", (core.needsYouKind(limited({ resume = { phase = "waiting", line = "resumes at 3:00pm" } }), NOW)), "fyi")
+  eq("...and it ranks as a heads-up, below a working session", core.instanceTier(limited(), {}, NOW), core.TIER_FYI)
+  check("...below a working session", core.instanceTier(limited(), {}, NOW) > core.TIER_RUNNING)
 end)
 
 -- An error you stopped yourself, or one on an exited session, reads "Retrying" on its card

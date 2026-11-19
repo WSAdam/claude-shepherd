@@ -818,14 +818,17 @@ I = items()
 check("a fresh connection error is a heads-up, not a red Error  (" .. tostring(I.q1.needsYou) .. ")",
       I.q1.needsYou == "fyi" and I.q1.needsYouSource == "error")
 check("...and its card ranks below a working session", core.instanceTier(I.q1, {}, os.time()) > core.TIER_RUNNING)
--- ...but a usage limit is his to act on, straight away
+-- 2026-11-19 REQUIREMENT CHANGE: a usage limit went red at once ("his to act on"). With resume at the
+-- reset removed, Adam chose "Heads-up, not red": it waits for the reset below a working session.
 write(T .. "/status/" .. qKey .. ".json", json.encode({ status = "error", session_id = qKey,
   name = qKey, cwd = "/r/Q", since = now - 2, updated = now - 2, editor = "vscode",
   host_window = "800", session_pid = "31888", transcript_path = T .. "/" .. qKey .. ".jsonl",
   error_reason = "budget_exceeded", error_message = "usage limit reached" }))
 tick()
 I = items()
-check("a usage limit still goes red at once", I.q1.needsYou == "needs")
+check("a usage limit is a heads-up, not red  (" .. tostring(I.q1.needsYou) .. ")", I.q1.needsYou == "fyi" and I.q1.needsYouSource == "error")
+check("...and its card ranks below a working session", core.instanceTier(I.q1, {}, os.time()) > core.TIER_RUNNING)
+check("...and never reads Retrying", not I.q1.retrying)
 
 -- ---- Close selected (2026-09-25) ----------------------------------------------------------
 -- 2026-09-25: wgsUltra's card counted 37 -- 34 merged unit tabs no one could close. Instances'

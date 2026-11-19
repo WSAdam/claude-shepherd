@@ -3916,8 +3916,9 @@ do
   local inst = slurp("install.sh")
   check("no resume: install.sh strips an old install's cc-resume.sh wiring and deletes the script",
         inst:find('RETIRED_HOOKS="cc-resume.sh"', 1, true) ~= nil and inst:find('rm -f "$CLAUDE_DIR/$f"', 1, true) ~= nil)
-  check("kept: a usage-limit error still needs Adam on its card",
-        okCore and core2.needsYouKind({ key = "k", status = "error", error_reason = "budget_exceeded" }, 100) == "needs")
+  -- 2026-11-19 REQUIREMENT CHANGE: this pinned "still needs Adam"; asked, Adam chose "Heads-up, not red"
+  check("a usage-limit error is a heads-up on its card (Adam's call, 2026-11-19)",
+        okCore and core2.needsYouKind({ key = "k", status = "error", error_reason = "budget_exceeded" }, 100) == "fyi")
 end
 
 -- ---- automation dry run and trace (2026-09-29) ----

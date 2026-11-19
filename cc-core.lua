@@ -1587,7 +1587,7 @@ M.FYI_WORD = "Heads-up"
 -- (2026-09-17 live: Adam started a VPN, a card went red with "[runtime error] Connectio..."
 -- and outranked every working session; the fault healed itself and the session was back to
 -- "working" 40s later, with nothing that was ever his to do.) budget_exceeded is deliberately
--- NOT here -- a usage limit is something he acts on: wait, or switch.
+-- NOT here -- nothing retries a usage limit; it is a heads-up of its own (M.needsYouKind, 2026-11-19).
 M.ERROR_TRANSIENT = { runtime_error = true, timeout = true, model_error = true }
 -- 75s: past a retry round-trip and past the 40s the VPN blip took to heal, while still well
 -- inside the time it takes him to walk back to the screen. Still failing after 75s is an
@@ -1714,7 +1714,12 @@ function M.needsYouKind(it, now)
     local reason = tostring(it.error_reason or "unknown")
     if reason == "user_cancelled" then return "fyi", "error", "you stopped it yourself" end
     -- (2026-11-19: a usage limit's "it resumes at the reset" heads-up went with resume at the limit
-    -- reset; a usage limit is an error that needs him, like any other non-transient cause.)
+    -- reset.) 2026-11-19 REQUIREMENT CHANGE: asked whether a usage limit should then go red, Adam chose
+    -- "Heads-up, not red" -- waiting out the reset is the usual answer, so it no longer outranks a
+    -- working session. Nothing retries it, so it never reads Retrying (no fourth value).
+    if reason == "budget_exceeded" then
+      return "fyi", "error", "it stopped at a usage limit -- continue it once the limit resets"
+    end
     if not M.ERROR_TRANSIENT[reason] then return "needs", "error" end
     if not alive or it.hung then return "needs", "error" end   -- nothing is left to retry it
     local ep = type(it.errorEpisode) == "table" and it.errorEpisode or {}

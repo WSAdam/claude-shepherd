@@ -60,8 +60,8 @@ Instances rows and the Stream Deck show an errored session as **Error** in magen
   to 75 seconds before it goes red. An error you stopped yourself, and one on a session that has
   exited, read **Heads-up**: nothing is retrying them. A usage limit reads `[budget exceeded]` with
   Claude Code's message, which names the reset time (*You've hit your limit · resets 3pm*), and
-  auto-continue skips it: continuing only fails again until the limit resets. It stays a red
-  **Needs you** until you continue it.
+  auto-continue skips it: continuing only fails again until the limit resets. It reads
+  **Heads-up** ("it stopped at a usage limit"), below every working session, until you continue it.
 - Only a genuinely idle card **dims**, once its status file is more than 90 seconds old. A card
   waiting on you, a quiet "Ready for you" and a heads-up never dim.
 - Each tile shows time-in-state, a context-fullness bar
