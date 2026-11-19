@@ -175,7 +175,7 @@ Everything lives under `~/.claude/`:
 | `cc-ask/` | Answers to held questions (the question itself is in the session's status file) |
 | `cc-decide/`, `cc-decide.sh` | Left by the decisions inbox, removed 2026-11-19: nothing reads them; `--purge` deletes them |
 | `cc-guard/` | The Stop guards' once-markers: a turn [sent back for asking in prose](approvals-and-policies.md#questions-asked-in-prose-come-back) is marked here, so it is sent back once, and so is the commit a [finished unit was reminded](approvals-and-policies.md#finished-units-get-a-merge-reminder) about, or [sent back for its diff](approvals-and-policies.md#done-is-checked-against-the-diff) |
-| `cc-hold/` | [Hands-off holds](automation.md#hands-off-hold): `<pid>` for a session held by its claude process, `key-<key>` for one without, `.fleet` for the fleet freeze |
+| `cc-hold/` | Left by the hands-off hold and ❄ Freeze, removed 2026-11-19: nothing reads it; `--purge` deletes it |
 | `cc-inbox/` | The [session mailbox](automation.md#session-mailbox): messages waiting for each session |
 | `cc-send/` | [cc-send](automation.md#send-a-prompt-from-a-shell) requests waiting for Shepherd, and its answers |
 | `cc-tickets/` | [Cross-repo tickets](automation.md#cross-repo-tickets), one file each |

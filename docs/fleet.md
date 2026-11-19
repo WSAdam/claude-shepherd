@@ -491,8 +491,6 @@ the FLEET row swaps the session tiles for the list (click again to go back).
   - A `[~]` / `(needs live run)` item, a **blocked** report, a tab that didn't open, or a batch
     starting in the repo **pause** it and tell you (a toast and a banner). **Resume** skips a live-run
     item, which is left for you.
-  - A [hold](automation.md#hands-off-hold) on the item's session, or **❄ Freeze**, holds the run
-    where it is until it lifts.
   - One run per repo. None starts while a batch runs there.
   - Runs live in `~/.claude/cc-run/`. Only a run you started can check an item off; importing
     never does.

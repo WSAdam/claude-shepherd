@@ -155,7 +155,8 @@ assert_eq "--purge removes My List's archive too" "gone" "$([ -e "$C/cc-worklist
 assert_eq "--purge removes the captured scenarios" "gone" "$([ -e "$C/cc-scenarios" ] && echo there || echo gone)"
 # 2026-10-02: the Stop guards' once-markers (cc-guard/) are Shepherd's state too
 assert_eq "--purge removes the Stop guards' once-markers" "gone" "$([ -e "$C/cc-guard" ] && echo there || echo gone)"
-# 2026-10-03: the hands-off holds and the fleet freeze (cc-hold/) are Shepherd's state too
+# 2026-10-03: the hands-off holds and the fleet freeze (cc-hold/) are Shepherd's state too (2026-11-19:
+# a leftover of the removed hold on an old install, still purged)
 assert_eq "--purge removes the hands-off holds and the fleet freeze" "gone" "$([ -e "$C/cc-hold" ] && echo there || echo gone)"
 assert_eq "--purge still keeps the user's own files" "there" "$([ -e "$C/cc-mine.sh" ] && echo there || echo gone)"
 

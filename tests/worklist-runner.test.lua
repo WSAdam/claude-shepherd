@@ -6,7 +6,7 @@
 -- line is finished when its box is ticked in the file and the turn did something; Adam's own item
 -- when ITS session reports done through cc-run.sh. Then the item gets Adam's checkmark, marked
 -- doneBy = "run:<id>", and its tab closes by the run's tag. One run per repo, none during a batch;
--- a freeze holds it; a live-run item pauses it (Resume skips it); Stop ends it.
+-- a live-run item pauses it (Resume skips it); Stop ends it.
 --
 -- Loads the real claude-dashboard.lua under the stubbed hs (the worklist-playbooks.test.lua harness),
 -- posts real bridge messages through the captured controller callback, and drives FX.runTick with
@@ -30,7 +30,7 @@ end
 local T
 do local p = io.popen("mktemp -d 2>/dev/null"); T = p and p:read("*l"); if p then p:close() end end
 if not T or T == "" then check("mktemp a fixture dir", false); finish() end
-os.execute('mkdir -p "' .. T .. '/status" "' .. T .. '/proj" "' .. T .. '/cc-run" "' .. T .. '/cc-hold" "' .. T .. '/.claude"')
+os.execute('mkdir -p "' .. T .. '/status" "' .. T .. '/proj" "' .. T .. '/cc-run" "' .. T .. '/.claude"')
 local PROJ = T .. "/proj"                 -- no transcript_path, so projectKey == cwd
 local RUNDIR = T .. "/cc-run"
 local now0 = os.time()
@@ -52,7 +52,7 @@ write(WL, json.encode({ generic = {}, byProject = { [PROJ] = {
 
 local realGetenv = os.getenv
 local ENV = { CC_STATUS_DIR = T .. "/status", CC_LABELS_FILE = T .. "/labels.json",
-              CC_WORKLIST_FILE = WL, CC_RUN_DIR = RUNDIR, CC_HOLD_DIR = T .. "/cc-hold", HOME = T }
+              CC_WORKLIST_FILE = WL, CC_RUN_DIR = RUNDIR, HOME = T }
 os.getenv = function(k) if ENV[k] then return ENV[k] end; return realGetenv(k) end
 
 -- ---- stubbed hs (the worklist-playbooks.test.lua harness) -------------------
@@ -288,7 +288,7 @@ check("...and once its turn ends the item is done and checked off by the run",
       runState(R2).items[1].state == "done" and (item("o1") or {}).doneBy == "run:" .. R2)
 tick({})
 
--- ---- 6. A live-run item pauses; Resume skips it; a freeze holds; Stop ends ----
+-- ---- 6. A live-run item pauses; Resume skips it; Stop ends ----
 post({ a = "worklist-run", v = PROJ, text = json.encode({ "l1" }) })
 local R3
 for _, f in ipairs(runFiles()) do local id = f:match("^(r%x+)%.run%.json$"); if id and id ~= RID and id ~= R2 then R3 = id end end
@@ -310,15 +310,11 @@ for _, f in ipairs(runFiles()) do
   if id and id ~= RID and id ~= R2 and id ~= R3 then R4 = id end
 end
 R4 = R4 or "?"
-write(T .. "/cc-hold/.fleet", "{}")
-quiet(function() fx.readHolds() end)
+-- 2026-11-19: "a frozen fleet holds the run" went with the hands-off hold (REQUIREMENT CHANGE): the
+-- run opens its next item on the next tick
 before = #opened
 tick({})
-check("a frozen fleet holds the run: no tab opens", #opened == before and runState(R4).items[1].state == "queued")
-os.remove(T .. "/cc-hold/.fleet")
-quiet(function() fx.readHolds() end)
-tick({})
-check("thawed: it goes on", #opened == before + 1)
+check("the run opens its next item", #opened == before + 1)
 post({ a = "worklist-run-stop", v = PROJ })
 check("Stop ends the run", runState(R4).phase == "stopped")
 SESSIONS["4545"] = { pid = 4545, sessionId = "S4", cwd = PROJ, name = "proj" }

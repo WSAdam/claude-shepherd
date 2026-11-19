@@ -334,8 +334,7 @@ does.
 - **Once per turn.** A turn is sent back at most once: Claude Code marks the stop that ends it
   `stop_hook_active`, and Shepherd keeps a marker per session (`~/.claude/cc-guard/<key>.question`,
   removed with the session). The next prompt starts a new turn.
-- **When it stays out of the way.** In plan mode, in Shepherd's own runs, while the session is on
-  [hold](automation.md#hands-off-hold) or the fleet is frozen, while a question is
+- **When it stays out of the way.** In plan mode, in Shepherd's own runs, while a question is
   already held on the card, when a mailbox message arrives at that turn end (it may be the answer),
   and where Shepherd isn't running: on a machine with no panel heartbeat, such as a remote host
   behind the SSH bridge, there is no card to send the question to.
@@ -374,7 +373,7 @@ actually finished, the reminder tells it to carry on.
   - A commit you answered **Not yet** is never pushed back at you. `cc-merge.sh` records that
     answer's commit in `~/.claude/cc-merge/<key>.notyet`, removed with the session.
   - Plus everything the question guard skips: `stop_hook_active`, plan mode, Shepherd's own runs,
-    a hold or a frozen fleet, and machines where the panel isn't running.
+    and machines where the panel isn't running.
 - **After a compaction.** A summary can drop how a unit finishes, so with the switch on, a session
   compacted inside a unit's worktree is told the finish steps again (`[Shepherd: finish]`). If a
   merge request is already open, it is told to wait for that answer instead.
@@ -424,7 +423,7 @@ carries on.
   flagged lines and no merge request hears about the lines first, and about the merge at its next
   claim.
 - **When it stays out of the way.** Everything the question guard skips (`stop_hook_active`, plan
-  mode, Shepherd's own runs, a hold or a frozen fleet, machines where the panel isn't running), a folder that isn't a git
+  mode, Shepherd's own runs, machines where the panel isn't running), a folder that isn't a git
   checkout, and a repo with neither `main` nor `master`.
 - **Switch.** `"stopGuards": { "fakeDone": true }` in `~/.claude/cc-config.json`. It is on in a
   fresh install and after `make setup`; off when the config says nothing. The ledger records each

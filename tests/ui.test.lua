@@ -2741,15 +2741,10 @@ do
     check("#13-drift: ...and so does FX.removeStatus (FX.ticketRelease)",
           rsBody ~= nil and rsBody:find("pcall(FX.ticketRelease, key)", 1, true) ~= nil)
     shellTargets = shellTargets - releases
-    -- 2026-10-03: realigned per the NB above. cc_hold_prune "$1" (the hands-off hold) reaps through a
-    -- helper -- its twin, FX.removeStatus's pcall(FX.holdPrune, key), has no os.remove( in the body
-    -- either -- so it is no per-key target on either side. Both removers are pinned to reap them here
-    -- (tests/reap-session-files.test.lua drives both):
-    local holdReaps = rmBody and select(2, rmBody:gsub('cc_hold_prune "%$1"', "")) or 0
-    check("#13-drift: cc_remove reaps the session's hands-off holds (cc_hold_prune)", holdReaps == 1)
-    check("#13-drift: ...and so does FX.removeStatus (FX.holdPrune)",
-          rsBody ~= nil and rsBody:find("pcall(FX.holdPrune, key)", 1, true) ~= nil)
-    shellTargets = shellTargets - holdReaps
+    -- 2026-11-19: cc_hold_prune / FX.holdPrune went with the hands-off hold (REQUIREMENT CHANGE):
+    -- neither remover reaps a hold any more
+    check("#13-drift: neither remover reaps a hands-off hold", rmBody ~= nil and not rmBody:find("cc_hold_prune", 1, true)
+          and rsBody ~= nil and not rsBody:find("FX.holdPrune", 1, true))
     check("#13-drift: FX.removeStatus target count parses (>=9)", luaTargets >= 9)
     check("#13-drift: cc_remove target count parses (>=9)", shellTargets >= 9)
     check("#13-drift: FX.removeStatus (" .. tostring(luaTargets) .. ") and cc_remove ("
@@ -4137,7 +4132,7 @@ do
   if lib then lib:close() end
   check("crossings: cc-lib.sh defaults CC_CROSS_DIR to the same folder",
         ls:find('CC_CROSS_DIR="${CC_CROSS_DIR:-${HOME}/.claude/cc-cross}"', 1, true) ~= nil)
-  check("crossings: a held session's start takes no crossing notes either", ls:find('CC_HOLD_MAIL_PARTS="mailbox tickets crossings"', 1, true) ~= nil)   -- 2026-11-19: decisions part gone with the Inbox
+  -- 2026-11-19: "a held session's start takes no crossing notes either" went with the hands-off hold (REQUIREMENT CHANGE)
   check("crossings: cc_remove prunes them, never by key", (ls:match("\ncc_remove%(%) {(.-)\n}\n") or ""):find("cc_cross_prune\n", 1, true) ~= nil)
   local tkf = io.open(ROOT .. "cc-ticket.sh", "r")
   local ts = tkf and tkf:read("*a") or ""
@@ -4734,8 +4729,7 @@ do
   check("no inbox: the hooks keep no cc-decide folder",
         not lib:find("CC_DECIDE_DIR", 1, true) and not lib:find("cc_decide_", 1, true) and not lib:find("_cc_ctx_decisions", 1, true))
   check("no inbox: a session's start hands over no decisions part",
-        lib:find('CC_CONTEXT_PARTS="notes lease finish tickets crossings onpurpose handoff mailbox"', 1, true) ~= nil
-        and lib:find('CC_HOLD_MAIL_PARTS="mailbox tickets crossings"', 1, true) ~= nil)
+        lib:find('CC_CONTEXT_PARTS="notes lease finish tickets crossings onpurpose handoff mailbox"', 1, true) ~= nil)   -- 2026-11-19: CC_HOLD_MAIL_PARTS went with the hold
   check("no inbox: the methodology no longer sends sessions to cc-decide.sh", not slurp("methodology/CLAUDE.md"):find("cc-decide", 1, true))
   -- what stays
   check("kept: the session mailbox", src:find("function FX.mailboxSend(", 1, true) ~= nil and lib:find('CC_INBOX_DIR="${CC_INBOX_DIR:-${HOME}/.claude/cc-inbox}"', 1, true) ~= nil)
@@ -5219,108 +5213,60 @@ do
         src:find('core.config(cfg, "alerts.idleMinutes", 15)', 1, true) ~= nil)
 end
 
--- ---- Hands-off hold: every automatic sender honors it (2026-10-03, mining round 2 D2) ----
--- tests/automation-trace.test.lua, readiness.test.lua, stop-guards.test.sh and resume.test.sh drive the
--- hold; this pins that NO automatic sender can skip it. The door (FX.automationAct) and the readiness
--- door ask first; every sender OUTSIDE the door asks FX.holdStops right before its effect; and a census
--- of the effect primitives fails the moment a new caller appears, so its author decides -- and says
--- here -- whether it is a click of Adam's or automation the hold must stand down.
+-- ---- The hands-off hold and ❄ Freeze are gone (2026-11-19) ----
+-- Adam, 2026-11-19: "prune features I have no use for". REQUIREMENT CHANGE: the 2026-10-03 pins here
+-- asserted every automatic sender asked the hold first. Gone with it: the tile menu's and the detail
+-- panel's Hold, the toolbar's ❄ Freeze, the HOLD / FROZEN badge and the skipped-sends list,
+-- ~/.claude/cc-hold/ (FX.HOLD_DIR, cc_held, cc_hold_prune), CC_HOLD_MAIL_PARTS, and every hold check
+-- inside the senders. Kept, delivering exactly as before minus that check: auto-continue and the other
+-- typed senders (FX.typeWhenReady), the door (FX.automationAct, dry run first now), the session
+-- mailbox (typed, waiting, or handed over at a turn end or start), the Stop guards and the notes request.
 do
-  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
-  local src = f and f:read("*a") or ""
-  if f then f:close() end
-  local function count(needle)
-    local n, pos = 0, 0
-    while true do
-      local s = src:find(needle, pos + 1, true)
-      if not s then return n end
-      n, pos = n + 1, s
-    end
+  local function slurp(name)
+    local f = io.open(ROOT .. name, "r")
+    local s = f and f:read("*a") or ""
+    if f then f:close() end
+    return s
   end
-  -- the door
+  local src, lib, st = slurp("claude-dashboard.lua"), slurp("cc-lib.sh"), slurp("cc-status.sh")
+  local okCore, core2 = pcall(dofile, ROOT .. "cc-core.lua")
+  check("no hold: no cc-hold/ folder in the panel", not src:find("FX.HOLD_DIR", 1, true) and not src:find("cc-hold", 1, true)
+        and not src:find("FX._hold", 1, true))
+  check("no hold: no sender asks a hold", not src:find("FX.holdStops", 1, true) and not src:find("FX.holdOf", 1, true)
+        and not src:find("AUTOMATION_HELD", 1, true))
+  check("no hold: no Hold in the tile menu or the detail panel", not src:find("Hold (no automatic sends)", 1, true)
+        and not src:find('id="b-hold"', 1, true) and not src:find('if a == "hold" then', 1, true) and not src:find('if a == "hold-clear" then', 1, true))
+  check("no hold: no ❄ Freeze in the toolbar", not src:find('id="freeze"', 1, true) and not src:find('if a == "freeze" then', 1, true)
+        and not src:find("function setFreeze(", 1, true) and not src:find("FX.toggleFreeze", 1, true))
+  check("no hold: no badge, no skipped list", not src:find("holdBadge", 1, true) and not src:find("holdPanelHtml", 1, true)
+        and not src:find('id="d-hold"', 1, true) and not src:find("mailboxHeld", 1, true))
+  check("no hold: the hooks keep no cc-hold folder", not lib:find("CC_HOLD_DIR", 1, true) and not lib:find("cc_held", 1, true)
+        and not lib:find("cc_hold_prune", 1, true) and not lib:find("CC_HOLD_MAIL_PARTS", 1, true))
+  check("no hold: cc-status.sh's Stop asks no hold", not st:find('[ -z "$HELD" ] &&', 1, true) and not st:find("cc_held", 1, true))
+  check("no hold: core keeps none of it", okCore and core2.holdOf == nil and core2.holdId == nil and core2.automationHeld == nil
+        and core2.holdSkipAdd == nil and core2.HOLD_KINDS == nil and core2.AUTOMATION_HELD == nil and core2.mainGreenHeld == nil)
+  local keys = {}
+  for _, f in ipairs(okCore and core2.FEATURES or {}) do keys[f.key] = true end
+  check("no hold: no Hands-off hold in the feature list", okCore and not keys.hold)
+  -- what stays
   local act = src:match("\nfunction FX%.automationAct%(kind, it, detail, fn%)(.-)\nend\n") or ""
-  local holdAt = act:find("if FX.holdStops(kind, it, detail) then return false, core.AUTOMATION_HELD end", 1, true)
-  local dryAt = act:find("core.automationDryRun(loadConfig(), kind)", 1, true)
-  local fnAt = act:find("pcall(fn)", 1, true)
-  check("hold: FX.automationAct asks the hold first -- before the dry run and before the effect",
-        holdAt ~= nil and dryAt ~= nil and fnAt ~= nil and holdAt < dryAt and holdAt < fnAt)
-  -- the readiness door: up front (nothing scheduled), and again when a scheduled send fires
-  local twr = src:match("\nfunction FX%.typeWhenReady%(it, typist, fn, opts%)(.-)\nend\n") or ""
-  local upFront = twr:find("if FX.holdStops(kind, it, detail) then return refused(core.AUTOMATION_HELD) end", 1, true)
-  local sched = twr:find("q[key] = (q[key] or 0) + 1", 1, true)
-  check("hold: FX.typeWhenReady asks before a send is scheduled", upFront ~= nil and sched ~= nil and upFront < sched)
-  check("hold: ...and a hold that lands before the send fires releases the sender",
-        twr:find("if why3 == core.AUTOMATION_HELD then refused(why3) end", 1, true) ~= nil)
-  -- every sender outside the door: its FX.holdStops comes right before its one effect
-  local OUTSIDE = {
-    { kind = "drain",    effect = 'ledgerFor(it, { type = "drain_close" })' },
-    { kind = "schedule", effect = 'FX.spawnSession(r.editor or core.config(cfg, "spawn.editor", "terminal"),\n            r.folder, r.prompt' },
-    { kind = "merge",    effect = "FX._mergeApproved[key] = { nonce = r.nonce, at = FX.now(), delegated = true }" },
-  }
-  for _, o in ipairs(OUTSIDE) do
-    local e = src:find(o.effect, 1, true)
-    local h = e and src:sub(math.max(1, e - 1500), e):find('FX.holdStops("' .. o.kind .. '"', 1, true)
-    local between = e and h and src:sub(math.max(1, e - 1500) + h, e) or ""
-    check("hold: the " .. o.kind .. " sender asks FX.holdStops(\"" .. o.kind .. "\") right before its effect (one copy)",
-          e ~= nil and h ~= nil and count(o.effect) == 1 and not between:find("\nfunction ", 1, true))
-  end
-  -- the mailbox is never held; its delivery waits
+  local dryAt, fnAt = act:find("core.automationDryRun(loadConfig(), kind)", 1, true), act:find("pcall(fn)", 1, true)
+  check("kept: FX.automationAct asks the dry run before the effect", dryAt ~= nil and fnAt ~= nil and dryAt < fnAt)
   local sm = src:match("\nfunction FX%.stepMailbox%(list%)(.-)\nend\n") or ""
-  check("hold: a held session's mail waits -- FX.stepMailbox routes it by the hold",
-        sm:find("core.mailboxRoute(it, n, FX.holdOf(it) ~= nil, typeable[it.key] or 0)", 1, true) ~= nil)
+  check("kept: FX.stepMailbox routes each waiting message", sm:find("core.mailboxRoute(it, n, typeable[it.key] or 0)", 1, true) ~= nil
+        and sm:find("FX.mailboxNudge(it)", 1, true) ~= nil)
   local nudge = src:match("\nfunction FX%.mailboxNudge%(it%)(.-)\nend\n") or ""
-  local nHeld = nudge:find("if FX.holdOf(it) then return false, core.AUTOMATION_HELD end", 1, true)
-  local nClaim = nudge:find("FX.mailboxClaim(key)", 1, true)
-  check("hold: ...and a nudge whose hold landed after it was scheduled claims nothing",
-        nHeld ~= nil and nClaim ~= nil and nHeld < nClaim)
-  -- the census: every caller of an effect primitive is accounted for
-  -- FX.spawnSession: its definition; Adam's clicks (spawnPrompt, open-worktree, A/B compare, the New
-  -- panel, a routine's Run now, the tile menu's Respawn, and -- 2026-10-04 -- History's ↻ Resume of a
-  -- past session, which has no card and so no hold: FX.pastResumeLaunch); and the automatic ones --
-  -- auto-respawn and restart (both inside FX.automationAct) and a scheduled routine (FX.holdStops "schedule").
-  eq("hold: census -- FX.spawnSession has exactly the callers listed here (a new one: decide if the hold must stop it)",
-     count("FX.spawnSession("), 11)
-  -- FX._mergeApproved: Adam's Merge click, and the delegated merge on a batch grant (FX.holdStops "merge")
-  eq("hold: census -- a merge is approved in exactly two places", count("FX._mergeApproved[key] = {"), 2)
-  -- the tick's close: only the drain (FX.holdStops "drain"); every other close is a menu click on `item`
-  eq("hold: census -- the tick closes a session in one place (the drain)",
-     count('dispatchSerialized(it, "close", function() core.handleAction(FX, it, "close") end)'), 1)
-  -- (the typed senders all go through FX.typeWhenReady -- pinned with their kinds by the trace block)
-  -- the flags: the shell's folder, read each tick, never watched
-  check("hold: FX.HOLD_DIR reads CC_HOLD_DIR, as cc-lib.sh does",
-        src:find('FX.HOLD_DIR = os.getenv("CC_HOLD_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-hold")', 1, true) ~= nil)
-  local tick = src:match("function FX%._refreshBody%(%)(.-)\nend\n") or ""
-  local readAt = tick:find("pcall(FX.readHolds)", 1, true)
-  local firstSender = tick:find("FX.typeWhenReady(", 1, true)
-  check("hold: the tick reads the holds before any sender asks", readAt ~= nil and firstSender ~= nil and readAt < firstSender)
-  check("hold: no FSEvents watcher on the folder", not src:find("pathwatcher.new(FX.HOLD_DIR", 1, true))
-  -- the controls
-  check("hold: the tile menu toggles it", src:find('{ title = "Hold (no automatic sends)", checked = FX.holdOf(item) == "session",', 1, true) ~= nil)
-  check("hold: the detail panel's Hold and Clear reach Lua", src:find('if a == "hold" then', 1, true) ~= nil
-        and src:find('if a == "hold-clear" then', 1, true) ~= nil)
-  check("hold: the toolbar's Freeze reaches Lua", src:find('if a == "freeze" then', 1, true) ~= nil)
-  -- the reapers
-  check("hold: FX.removeStatus reaps the holds (cc_remove too)", src:find("pcall(FX.holdPrune, key)", 1, true) ~= nil)
-  local lib = io.open(ROOT .. "cc-lib.sh", "r")
-  local lsrc = lib and lib:read("*a") or ""
-  if lib then lib:close() end
-  check("hold: cc_remove reaps them", lsrc:find('cc_hold_prune "$1"', 1, true) ~= nil)
-  local st = io.open(ROOT .. "cc-status.sh", "r")
-  local ssrc = st and st:read("*a") or ""
-  if st then st:close() end
-  -- the shell's senders at a turn end: the mailbox handover, the notes request and the Stop guards
-  for _, needle in ipairs({ 'if [ -z "$HELD" ] && [ -d "$CC_INBOX_DIR/$KEY" ]',
-                            'if [ -z "$HELD" ] && [ -f "$CC_NOTES_DIR/$KEY.due-at" ]',
-                            'if [ -z "$HELD" ] && [ -z "${STOP_MAIL:-}" ]' }) do
-    check("hold: cc-status.sh's Stop stands down -- " .. needle, ssrc:find(needle, 1, true) ~= nil)
-  end
-  check("hold: ...and every Stop block it can print is one of those three",
-        ssrc:find('cc_stop_decision "${STOP_MAIL:-}" "${STOP_NOTES:-}" "${STOP_GUARD:-}"', 1, true) ~= nil)
-  local rs = io.open(ROOT .. "cc-resume.sh", "r")
-  local rsrc = rs and rs:read("*a") or ""
-  if rs then rs:close() end
-  local heldAt, firedAt = rsrc:find('if cc_held "$KEY"; then', 1, true), rsrc:find('set_state fired', 1, true)
-  check("hold: cc-resume.sh asks before it wakes the session", heldAt ~= nil and firedAt ~= nil and heldAt < firedAt)
+  check("kept: a mailbox nudge claims its message and types it", nudge:find("FX.mailboxClaim(key)", 1, true) ~= nil
+        and nudge:find('core.handleAction(FX, it, "nudge", core.mailboxNudge(c.text))', 1, true) ~= nil)
+  check("kept: an idle session's message is typed, a busy one's waits for its turn end",
+        okCore and core2.mailboxRoute({ key = "k", status = "idle" }, 1) == "type"
+        and core2.mailboxRoute({ key = "k", status = "working" }, 1) == "turn-end")
+  check("kept: a session's start still hands over its mail and ticket news",
+        lib:find('CC_CONTEXT_PARTS="notes lease finish tickets crossings onpurpose handoff mailbox"', 1, true) ~= nil)
+  check("kept: Stop still hands over the mail, asks for notes and runs the guards",
+        st:find('if [ -d "$CC_INBOX_DIR/$KEY" ]', 1, true) ~= nil and st:find('if [ -f "$CC_NOTES_DIR/$KEY.due-at" ]', 1, true) ~= nil
+        and st:find('if [ -z "${STOP_MAIL:-}" ] && [ -z "${CC_SHEPHERD_INTERNAL:-}" ]; then', 1, true) ~= nil)
+  check("kept: auto-continue still types through the readiness door", src:find("\nfunction FX.typeWhenReady(it, typist, fn, opts)", 1, true) ~= nil)
 end
 
 -- ---- Gate blame: a red gate's failures split into main's and the branch's (2026-10-03, mining round 2 E1a) ----
@@ -5356,8 +5302,9 @@ do
   local css = ""
   for rule in src:gmatch("%.mainred%-b[^{]*{[^}]*}") do css = css .. rule end
   check("main green: the flag is a heads-up colour, never the danger red", css ~= "" and not css:find("--danger", 1, true))
-  check("main green: the tick stamps the flag after the holds (it reads them) and the stacks (repoKey)",
-        (src:find("pcall(FX.annotateHolds, list)", 1, true) or 1e9) < (src:find("pcall(FX.stepMainGreen, list, cfg)", 1, true) or 0))
+  -- 2026-11-19: "after the holds" went with the hands-off hold (REQUIREMENT CHANGE); the stacks stay
+  check("main green: the tick stamps the flag after the stacks (repoKey)",
+        (src:find("FX.annotateStacks(list, labels, cfg)", 1, true) or 1e9) < (src:find("pcall(FX.stepMainGreen, list, cfg)", 1, true) or 0))
   check("main green: its runs go in the gate lane as `low`",
         src:find("slot = FX._mainGreenRuns, gkey = gkey, g = g, low = true", 1, true) ~= nil)
   check("main green: the routine form offers the gate action",
@@ -5391,7 +5338,8 @@ do
   local _, checks = src:gsub("core%.worklistRunCheck%(", "")
   check("runner: Adam's checkmark is set in one place, a finished item's step", checks == 1
         and block:find("core.worklistRunCheck(st, run.key, item.id, run, now)", 1, true) ~= nil)
-  check("runner: a hold or a freeze holds the run", block:find("held = (holds.fleet == true and \"fleet\") or (tile and FX.holdOf(tile)) or nil", 1, true) ~= nil)
+  -- 2026-11-19: "a hold or a freeze holds the run" went with the hands-off hold (REQUIREMENT CHANGE)
+  check("runner: no hold is asked of a run", not block:find("FX.holdOf", 1, true) and not block:find("FX._run.held", 1, true))
   check("runner: the start message carries no path: the folder is the tab's own",
         block:find("FX.playbookTodoRoots(key, st)[1]", 1, true) ~= nil)
 end

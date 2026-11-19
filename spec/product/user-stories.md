@@ -83,13 +83,7 @@ delegation, idle/auto-spawn routing targets) are intentionally omitted until the
 - As a **developer**, I want a turn that ends by asking me a question in prose to be sent back once to ask it with AskUserQuestion, so that a question buried at the end of a report lands on the card as buttons instead of looking like a finished session.
 - As a **reviewer**, I want a turn that claims done while its diff since main switches a test off, focuses one, deletes one or leaves a stub to be sent back once per commit with those lines, so that a suite that is green only because a test stopped running is caught before the merge request.
 - As a **fleet operator**, I want a unit that says it's done, with commits ahead of main and no merge request, reminded once per commit to ask to merge (and told the finish steps again after a compaction), so that finished units don't sit forgotten in their worktrees.
-- As a **developer**, I want every Stop guard to fire at most once per turn or commit, never in plan mode, on hold or where Shepherd isn't running, and to stand down for a mailbox message, so that a guard never loops or talks over real input.
-
-## Hands-off hold
-
-- As a **developer**, I want Hold on a session to stop Shepherd sending it anything automatic (feeds, rules, auto-continue, respawn, resume, Stop guards, merges on a batch grant) and to list each send it skipped, so that I can take a session over without Shepherd typing into it behind my back.
-- As a **fleet operator**, I want ❄ Freeze in the toolbar to hold the whole fleet the same way, with a FROZEN badge on every card, so that I can stop every automatic action at once.
-- As a **fleet operator**, I want mail sent to a held session to wait and go out once I lift the hold, while the skipped automatic sends are never replayed, so that releasing a hold doesn't unleash a backlog of stale actions.
+- As a **developer**, I want every Stop guard to fire at most once per turn or commit, never in plan mode or where Shepherd isn't running, and to stand down for a mailbox message, so that a guard never loops or talks over real input.
 
 ## Crossings between projects
 
@@ -297,7 +291,7 @@ delegation, idle/auto-spawn routing targets) are intentionally omitted until the
 - As a **fleet operator**, I want 📘 Add a playbook… to import a markdown checklist I keep outside the repo into a project's My List tab, kept in step with the file, so that a release or deploy checklist sits beside everything else I verify.
 - As a **fleet operator**, I want ▶ Run… to work through items I pick one at a time, each in a fresh session in the repo's main checkout with its brief typed in for me to send, and its tab closed once the item is done, so that a list of small jobs gets done while I verify.
 - As a **fleet operator**, I want a run I started to set my checkmark (✓ by run) only on Shepherd's own evidence (the box ticked in its file and a turn that did something, or the item's own session reporting done) and never on import, so that a checkmark still means I, or a run I started, checked it.
-- As a **fleet operator**, I want a run to stop after three items in a row finish nothing, and to pause for a live-run item, a blocked report or a batch in the repo and wait out a hold or freeze, so that a run never churns through my list unattended.
+- As a **fleet operator**, I want a run to stop after three items in a row finish nothing, and to pause for a live-run item, a blocked report or a batch in the repo, so that a run never churns through my list unattended.
 - As a **fleet operator**, I want To do / To verify / All lanes under the import row, with Mark all marking only the lane I'm looking at, so that the work an automation says it finished doesn't bury the work still to do.
 - As a **fleet operator**, I want a `[~]` line (the work is in, only a live run is left) to sit in To verify, so that what waits on my live check is with the rest of what waits on me.
 - As a **fleet operator**, I want a heads-up on a project's card and a count on 📋 My List once 30 items wait for my check or one has waited a day, with one banner per crossing, so that I look before the pile grows to hundreds.

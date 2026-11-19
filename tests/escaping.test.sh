@@ -107,9 +107,8 @@ assert_eq 'esc() encodes "'  "yes" "$(has '.replace(/"/g,"&quot;")')"
 # 2026-09-29 (worktree leases): it.lease and leaseBadge's `ls.` come from a file on disk.
 # 2026-09-29 (requirement ids): renderReqs' `rq.` -- a requirement's id, title and source.
 # 2026-09-29 (On purpose): onPurposeHtml's `op.` is an entry of a repo's DECISIONS.md.
-# 2026-10-03 (hands-off hold): it.hold and holdPanelHtml's `hd.` -- a skipped send's summary came
-# from a session or its queue.
-SINK_RE="'[[:space:]]*\+[[:space:]]*(it\.(group|label|name|cwd|projectKey|status|branch|stackName|stackKey|sessTitle|wtRoot|merge|askLine|askView|workingOn|pins|overlap|lease|hold)\b|p\.mergeOrder\b|\b(im|iw|mg|ak|wk|pn|ls|rq|op|hd|tr)\.[A-Za-z]+\b|\bg\b)"
+# (2026-11-19: it.hold and holdPanelHtml's `hd.` went with the hands-off hold.)
+SINK_RE="'[[:space:]]*\+[[:space:]]*(it\.(group|label|name|cwd|projectKey|status|branch|stackName|stackKey|sessTitle|wtRoot|merge|askLine|askView|workingOn|pins|overlap|lease)\b|p\.mergeOrder\b|\b(im|iw|mg|ak|wk|pn|ls|rq|op|tr)\.[A-Za-z]+\b|\bg\b)"
 raw_sinks="$(grep -nE "$SINK_RE" "$DASH" || true)"
 assert_eq "no user field concatenated RAW into panel HTML (must be esc()'d)" "" "$raw_sinks"
 

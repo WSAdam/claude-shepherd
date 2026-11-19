@@ -15,7 +15,6 @@ and the limits of acting on a window you're not looking at.
 - **Right-click** a tile for the context menu (below).
 
 The **header** has **New** (the new-session dialog), **☕** (keep awake), **🔒** (lock the screen),
-**❄** (freeze the fleet: [no automatic sends](automation.md#hands-off-hold) until you thaw it),
 the **☰** menu, **⚙** Settings, and the layout switcher. The small **⌨** button in the bottom-right
 corner shows every shortcut, read from the live bindings.
 
@@ -52,9 +51,6 @@ In order (a remote SSH-bridge tile offers only Relabel and Set group):
   corpus, when a card reads wrong ([Development](development.md#capturing-a-scenario)).
 - **⚖ A/B fork-to-compare…**: run the same task as 2+ variants in isolated git worktrees of this
   project, then compare them and keep the winner ([Automation](automation.md#ab-compare)).
-- **Hold (no automatic sends)**: checked while on. Shepherd sends the session nothing automatic, and
-  the tile wears a **HOLD** badge. Skipped sends are listed in its detail panel and never replayed,
-  and its mail waits until you lift the hold ([Automation](automation.md#hands-off-hold)).
 - **Clear conversation / Compact**: confirm, then run `/clear` or `/compact` in the session.
 - **Close instance**: confirm, then close the session and remove the tile. In a window shared with
   other sessions the tab bridge closes just its Claude tab (a batch unit's by its tag, any other by
@@ -90,10 +86,6 @@ In order (a remote SSH-bridge tile offers only Relabel and Set group):
   **Auto-Continue** does this for you ([Automation](automation.md#auto-respawn-and-auto-continue)).
 - **Autopilot**: time-box a session to auto-approve all its gated prompts (needs the gate and
   `policies.autopilot.enabled`).
-- **Hold**: the same toggle as the context menu's **Hold**; it reads **Hold: ON** while it's on. Above
-  the buttons, the panel says the session is on hold (or the fleet is frozen) and lists what Shepherd
-  skipped meanwhile. Once the hold is lifted the list stays until **Clear**
-  ([Automation](automation.md#hands-off-hold)).
 - **Clear / Compact**: confirm, then run `/clear` or `/compact` in the session.
 - **Score**: rate the session 0–100 from the audit ledger
   ([Usage and cost](usage-and-cost.md#run-score)).

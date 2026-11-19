@@ -136,11 +136,12 @@ check("mailbox: an ordinary message carries no such flag", json.decode(plain.bod
       and core.parseMailbox(plain.name, plain.body).turnEndOnly == nil)
 local idle = { key = "k", status = "done", editor = "vscode" }
 eq("route: an idle session whose waiting messages are all turn-end-only: waiting, never typed",
-   core.mailboxRoute(idle, 1, false, 0), "waiting")
-eq("route: ...one typeable message among them: typed", core.mailboxRoute(idle, 2, false, 1), "type")
+   core.mailboxRoute(idle, 1, 0), "waiting")
+eq("route: ...one typeable message among them: typed", core.mailboxRoute(idle, 2, 1), "type")
 eq("route: ...an older caller that doesn't say: typed, as before", core.mailboxRoute(idle, 1), "type")
-eq("route: ...mid-turn its turn end hands it over", core.mailboxRoute({ key = "k", status = "working" }, 1, false, 0), "turn-end")
-eq("route: ...on hold it is held", core.mailboxRoute(idle, 1, true, 0), "held")
+eq("route: ...mid-turn its turn end hands it over", core.mailboxRoute({ key = "k", status = "working" }, 1, 0), "turn-end")
+-- 2026-11-19: "...on hold it is held" went with the hands-off hold (REQUIREMENT CHANGE); mailboxRoute
+-- lost its `held` argument, so the calls above pass `typeable` third.
 
 -- ---- the real shell programs, against real repos (2026-10-03) ----
 local function sh(cmd) local ok = os.execute(cmd .. " >/dev/null 2>&1"); return ok == true or ok == 0 end

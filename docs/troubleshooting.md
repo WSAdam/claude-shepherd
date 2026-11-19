@@ -112,11 +112,7 @@ also for a policy that allowed it: the Decisions tab and the audit ledger record
   ([Merging and batches → Merge gates](merging-and-batches.md#merge-gates-shepherd-runs-the-tests-itself)).
 - **A batch unit's merge waits although you granted merges**: [grant grading](merging-and-batches.md#grant-grading-a-risky-merge-waits-for-your-click)
   held it (a risky file, a deleted file, a high checker finding, or no gate pass on record, as in a
-  repo with no merge gate), or its session is on hold or the fleet is frozen. The card says which;
-  your own **Merge** still works.
-- **Nothing automatic reaches a session**: it's on [hold](automation.md#hands-off-hold), or ❄ Freeze
-  is on. Each skipped send is listed in its detail panel and the Automation trace; mail waits
-  until you lift the hold.
+  repo with no merge gate). The card says which; your own **Merge** still works.
 - **↻ Resume refused**: the session isn't verified dead: it still has a card, a live
   `~/.claude/sessions` entry or a process holding its id
   ([Usage and cost → Past sessions](usage-and-cost.md#past-sessions)).

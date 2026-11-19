@@ -23,8 +23,7 @@ entries):
   main-green check), event rules, auto-continue with back-off, resume at a usage-limit reset,
   auto-respawn with handoff notes, auto-compact with notes, task packets.
 - **Steering without keystrokes:** the session mailbox, `cc-send.sh`, cross-repo tickets,
-  AskUserQuestion answered on the card, the Stop guards, the hands-off hold and
-  ❄ Freeze.
+  AskUserQuestion answered on the card, the Stop guards.
 - **Safety:** the opt-in approval gate and policy bundles, always-ask commands, the
   worktree fence, one worktree per agent.
 - **Merging:** ready-to-merge requests, Shepherd-run test gates, the red-first proof, gate blame,
@@ -112,7 +111,7 @@ Single user, no server, no accounts. Records store env-var names, never secrets.
 - **State** lives under `~/.claude/`: `cc-status/` (one JSON per session, plus the panel heartbeat
   `.panel-alive`), `cc-config.json`, and a `cc-*` file or folder per feature. `uninstall.sh`'s
   `STATE` is the full list (what `--purge` removes);
-  [docs/configuration.md](docs/configuration.md#files-shepherd-keeps) says what each holds. Newer ones: `cc-guard/`, `cc-hold/`, `cc-lesson/`, `cc-run/`,
+  [docs/configuration.md](docs/configuration.md#files-shepherd-keeps) says what each holds. Newer ones: `cc-guard/`, `cc-lesson/`, `cc-run/`,
   `cc-main-green.json`, `cc-coach/`, `cc-merge/<key>.notyet` and `cc-merge/main-moved.seen`,
   `cc-scratch/` (Seance, red-first and gate-blame worktrees), and `cc-keep/` (kept transcripts,
   which `--purge` leaves in place).
@@ -153,10 +152,8 @@ disk, `FX.alert`, interrupted turns, FSEvents). These are the others.
   - Automated sends go through `FX.typeWhenReady`, which waits for `core.readyToType`: not mid-turn,
     not into an approval or a held question, not during a tool, not within 3s of a status change,
     and in kitty only into an empty composer. A refusal is ledgered once as `typing_refused`.
-  - Every automatic effect passes `FX.automationAct`, which asks the hold first (a held session or a
-    frozen fleet gets nothing), then honours `automation.dryRun` / `<feature>.dryRun` and records
-    the ⚡ Trace. Senders outside that door call `FX.holdStops`. Hold flags live in
-    `~/.claude/cc-hold/` (`<pid>`, `key-<key>`, `.fleet` = ❄ Freeze).
+  - Every automatic effect passes `FX.automationAct`, which honours `automation.dryRun` /
+    `<feature>.dryRun` and records the ⚡ Trace.
   - A window shared by several sessions gets no keystrokes (`core.keystrokeBlocked`; build every
     target with `FX.targetFor`). Such a session is reached through the mailbox instead
     (`FX.deliverTo`): a message is handed over at its next turn end by the Stop hook, and a
@@ -389,7 +386,7 @@ green. See [the CHANGELOG section](CHANGELOG.md#2026-10-04--mining-round-2):
 - Stop guards: question, fakeDone, unfinished (`cc_stop_guard`; on in `defaults/`).
 - The coach: a lessons ledger, evidence runs and `cc-lesson.sh`, edit outcomes and Sharpen, a review
   of the repo's auto-memory, lessons across repos into the global CLAUDE.md.
-- Steering: Seance, the fleet idle alert, the hands-off hold and ❄ Freeze, playbooks and Run selected
+- Steering: Seance, the fleet idle alert, playbooks and Run selected
   in My List (`cc-run.sh`), queue hold and the 📑 Queues view, Restart fleet outcomes.
 - Merging: brief pre-flight, gate blame, the main-moved notice, the main-green check (a routine with
   `"action": "gate"`), grant grading (a risky merge on a batch grant waits for Adam's click).

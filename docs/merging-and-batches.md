@@ -262,9 +262,6 @@ repo: nothing runs until you add one. Like every routine, it fires on its schedu
 - **Green:** the next green run clears the flag.
 - **Never red by accident:** a run that couldn't run (a busy suite, a dirty checkout, another
   branch) or timed out changes nothing: the flag stays as it was.
-- **Holds:** while the fleet is frozen or a session of that repo is [on hold](automation.md#hands-off-hold),
-  the check is skipped and listed as skipped, not run later. A check still waiting for the lane
-  leaves it when a hold or the freeze comes. **Run** on the board is your own click and runs anyway.
 - **Kept:** each repo's last verdict is in `~/.claude/cc-main-green.json`, so a reload keeps the flag
   without a second banner. Deleting the repo's last gate routine drops its flag.
 
@@ -730,7 +727,7 @@ its [mailbox](automation.md#session-mailbox):
   with `radar.enabled` off, nobody is told.
 - **How it arrives:** at the session's next turn end, or at its next start. It is never typed
   into an idle session, even one Shepherd could type into: the card shows *1 message waiting*
-  until then. A [held](automation.md#hands-off-hold) session gets it once the hold is lifted.
+  until then.
 - **Once:** each merge (repo + merged commit) is announced once, recorded in
   `~/.claude/cc-merge/main-moved.seen`. A reload forgets that the merge was verified, but this
   record survives it.

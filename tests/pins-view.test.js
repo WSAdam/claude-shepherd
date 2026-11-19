@@ -45,7 +45,6 @@ const lib = new Function("sent", "stubs",
   "var selectedKey = stubs.selectedKey;\n" +
   "function send(a, v, text){ sent.push([a, v, text]); }\n" +
   "function riskBadge(){ return ''; } function prBadgeHtml(){ return ''; }\n" +
-  "function holdBadge(){ return ''; }\n" +   // 2026-10-03: the hands-off hold's badge joined the row
   "function bgBadge(){ return ''; } function notesBadge(){ return ''; } function leaseBadge(){ return ''; }\n" +
   "function ticketBadge(){ return ''; } function coachBadge(){ return ''; } function schedLockBadge(){ return ''; }\n" +
   "function mainRedBadge(){ return ''; }\n" +   // 2026-10-03: the main-green check's flag joined the row

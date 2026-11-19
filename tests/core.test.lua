@@ -8505,7 +8505,8 @@ do
   -- 2026-10-27: 62 -> 63 for the Compare tab, a weekly GitHub leaderboard ("compare", flagged new).
   -- 2026-11-19: 63 -> 62, REQUIREMENT CHANGE: the decisions inbox ("decisions", flagged new) was removed.
   -- 2026-11-19: 62 -> 61, REQUIREMENT CHANGE: talk mode ("talk", flagged new) was removed.
-  eq("FEATURES: the 61 new features are flagged", newCount, 61)
+  -- 2026-11-19: 61 -> 60, REQUIREMENT CHANGE: the hands-off hold ("hold", flagged new) was removed.
+  eq("FEATURES: the 60 new features are flagged", newCount, 60)
   check("FEATURES: lists the Compare tab", keys.compare == true)
   check("FEATURES: lists crossings", keys.crossings == true)
   check("FEATURES: lists queue hold and the Queues view", keys.queuehold == true)
@@ -14803,84 +14804,20 @@ do
         kept.seance and kept.seance.maxBudgetUsd == 35 and kept.seance.timeoutSeconds == 600)
 end
 
--- ---- Hands-off hold (2026-10-03, mining round 2 unit D2) ----
--- Adam holds one session (by its claude process, so a /clear keeps it; by its key where no process is
--- known) or freezes the fleet: every automatic send stands down. The mailbox never does -- its
--- messages wait and are handed over once the hold is lifted.
+-- ---- The hands-off hold is gone (2026-11-19) ----
+-- Adam, 2026-11-19: "prune features I have no use for". REQUIREMENT CHANGE: the 2026-10-03 block here
+-- tested the hold (holdId, holdFileOf, holdsFrom, holdOf, automationHeld, holdSkipAdd, HOLD_KINDS and
+-- mailboxRoute's "held"). The mailbox keeps routing exactly as before, minus that argument.
 do
-  eq("holdId: a session's hold is filed under its claude process", core.holdId({ key = "k1", session_pid = "4242" }), "4242")
-  eq("holdId: ...a number counts too", core.holdId({ key = "k1", session_pid = 4242 }), "4242")
-  eq("holdId: no process (a terminal or kitty session) -> its key", core.holdId({ key = "k1" }), "key-k1")
-  eq("holdId: a session_pid that isn't a pid -> its key", core.holdId({ key = "k1", session_pid = "12; rm" }), "key-k1")
-  eq("holdId: a key that could name a path outside the folder has none", core.holdId({ key = "../x" }), nil)
-  eq("holdId: nothing to go on", core.holdId(nil), nil)
-
-  eq("holdFileOf: the fleet freeze", core.holdFileOf(".fleet"), "fleet")
-  eq("holdFileOf: a session's process", core.holdFileOf("4242"), "pid")
-  eq("holdFileOf: a session's key", core.holdFileOf("key-k1"), "key")
-  eq("holdFileOf: a torn write is nobody's hold", core.holdFileOf("4242.tmp.77"), nil)
-  eq("holdFileOf: ...nor is . or ..", core.holdFileOf(".."), nil)
-  eq("holdFileOf: ...nor a stranger", core.holdFileOf("notes.txt"), nil)
-
-  local h = core.holdsFrom({ ".", "..", "4242", "key-k2", "4242.tmp.9", "junk" })
-  check("holdsFrom: the ids, no freeze", h.fleet == false and h.ids["4242"] == true and h.ids["key-k2"] == true
-        and h.ids["4242.tmp.9"] == nil and h.ids.junk == nil)
-  check("holdsFrom: .fleet is the freeze", core.holdsFrom({ ".fleet" }).fleet == true)
-  check("holdsFrom: an empty folder holds nothing", next(core.holdsFrom({}).ids) == nil and core.holdsFrom(nil).fleet == false)
-
-  local held = { key = "a", session_pid = "4242" }
-  local cleared = { key = "a2", session_pid = "4242" }   -- the same process after a /clear
-  local free = { key = "b", session_pid = "5150" }
-  local kitty = { key = "k2", editor = "kitty" }
-  eq("holdOf: a session on hold", core.holdOf(h, held), "session")
-  eq("holdOf: ...still on hold after a /clear (same process, new key)", core.holdOf(h, cleared), "session")
-  eq("holdOf: another session isn't", core.holdOf(h, free), nil)
-  eq("holdOf: a kitty session held by its key", core.holdOf(h, kitty), "session")
-  eq("holdOf: a remote session's pid is another machine's -- never a local hold",
-     core.holdOf(h, { key = "r", session_pid = "4242", remote = { host = "box" } }), nil)
-  local frozen = core.holdsFrom({ ".fleet" })
-  eq("holdOf: a frozen fleet holds every session", core.holdOf(frozen, free), "fleet")
-  eq("holdOf: ...remote ones too", core.holdOf(frozen, { key = "r", remote = { host = "box" } }), "fleet")
-  eq("holdOf: ...and an effect with no session at all (a routine's spawn)", core.holdOf(frozen, { name = "nightly" }), "fleet")
-  eq("holdOf: no holds read yet", core.holdOf(nil, held), nil)
-
-  local a1, s1 = core.automationHeld(h, held, "continue")
-  check("automationHeld: a held session's auto-continue stands down", a1 == true and s1 == "session")
-  check("automationHeld: ...a feed, a rule, a respawn, a resume, the drain close too",
-        core.automationHeld(h, held, "feed") and core.automationHeld(h, held, "rule") and core.automationHeld(h, held, "respawn")
-        and core.automationHeld(h, held, "resume") and core.automationHeld(h, held, "drain"))
-  eq("automationHeld: a mailbox message is never held (it waits in the inbox)", core.automationHeld(h, held, "mailbox"), false)
-  eq("automationHeld: a free session acts", core.automationHeld(h, free, "continue"), false)
-  local a2, s2 = core.automationHeld(frozen, free, "schedule")
-  check("automationHeld: a frozen fleet holds a scheduled spawn", a2 == true and s2 == "fleet")
-  eq("automationHeld: the `why` a held effect returns", core.AUTOMATION_HELD, "on hold")
-
-  -- the held list: a repeat bumps its count instead of adding a row; the newest `cap` are kept
-  local list = {}
-  check("holdSkipAdd: a first skip is a new row", core.holdSkipAdd(list, { at = 10, kind = "continue", summary = "continue" }, 3) == true)
-  check("holdSkipAdd: the same send again bumps it", core.holdSkipAdd(list, { at = 20, kind = "continue", summary = "continue" }, 3) == false
-        and #list == 1 and list[1].count == 2 and list[1].at == 20 and list[1].first == 10)
-  core.holdSkipAdd(list, { at = 30, kind = "feed", summary = "feed 'a'" }, 3)
-  core.holdSkipAdd(list, { at = 40, kind = "feed", summary = "feed 'b'" }, 3)
-  core.holdSkipAdd(list, { at = 50, kind = "rule", summary = "nudge" }, 3)
-  check("holdSkipAdd: only the newest `cap` are kept", #list == 3 and list[1].summary == "feed 'a'" and list[3].kind == "rule")
-  check("holdSkipAdd: a send already listed further up is bumped and becomes the newest, not a second row",
-        core.holdSkipAdd(list, { at = 60, kind = "feed", summary = "feed 'a'" }, 3) == false
-        and #list == 3 and list[3].summary == "feed 'a'" and list[3].count == 2 and list[3].at == 60)
-
-  -- the mailbox: a held session's messages wait (not typed, not handed over at its turn end)
+  check("no hold: core keeps none of it", core.holdId == nil and core.holdFileOf == nil and core.holdsFrom == nil
+        and core.holdOf == nil and core.automationHeld == nil and core.holdSkipAdd == nil and core.HOLD_KINDS == nil
+        and core.AUTOMATION_HELD == nil and core.HOLD_FLEET == nil and core.automationKindLabel == nil)
   local idle = { key = "m1", status = "done", editor = "kitty" }
   eq("mailboxRoute: an idle session's message is typed", core.mailboxRoute(idle, 1), "type")
-  eq("mailboxRoute: ...but not while it's on hold", core.mailboxRoute(idle, 1, true), "held")
-  eq("mailboxRoute: ...even mid-turn (its turn end hands nothing over either)",
-     core.mailboxRoute({ key = "m1", status = "working" }, 1, true), "held")
-  eq("mailboxRoute: nothing waiting, nothing to hold", core.mailboxRoute(idle, 0, true), nil)
-
-  local hk = {}; for _, k in ipairs(core.HOLD_KINDS) do hk[k.kind] = k.label end
-  check("HOLD_KINDS: the senders outside the door have Trace labels", hk.drain and hk.schedule and hk.merge)
+  eq("mailboxRoute: mid-turn its turn end hands it over", core.mailboxRoute({ key = "m1", status = "working" }, 1), "turn-end")
+  eq("mailboxRoute: nothing waiting, nothing to route", core.mailboxRoute(idle, 0), nil)
   local fkeys = {}; for _, ft in ipairs(core.FEATURES) do fkeys[ft.key] = ft end
-  check("hold: FEATURES lists the hands-off hold, flagged new", fkeys.hold ~= nil and fkeys.hold.new == true
-        and fkeys.hold.title == "Hands-off hold")
+  check("no hold: FEATURES has no hands-off hold", fkeys.hold == nil)
 end
 
 -- ---- My List: playbooks as sources (2026-10-03) ----
@@ -15227,14 +15164,9 @@ do
         view and view.label:find("main is red", 1, true) and view.tip:find("FAIL - two", 1, true)
         and view.tip:find(SHA:sub(1, 7), 1, true) and view.tip:find("make test", 1, true))
 
-  -- a hold on the repo, or the freeze, stands it down
-  local tiles = { { key = "a1", repoKey = "/r/A/.git", session_pid = "11" }, { key = "b1", repoKey = "/r/B/.git", session_pid = "22" } }
-  eq("mainGreenHeld: nothing held", core.mainGreenHeld({ fleet = false, ids = {} }, tiles, "/r/A/.git"), false)
-  local h, scope = core.mainGreenHeld({ fleet = true, ids = {} }, tiles, "/r/A/.git")
-  check("mainGreenHeld: the fleet freeze", h == true and scope == "fleet")
-  local h2, scope2, who = core.mainGreenHeld({ fleet = false, ids = { ["11"] = true } }, tiles, "/r/A/.git")
-  check("mainGreenHeld: a session of the repo on hold", h2 == true and scope2 == "session" and who and who.key == "a1")
-  eq("mainGreenHeld: a held session of ANOTHER repo doesn't", core.mainGreenHeld({ fleet = false, ids = { ["22"] = true } }, tiles, "/r/A/.git"), false)
+  -- 2026-11-19: "a hold on the repo, or the freeze, stands it down" (mainGreenHeld) went with the
+  -- hands-off hold -- REQUIREMENT CHANGE
+  check("mainGreenHeld is gone with the hold", core.mainGreenHeld == nil)
 
   -- a repo whose gate routine is gone loses its flag
   local st = { ["/r/A/.git"] = rec2, ["/r/Z/.git"] = { state = "red", folder = "/r/Z" } }
@@ -15448,16 +15380,11 @@ do
   a = core.runStep(r6, { now = 3 })
   eq("live run: ...and opens the next", a.act, "open"); eq("live run: ...item 2", a.n, 2)
 
-  -- a hold or a fleet freeze holds the run where it is
+  -- 2026-11-19: "a hold or a fleet freeze holds the run where it is" went with the hands-off hold
+  -- (REQUIREMENT CHANGE); a finished item is still done on the next step
   local r7 = core.runNew(items(), { "t1", "o1" }, ctx)
-  a = core.runStep(r7, { now = 1, held = "fleet" })
-  eq("hold: a frozen fleet opens nothing", a.act, "held")
-  eq("hold: ...the item still queued", r7.items[1].state, "queued")
-  eq("hold: ...the run still running (it goes on when thawed)", r7.phase, "running")
   core.runStep(r7, { now = 2 }); core.runItemOpened(r7, 1, { id = "S7" }, 3)
-  eq("hold: a held session's finished item waits", core.runStep(r7, { now = 20, held = "session", tile = turnDone(10), ticked = true }).act, "held")
-  eq("hold: ...still open", r7.items[1].state, "open")
-  eq("hold: lifted -> done", core.runStep(r7, { now = 21, tile = turnDone(10), ticked = true }).act, "done")
+  eq("run: a finished item is done", core.runStep(r7, { now = 21, tile = turnDone(10), ticked = true }).act, "done")
 
   -- a batch in the repo pauses it before the next item opens
   local r8 = core.runNew(items(), { "t1" }, ctx)

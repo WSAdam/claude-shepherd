@@ -115,12 +115,11 @@ nothing running between events. The dashboard is a *reader* of status files; the
 what Adam decides. Every answer the panel gives (an approval, a held question's answer, a merge
 decision, a batch's grant) is a file bound to its request's nonce read from disk and claimed with
 `mv`. Not every hook is fire-and-forget any more: the Stop hook may print a block decision (a
-mailbox message, a notes request, a Stop guard), and it reads `cc-hold/` first so a held session
-gets none of them. Each writer owns its own files: the hooks (`cc-status/`, a Stop guard's
+mailbox message, a notes request, a Stop guard). Each writer owns its own files: the hooks (`cc-status/`, a Stop guard's
 `cc-guard/<key>.<guard>`); the scripts sessions run (`cc-merge.sh` → `cc-merge/`, including the
 `<key>.notyet` a Not yet leaves; `cc-fleet.sh` → a batch's proposal; `cc-lesson.sh` → `cc-lesson/`;
 `cc-run.sh` → reports in `cc-run/`; `cc-ticket.sh`, `cc-send.sh`, `cc-pin.sh`);
-and the panel (decision and answer files, a batch's own state, `cc-hold/`, `cc-main-green.json`,
+and the panel (decision and answer files, a batch's own state, `cc-main-green.json`,
 `cc-keep/`, checklist runs). **[DECISION D-6, revised]**
 
 ## 4. Status model
@@ -139,8 +138,7 @@ and the panel (decision and answer files, a batch's own state, `cc-hold/`, `cc-m
   off): its folder, Claude Code's own busy/idle, and "restart it to get live status". It must stay
   alive and unmatched for 15 s first and is never an `sdk-*` headless run (Shepherd's own `claude -p`
   included). No sender, count, needs-you verdict or restart snapshot sees one.
-- Badges ride on top of the status: **HOLD** (one session on hands-off hold) or **FROZEN** (the
-  fleet is frozen), D-23; **⚠ main is red** on every card of a repo whose scheduled main-green
+- Badges ride on top of the status: **⚠ main is red** on every card of a repo whose scheduled main-green
   check last failed, with the failing lines in its tooltip.
 - Tiles **dim** after ~90s of silence (a crash), **disappear** on SessionEnd.
 - A `done` tile **self-heals to `working`** when the transcript shows the model resumed, so an
@@ -287,8 +285,7 @@ Around a merge Shepherd gathers more of its own evidence (D-5):
   merge in the repo's gate lane, after checking the checkout is on its branch with no uncommitted
   tracked changes. Red raises one banner (and a phone push with escalation push on), **⚠ main is
   red** on every card of the repo and an entry in the coach's log; the next green clears it. A run
-  that couldn't run or timed out changes nothing, and a fleet freeze or a held session of the repo
-  skips a scheduled run. It fires on schedule only with `schedules.enabled`; **Run** (Adam's own
+  that couldn't run or timed out changes nothing. It fires on schedule only with `schedules.enabled`; **Run** (Adam's own
   click) works regardless.
 
 Jump lands on the **exact tab** after all — through the tab bridge, not the Claude URI. The bridge's
@@ -326,7 +323,6 @@ its task with SendMessage, which runs under the unit's own permissions. Stop end
   `SHIPPED`), any `CLAUDE.md` or `methodology/`, `DECISIONS.md`, `defaults/`, CI config,
   migrations, lockfiles or `.claude/settings*`, deletes a tracked file, or the checker passed it
   with a high-severity finding. `merge.grantWaitsFor` picks the categories; unset means all of
-  them. A hands-off hold on the unit's session, or a ❄ fleet freeze, makes it wait too (D-23).
   The card says why it waits, and Adam's own Merge click never reads any of this.
   **[DECISION D-18, revised]**
 
@@ -449,20 +445,14 @@ A mailbox message stands every guard down (it is new input, maybe the very answe
 request goes first and the guard joins it; among the guards question > fakeDone > unfinished, and
 only the first that fires speaks. Each blocks once per session and turn (question) or head sha
 (the other two), remembered in `cc-guard/<key>.<guard>`; none runs while `stop_hook_active`, in
-plan mode, in Shepherd's own internal runs, on hold, or where the panel's heartbeat is stale. Each
+plan mode, in Shepherd's own internal runs, or where the panel's heartbeat is stale. Each
 block is one `stop_guard` ledger event. This is D-3's carve-out: a guard sends back the session's
 own turn end, never another process, and the session may answer it in one line and carry on.
 **[DECISION D-22]**
 
-**Hands-off hold** (2026-10-03). **Hold** (a tile's menu, the detail panel) puts one session on
-hold, and **❄ Freeze** in the toolbar holds the fleet; the card reads HOLD or FROZEN. Every
-automatic send stands down: the automation door (auto-feed, routing, rules, auto-continue,
-respawn, a *held* row in the Trace), the drain close, scheduled spawns and the main-green check,
-a checklist run, merges on a batch grant (they wait for Adam's click), and in the hooks the Stop
-guards, the notes request and the resume wake. Each skipped send is listed on the session and
-never replayed. Mail (the mailbox, decisions, tickets) waits and goes out once the hold is lifted.
-The flags are `cc-hold/<pid>` (it survives `/clear`), `key-<key>` (no known process) and `.fleet`.
-**[DECISION D-23]**
+**Hands-off hold** (2026-10-03) put one session on hold, or the whole fleet (❄ Freeze), so no
+automatic send reached it. Removed 2026-11-19: Adam pruned the features he had no use for.
+`cc-hold/` is a leftover `uninstall.sh --purge` still deletes. **[DECISION D-23, retired]**
 
 **Playbooks and the checklist runner** (2026-10-03). **📘 Add a playbook…** on a project's My List
 tab picks a markdown checklist through the Mac's file chooser (never a path typed into the panel);
@@ -476,8 +466,8 @@ reads its box ticked and the turn didn't end as *did nothing*; any other item on
 runs `cc-run.sh done` (or `blocked`, which pauses the run). Then Shepherd sets **Adam's own
 checkmark**, shown as **✓ by run** and unchecked like any other, and only for a run Adam started;
 importing a `TODO.md` or a playbook never sets it. Three items in a row that finish nothing stop
-the run; a live-run item, a blocked report or a batch in the repo pauses it; a hold or a freeze
-holds it; one run per repo at a time. Runs are `cc-run/<id>.run.json`, written only by the panel.
+the run; a live-run item, a blocked report or a batch in the repo pauses it; one run per repo
+at a time. Runs are `cc-run/<id>.run.json`, written only by the panel.
 **[DECISION D-24]**
 
 **The coach** (2026-09-30, extended 2026-10-02/03). With `coach.enabled` (off by default) the coach
@@ -600,7 +590,6 @@ cc-inbox/<key>/                 the session mailbox
 cc-merge/<key>.json             merge requests (cc-merge.sh); <key>.notyet = the commit Adam said
                                 Not yet to; main-moved.seen = main moved notices already sent
 cc-fleet/<id>.*                 a batch: the driver's proposal, Shepherd's own state, its events
-cc-hold/                        hands-off holds: <pid>, key-<key>, .fleet
 cc-guard/<key>.<guard>          a Stop guard's once-marker (the turn, or the head sha)
 cc-lesson/<epoch>-<pid>.json    lessons sessions filed for the coach (cc-lesson.sh)
 cc-run/<id>.run.json            checklist runs (the panel's); <run>.<item>.*.json = cc-run.sh reports
@@ -617,8 +606,8 @@ cc-keep/<project>/<session>.jsonl  kept transcripts of ★ projects, plus pins.j
 ## 10. UX & interaction model
 
 - **Grid of tiles** (status, time-in-state, latest prompt, wants/why, context bar, badges such as
-  HOLD / FROZEN, ⚠ main is red and the coach's 🧭 chip), with **grey cards** in their own row under
-  the grid. Header: New, ☕ keep-awake, 🔒 lock, **❄ Freeze**, the ☰ views menu, ⚙ settings, theme.
+  ⚠ main is red and the coach's 🧭 chip), with **grey cards** in their own row under
+  the grid. Header: New, ☕ keep-awake, 🔒 lock, the ☰ views menu, ⚙ settings, theme.
 - **☰ views menu:** 🎫 Tickets, **📑 Queues**, 🔍 Filter sessions, 🔎 Find in fleet,
   📊 Fleet insights, 📜 Audit ledger (with 🗂 History), ⏰ Routines, 📝 Templates, ✦ Agents,
   🔌 MCPs & Skills, 🛡 Policy bundles, ⚙️ Automation rules, ⚡ Automation trace, **♻️ Restart
@@ -626,8 +615,7 @@ cc-keep/<project>/<session>.jsonl  kept transcripts of ★ projects, plus pins.j
 - **Detail panel** with a tab strip — Activity, Transcript, Rewind, Decisions, Usage, Changes
   (git status + diff), **User Stories** (gated on `spec/product/user-stories.md`), On purpose and
   Requirements (gated on a git repo), Agents, Queue — expensive tabs load on open; the ⋯ menu hides
-  tabs and remembers your last-open tab per project. It also carries **Hold** (with the list of
-  sends a hold skipped) and the **Seance** box (🔮 Ask).
+  tabs and remembers your last-open tab per project. It also carries the **Seance** box (🔮 Ask).
 - **🗂 History:** the ledger's sessions plus every past transcript and kept copy (📦 kept /
   📦 kept copy only), ★ to keep a project's transcripts, 🔮 Ask and ↻ Resume on each row.
 - **Coach overlay** (from a card's 🧭 chip or a session's 🧭 Coach): the waiting suggestions (Apply,
@@ -682,7 +670,7 @@ idle/auto-spawn routing targets.
    `claude -p`. Each run carries its own `--max-budget-usd` (§6), the coach's scheduled and evidence
    runs stay off until `coach.enabled`, and the evidence runs share a daily cap across repos.
 7. **Stop guards read prose** — a guard can misread a turn's last message. Each blocks at most once
-   per turn or commit, never in plan mode or on hold, and the session can answer it in one line and
+   per turn or commit, never in plan mode, and the session can answer it in one line and
    carry on; each switch is its own `stopGuards.*` key.
 
 ## 13. Verdict

@@ -48,16 +48,8 @@ local LIVE_LEASES = LEASE .. "/" .. (T .. "/repo"):gsub("[^A-Za-z0-9]", "-") .. 
 -- 2026-10-02: the Stop guards (mining round 2, A1): a guard that blocks a stop leaves a once-marker
 -- <key>.<guard> (question now; A2/A3 add theirs), so every "<key>." file there is the session's
 local GUARD = T .. "/cc-guard"
--- 2026-10-03: the hands-off hold (mining round 2, D2). A key hold (key-<key>, a session with no known
--- claude process) is the session's own. A process hold (<session_pid>) outlives a /clear -- the same
--- process ends one session and starts the next -- so both removers drop it only once that process is
--- gone. The fleet freeze (.fleet) is nobody's to reap.
-local HOLD = T .. "/cc-hold"
-local function pidOf(cmd) local p = io.popen(cmd); local s = p and p:read("*l"); if p then p:close() end; return tostring(s or "") end
-local LIVE_PID = pidOf("sleep 300 >/dev/null 2>&1 & echo $!")   -- a live stand-in for a claude process
-local DEAD_PID = pidOf("sh -c 'echo $$'")                        -- one that has exited
+-- 2026-11-19: the hands-off hold's cc-hold/ (2026-10-03) went with the hold -- REQUIREMENT CHANGE
 os.execute(('mkdir -p "%s" "%s" "%s" "%s/repo" "%s/k90" "%s" "%s" "%s" "%s" "%s"'):format(STATUS, MERGE, ASK, T, INBOX, RESUME, NOTES, PINS, LEASE, GUARD))
-os.execute(('mkdir -p "%s"'):format(HOLD))
 local function write(path, s) local f = io.open(path, "w"); if f then f:write(s); f:close() end end
 local function exists(p) local h = io.open(p, "r"); if h then h:close(); return true end; return false end
 
@@ -110,11 +102,6 @@ local function plant()
   os.execute('touch -t 202601010000 "' .. LEASE .. '/-r-main.json.tmp.4242"')
   write(GUARD .. "/" .. KEY .. ".question", "1790000000.4242\n")
   write(GUARD .. "/" .. KEY .. ".fakeDone", "1790000000.4242\n")
-  write(HOLD .. "/key-" .. KEY, '{"at":1790000000}')
-  write(HOLD .. "/key-" .. KEY .. ".tmp.5150", '{"at":')
-  write(HOLD .. "/" .. DEAD_PID, '{"at":1790000000}')
-  write(HOLD .. "/" .. LIVE_PID, '{"at":1790000000}')
-  write(HOLD .. "/.fleet", '{"at":1790000000}')
 end
 
 -- Every file above must be gone after a reap. Named for what it is, so a failure reads as
@@ -155,15 +142,9 @@ local TARGETS = {
   { "a torn write of a lease file",    LEASE .. "/-r-main.json.tmp.4242" },
   { "the question guard's once-marker", GUARD .. "/" .. KEY .. ".question" },
   { "any other Stop guard's once-marker", GUARD .. "/" .. KEY .. ".fakeDone" },
-  { "the session's key hold",          HOLD .. "/key-" .. KEY },
-  { "a torn write of it",              HOLD .. "/key-" .. KEY .. ".tmp.5150" },
-  { "the hold of a claude process that is gone", HOLD .. "/" .. DEAD_PID },
 }
--- What both removers keep. (2026-11-19: an answered decision kept for the next start went with the Inbox.)
-local KEPT = {
-  { "the hold of a live claude process (a /clear keeps it)", HOLD .. "/" .. LIVE_PID },
-  { "the fleet freeze",                               HOLD .. "/.fleet" },
-}
+-- (2026-11-19: what both removers kept -- an answered decision, a live process's hold and the fleet
+-- freeze -- went with the Inbox and the hands-off hold.)
 
 -- A second session's files must SURVIVE both reaps -- a prefix sweep must not eat the fleet.
 local OTHER = {
@@ -173,7 +154,6 @@ local OTHER = {
   RESUME .. "/k90.json", RESUME .. "/k90.plan.json",
   NOTES .. "/k90.due-at", NOTES .. "/k90.notes-asked",
   GUARD .. "/k90.question",
-  HOLD .. "/key-k90",
 }
 local function plantOther() for _, p in ipairs(OTHER) do write(p, "{}") end end
 
@@ -189,16 +169,13 @@ write(REAP_SH, ([[
   export CC_STATUS_DIR=%q CC_MERGE_DIR=%q CC_ASK_DIR=%q
   export CC_GATE_TOOLS_DIR=%q CC_APPROVED_DIR=%q CC_AUTOPILOT_DIR=%q
   export CC_POLICY_DIR=%q CC_POLICY_OVERRIDE_DIR=%q CC_AUTOMODEL_DIR=%q CC_INBOX_DIR=%q
-  export CC_RESUME_DIR=%q CC_NOTES_DIR=%q CC_PINS_DIR=%q CC_LEASE_DIR=%q CC_GUARD_DIR=%q CC_HOLD_DIR=%q
+  export CC_RESUME_DIR=%q CC_NOTES_DIR=%q CC_PINS_DIR=%q CC_LEASE_DIR=%q CC_GUARD_DIR=%q
   . %q; cc_remove %s
 ]]):format(STATUS, MERGE, ASK, T .. "/gt", T .. "/ap", T .. "/au",
-           T .. "/po", T .. "/pov", T .. "/am", INBOX, RESUME, NOTES, PINS, LEASE, GUARD, HOLD, ROOT .. "cc-lib.sh", KEY))
+           T .. "/po", T .. "/pov", T .. "/am", INBOX, RESUME, NOTES, PINS, LEASE, GUARD, ROOT .. "cc-lib.sh", KEY))
 os.execute(("bash %q >/dev/null 2>&1"):format(REAP_SH))
 for _, t in ipairs(TARGETS) do
   check("cc_remove drops " .. t[1], not exists(t[2]))
-end
-for _, t in ipairs(KEPT) do
-  check("cc_remove keeps " .. t[1], exists(t[2]))
 end
 check("cc_remove leaves the notes the session wrote (like its handoff note)", exists(NOTES .. "/" .. KEY .. ".notes.md"))
 check("cc_remove leaves the pins of a worktree that's still there (they outlive /clear)", exists(PINS .. "/live.json"))
@@ -269,7 +246,6 @@ local ENV = { CC_STATUS_DIR = STATUS, CC_MERGE_DIR = MERGE, CC_ASK_DIR = ASK,
               CC_POLICY_OVERRIDE_DIR = T .. "/pov", CC_AUTOMODEL_DIR = T .. "/am",
               CC_INBOX_DIR = INBOX, CC_RESUME_DIR = RESUME, CC_NOTES_DIR = NOTES,
               CC_PINS_DIR = PINS, CC_LEASE_DIR = LEASE, CC_GUARD_DIR = GUARD,
-              CC_HOLD_DIR = HOLD,
               CC_WORKLIST_FILE = T .. "/worklist.json", CC_LABELS_FILE = T .. "/labels.json",
               HOME = T }
 os.getenv = function(k) if ENV[k] ~= nil then return ENV[k] end; return realGetenv(k) end
@@ -292,16 +268,9 @@ hs.fs.attributes = function(path, what)
   if what then return (what == "mode") and "directory" or nil end
   return { mode = "directory" }
 end
--- 2026-10-03: whether a held claude process is still alive is asked of ps for real (FX.probeAlive,
--- with the live stand-in as its control pid)
-hs.processInfo = { processID = tonumber(LIVE_PID) }
-hs.execute = function(cmd) local p = io.popen(cmd); local s = p and p:read("*a") or ""; if p then p:close() end; return s, true end
 quiet(function() fx.removeStatus(KEY) end)
 for _, t in ipairs(TARGETS) do
   check("FX.removeStatus drops " .. t[1], not exists(t[2]))
-end
-for _, t in ipairs(KEPT) do
-  check("FX.removeStatus keeps " .. t[1], exists(t[2]))
 end
 check("FX.removeStatus leaves the notes the session wrote", exists(NOTES .. "/" .. KEY .. ".notes.md"))
 check("FX.removeStatus leaves the pins of a worktree that's still there", exists(PINS .. "/live.json"))
@@ -310,6 +279,5 @@ for _, p in ipairs(OTHER) do
   check("FX.removeStatus leaves another session's " .. p:match("[^/]+$") .. " alone", exists(p))
 end
 
-os.execute('kill ' .. LIVE_PID .. ' 2>/dev/null')
 os.execute('rm -rf "' .. T .. '"')
 finish()

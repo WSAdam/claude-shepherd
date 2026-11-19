@@ -3,7 +3,7 @@
 -- in its MAIN checkout, in the repo's one gate lane (behind every run that judges a merge), at a time
 -- Adam sets. A red run raises ONE banner, a "main is red" flag on every card of that repo (with the
 -- failing lines) and a coach-log entry; the next green run clears the flag. A run that couldn't run
--- or timed out is never red. A fleet freeze, or a session of that repo on hold (D2), stands it down.
+-- or timed out is never red. (2026-11-19: the hands-off hold that could stand it down is gone.)
 -- The verdict is kept in a file, so a reload neither forgets the flag nor banners it again.
 -- Loads the real claude-dashboard.lua under a stubbed hs (the tests/gateblame.test.lua harness): git
 -- answers are canned, hs.task and hs.timer are recorders, and the test plays the runner by writing
@@ -25,9 +25,9 @@ local T
 do local p = io.popen("mktemp -d 2>/dev/null"); T = p and p:read("*l"); if p then p:close() end end
 if not T or T == "" then check("mktemp a fixture dir", false); finish() end
 T = T:gsub("/+$", "")
-local SCR, HOLD = T .. "/scratch", T .. "/hold"
+local SCR = T .. "/scratch"
 -- hs.fs.mkdir is a stub here: the coach's folder exists up front, as it does once Shepherd has run
-os.execute('mkdir -p "' .. T .. '/status" "' .. T .. '/.claude/cc-merge" "' .. T .. '/.claude/cc-coach" "' .. SCR .. '" "' .. HOLD .. '"')
+os.execute('mkdir -p "' .. T .. '/status" "' .. T .. '/.claude/cc-merge" "' .. T .. '/.claude/cc-coach" "' .. SCR .. '"')
 local now = os.time()
 local function write(path, s) local f = io.open(path, "w"); f:write(s); f:close() end
 local function read(path) local f = io.open(path, "r"); if not f then return nil end local s = f:read("*a"); f:close(); return s end
@@ -55,7 +55,7 @@ write(T .. "/status/s1.json", string.format(
 
 local realGetenv = os.getenv
 local ENV = { CC_STATUS_DIR = T .. "/status", CC_WORKLIST_FILE = T .. "/worklist.json", CC_LABELS_FILE = T .. "/labels.json",
-              CC_SCRATCH_DIR = SCR, SHELL = "/bin/zsh", HOME = T, CC_SCHEDULES_FILE = SCHED, CC_HOLD_DIR = HOLD,
+              CC_SCRATCH_DIR = SCR, SHELL = "/bin/zsh", HOME = T, CC_SCHEDULES_FILE = SCHED,
               CC_MAIN_GREEN_FILE = T .. "/main-green.json" }
 os.getenv = function(k) if ENV[k] then return ENV[k] end return realGetenv(k) end
 
@@ -261,34 +261,11 @@ fx._mainGreen.state = nil   -- what a reload starts with
 tick()
 check("after a reload the flag is read back from disk, with no banner", flag() ~= nil and #banners == 2)
 
--- ---- the fleet freeze, or a session of the repo on hold, stands it down ----
+-- ---- 2026-11-19: the hands-off hold is gone ----
+-- REQUIREMENT CHANGE (Adam: "prune features I have no use for"): the 2026-10-03 block here had a fleet
+-- freeze, or a session of the repo on hold, stand the check down. Nothing asks a hold any more.
 local n = #tasks("GATE-R")
-write(HOLD .. "/.fleet", "{}")
-refire()
-tick()
-check("frozen: the routine is spent but nothing runs", #tasks("GATE-R") == n and fired("main-green-R") ~= nil)
-local fl = (fx._hold.skipped or {})[".fleet"] or {}
-check("...and the skipped check is listed on the fleet's list", #fl >= 1 and fl[#fl].kind == "schedule")
-os.remove(HOLD .. "/.fleet")
-write(HOLD .. "/901", "{}")
-refire()
-tick()
-check("a session of the repo on hold: nothing runs", #tasks("GATE-R") == n)
-local sl = (fx._hold.skipped or {})["901"] or {}
-check("...and the skipped check is listed on that session", #sl >= 1 and sl[#sl].kind == "schedule")
-os.remove(HOLD .. "/901")
--- queued behind a merge gate when the freeze comes: it leaves the lane
-fx._mergeGates["busy|y"] = { state = "running", commonDir = "/r/R/.git", at = now, nonce = "busy", task = {}, command = "MERGE-GATE" }
-refire()
-tick()
-check("queued again behind a merge gate", (fx._mainGreenRuns["/r/R/.git"] or {}).state == "queued")
-write(HOLD .. "/.fleet", "{}")
-tick()
-check("...a freeze drops it from the lane", fx._mainGreenRuns["/r/R/.git"] == nil)
-os.remove(HOLD .. "/.fleet")
-fx._mergeGates["busy|y"] = nil
-tick()
-check("...so the lane freeing starts nothing", #tasks("GATE-R") == n)
+check("no hold: the check asks no hold", fx._hold == nil and core.mainGreenHeld == nil)
 
 -- ---- Run on the board: runs the check now, never spawns ----
 quiet(function() panelCb({ body = json.encode({ a = "schedule-run-now", v = "main-green-R" }) }) end)

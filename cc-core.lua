@@ -14376,99 +14376,6 @@ function M.automationDryRun(cfg, kind)
   return false
 end
 
--- ---- Hands-off hold (2026-10-03, mining round 2 D2) ----
--- Adam puts one session on hold (its tile menu or detail panel) or freezes the whole fleet (the
--- toolbar's ❄ Freeze), and Shepherd's automatic sends stand down. A hold is a flag in ~/.claude/cc-hold/:
--- <session_pid> (the claude process, so a /clear -- the same process, a new session -- keeps it),
--- key-<key> for a session whose process isn't known (a terminal or kitty one), and .fleet for the
--- freeze. The folder is read each tick, never watched. FX.automationAct honors it -- a "held" row in the
--- Trace -- and so does every sender outside that door (FX.holdStops): the drain close, a scheduled
--- routine's spawn, a merge on a batch grant, and in the shell the Stop guards, the notes request, the
--- mail a turn end or start hands over, and the resume wake (cc_held, cc-lib.sh). A held send is
--- skipped and listed, never replayed. The mailbox itself is never held: a message is written and
--- waits, and is handed over once the hold is lifted. KEEP THE NAMES IN SYNC with cc_held / cc_hold_prune.
-M.AUTOMATION_HELD = "on hold"   -- the `why` FX.automationAct returns when a hold stood the effect down
-M.HOLD_FLEET = ".fleet"
-M.HOLD_SKIPPED_CAP = 20         -- the skipped sends listed per session, newest kept
--- The senders outside FX.automationAct a hold stands down, by their kind in the Trace.
-M.HOLD_KINDS = {
-  { kind = "drain",    label = "Drain close" },
-  { kind = "schedule", label = "Scheduled routine" },
-  { kind = "merge",    label = "Merge on a batch grant" },
-}
--- A kind's name in the Trace and the held list: its AUTOMATION_KINDS or HOLD_KINDS label, else itself.
-function M.automationKindLabel(kind)
-  for _, k in ipairs(M.AUTOMATION_KINDS) do if k.kind == kind then return k.label end end
-  for _, k in ipairs(M.HOLD_KINDS) do if k.kind == kind then return k.label end end
-  return tostring(kind or "?")
-end
--- The name a session's hold is filed under: its claude process, else "key-<key>"; nil when neither
--- can name a file in the folder.
-function M.holdId(it)
-  if type(it) ~= "table" then return nil end
-  local pid = tostring(it.session_pid or ""):match("^%d+$")
-  if pid then return pid end
-  if M.mailboxKeyOk(it.key) then return "key-" .. it.key end
-  return nil
-end
--- What a cc-hold/ file is: "fleet", "pid", "key", or nil (a torn write, ., .., a stranger).
-function M.holdFileOf(name)
-  if type(name) ~= "string" then return nil end
-  if name == M.HOLD_FLEET then return "fleet" end
-  if name:match("^%d+$") then return "pid" end
-  local key = name:match("^key%-(.+)$")
-  if key and M.mailboxKeyOk(key) and not key:find("%.tmp%.") then return "key" end
-  return nil
-end
--- The folder's names -> { fleet = bool, ids = { [holdId] = true } }.
-function M.holdsFrom(names)
-  local h = { fleet = false, ids = {} }
-  for _, n in ipairs(type(names) == "table" and names or {}) do
-    local kind = M.holdFileOf(n)
-    if kind == "fleet" then h.fleet = true elseif kind then h.ids[n] = true end
-  end
-  return h
-end
--- Is this session held? "fleet" (the freeze holds everything, an effect with no session too),
--- "session" (its own hold), or nil. A remote session's pid is another machine's: only the freeze.
-function M.holdOf(holds, it)
-  if type(holds) ~= "table" then return nil end
-  if holds.fleet == true then return "fleet" end
-  if type(it) ~= "table" or it.remote or type(holds.ids) ~= "table" then return nil end
-  local id = M.holdId(it)
-  if id and holds.ids[id] then return "session" end
-  return nil
-end
--- Is `kind` held for this session? true plus the scope ("session" / "fleet"), or false. Never the
--- mailbox: its message is written and waits for the hold to lift (M.mailboxRoute says "held").
-function M.automationHeld(holds, it, kind)
-  if kind == "mailbox" then return false end
-  local scope = M.holdOf(holds, it)
-  if scope then return true, scope end
-  return false
-end
--- List a skipped send e = { at, kind, summary, by } in `list` (oldest first). One already listed
--- (same kind and summary) is bumped -- count, at -- and moved to the end, and returns false; anything
--- else is a new row (true). The newest `cap` are kept. Mutates list.
-function M.holdSkipAdd(list, e, cap)
-  if type(list) ~= "table" or type(e) ~= "table" then return false end
-  for i, r in ipairs(list) do
-    if r.kind == e.kind and tostring(r.summary or "") == tostring(e.summary or "") then
-      r.count, r.at = (r.count or 1) + 1, e.at
-      table.remove(list, i)
-      list[#list + 1] = r
-      return false
-    end
-  end
-  local row = {}
-  for k, v in pairs(e) do row[k] = v end
-  row.first, row.count = row.first or row.at, row.count or 1
-  list[#list + 1] = row
-  cap = tonumber(cap) or M.HOLD_SKIPPED_CAP
-  while #list > cap do table.remove(list, 1) end
-  return true
-end
-
 -- What's in dry run, for the Trace's banner: { all, on, features = { feature, ... } } (Settings order).
 function M.dryRunState(cfg)
   cfg = type(cfg) == "table" and cfg or {}
@@ -14649,13 +14556,11 @@ end
 -- Code window shared with other Claude tabs, where nothing may be typed: it waits for the
 -- session's next turn end or start, and the card says so), or "type" (idle where Shepherd may
 -- type: FX.typeWhenReady types it once the session is ready).
--- 2026-10-03 (D2): `held` (the session is on hold, or the fleet frozen) -> "held": nothing is typed,
--- and its turn end and start hand nothing over (cc_held) -- the message waits for the hold to lift.
 -- 2026-10-03 (E2): `typeable` (optional) is how many of the n may be typed; a turn-end-only message
 -- (the main-moved notice) may not, so an idle session holding only those is "waiting" too.
-function M.mailboxRoute(it, n, held, typeable)
+-- (2026-11-19: the `held` argument went with the hands-off hold.)
+function M.mailboxRoute(it, n, typeable)
   if type(it) ~= "table" or (tonumber(n) or 0) <= 0 or it.remote then return nil end
-  if held then return "held" end
   if it.status == "working" or it.status == "approval" or it.gate == "waiting" then return "turn-end" end
   if typeable ~= nil and (tonumber(typeable) or 0) <= 0 then return "waiting" end
   if M.keystrokeBlocked(it) then return "waiting" end
@@ -19255,7 +19160,7 @@ end
 -- Then -- and only for a run Adam started -- M.worklistRunCheck sets HIS checkmark (done, doneTs,
 -- doneBy = "run:<id>"). That is the one narrow carve-out from the HARD RULE: importing still never
 -- sets done/doneTs. Three items in a row that finish nothing stop the run; a live-run item or a
--- blocked report pauses it and tells Adam; a hold or a fleet freeze holds it where it is; one run
+-- blocked report pauses it and tells Adam; one run
 -- per repo, and none while a batch runs there. The run is ~/.claude/cc-run/<id>.run.json, written
 -- only by Shepherd; cc-run.sh leaves reports beside it. These are the pure halves; FX does the I/O.
 do
@@ -19417,19 +19322,16 @@ do
   end
 
   -- One tick of a run: what happens next, given what FX saw. Mutates run.
-  -- facts = { now, held = "fleet"|"session"|nil, batch = a batch runs in the repo,
+  -- facts = { now, batch = a batch runs in the repo,
   --           tile = the current item's session card (nil: not seen), ticked = its file line's box
   --           (file items, read only once the turn is over) }.
-  -- Returns { act, n?, why?, notify? }: idle (not running) | held (nothing moves) | wait | open (open
+  -- Returns { act, n?, why?, notify? }: idle (not running) | wait | open (open
   -- item n's tab) | done (item n finished: check it off, close its tab) | nothing (item n ended
   -- without finishing; the run moves on) | pause | stop | finished.
   function M.runStep(run, facts)
     if type(run) ~= "table" or run.phase ~= "running" or type(run.items) ~= "table" then return { act = "idle" } end
     facts = type(facts) == "table" and facts or {}
     local now = tonumber(facts.now) or 0
-    if facts.held then
-      return { act = "held", why = (facts.held == "fleet") and "the fleet is frozen" or "its session is on hold" }
-    end
     local cur = run.items[tonumber(run.cur) or 0]
     if cur and cur.state == "opening" then return { act = "wait", n = cur.n } end
     if cur and cur.state == "open" then
@@ -23196,8 +23098,7 @@ end
 -- main's commit under test, and the run is couldn't-run -- then prints the sha it tests.
 -- M.mainGreenVerdict folds a finished run into the repo's record: red once (one banner, one coach-log
 -- entry), red again quietly, and the next green clears it; a run that couldn't run or timed out says
--- nothing about main and changes nothing. Opt-in: nothing runs until Adam adds a gate routine. A
--- fleet freeze or a held session of the repo stands it down (M.mainGreenHeld).
+-- nothing about main and changes nothing. Opt-in: nothing runs until Adam adds a gate routine.
 M.MAIN_GREEN_SHA_TAG = "@@main-sha"
 M.MAIN_GREEN_LINES = 12          -- failing lines kept on the record (and the card's tooltip)
 M.MAIN_GREEN_TAIL_LINES = 8      -- ...or, when none matches a failure shape, the log's last lines
@@ -23285,20 +23186,6 @@ function M.mainRedView(rec)
   tip = tip .. "\nChecked in the main checkout by the routine '" .. tostring(rec.routine or "?")
     .. "'; the flag clears on its next green run."
   return { label = "⚠ " .. b .. " is red", tip = tip }
-end
-
--- Does a hold stand the check down? The fleet freeze, or any session of the repo (a tile whose
--- repoKey is its common dir) on hold. true + scope ("fleet"/"session") + the held tile, or false.
-function M.mainGreenHeld(holds, tiles, commonDir)
-  if type(holds) ~= "table" then return false end
-  if holds.fleet == true then return true, "fleet", nil end
-  if type(commonDir) ~= "string" or commonDir == "" then return false end
-  for _, it in ipairs(type(tiles) == "table" and tiles or {}) do
-    if type(it) == "table" and not it.remote and it.repoKey == commonDir and M.holdOf(holds, it) == "session" then
-      return true, "session", it
-    end
-  end
-  return false
 end
 
 -- A repo no gate routine checks any more keeps no flag: records whose routine folder is gone drop.
@@ -26919,9 +26806,6 @@ M.FEATURES = {
   { key = "alwaysask", cat = "Control", new = true, title = "Always-ask commands",
     what = "git push, rm -rf, history rewrites (reset --hard, clean -f, branch -D, worktree remove --force, checkout -- .), any publish, gh release create, gh pr merge and a Cloudflare production deploy (wrangler deploy, through npx or pnpm dlx too, and npm run deploy) wait for your click on the card, even with the gate off, and no autopilot, auto-allow, repeat approval or bundle can pass them. With Shepherd closed, Claude Code's own prompt asks instead. Add your own in Settings.",
     why = "The commands you can't take back never run on autopilot -- even inside cd x && ..., sh -c or sudo." },
-  { key = "hold", cat = "Control", new = true, title = "Hands-off hold",
-    what = "Hold in a tile's menu or the detail panel puts one session on hold, and ❄ Freeze in the toolbar holds the whole fleet: Shepherd types nothing into it and acts on nothing -- no auto-feed, routing, rules, auto-continue, respawn, resume, drain close, Stop guard or notes request, no scheduled routine, no merge on a batch grant (those wait for your click). Each skipped send is listed on the session, never replayed. Mail from other sessions, tickets and your answers waits and arrives once you lift it. A HOLD badge marks the tile, and the hold survives /clear.",
-    why = "Take over a session, or stop everything at once, without Shepherd typing into it behind your back -- and see afterwards what it would have done." },
   { key = "fence", cat = "Control", new = true, title = "Worktree fence",
     what = "A session can't edit files in another worktree of its own repo, or run git that changes one (git -C <other> commit, cd <other> && git add, --work-tree, GIT_DIR=...). Read-only git (status, log, diff) still works, and a session in the main checkout may change main. Its own approved merge into main is the one exception.",
     why = "Parallel units stay in their own lanes: a slip of a path never lands one unit's change in another's branch -- whatever the gate or its permission mode says." },
@@ -26971,7 +26855,7 @@ M.FEATURES = {
     what = "When a merge's test gate goes red, Shepherd runs the same gate on a scratch worktree at the merge-base (once per merge-base, behind any gate that judges a merge), and the review splits the failing lines: already failing on main, or new in this branch. It's information only: a red gate stays red, and a run on main that couldn't finish counts on neither side.",
     why = "A unit cut from a red main no longer takes the blame for main's failures, and a real regression isn't waved off as old." },
   { key = "maingreen", cat = "Control", new = true, title = "Main-green check",
-    what = "A routine with the action \"Check main is green\" runs a repo's merge gate in its main checkout at the time you set, in the repo's gate lane behind any merge. When main goes red you get one banner, the repo's card shows ⚠ main is red with the failing lines in its tooltip, and the coach's log notes it; the next green run clears the flag. A run that couldn't run (uncommitted changes, another branch checked out, a busy suite) or timed out never counts as red, and a fleet freeze or a held session of the repo skips it.",
+    what = "A routine with the action \"Check main is green\" runs a repo's merge gate in its main checkout at the time you set, in the repo's gate lane behind any merge. When main goes red you get one banner, the repo's card shows ⚠ main is red with the failing lines in its tooltip, and the coach's log notes it; the next green run clears the flag. A run that couldn't run (uncommitted changes, another branch checked out, a busy suite) or timed out never counts as red.",
     why = "A main that broke between merges is caught on your schedule, not by the next unit's red gate." },
   { key = "reqs", cat = "Control", new = true, title = "Requirement ids and merge receipts",
     what = "Every merge review carries a receipt: the source (the batch, the REQ ids the request names, or the session's first prompt), the requester's words, the tests it changed by layer, the gate, red-first and checker evidence, and the known issues from cc-merge.sh request --known-issues. The receipt is display only.",
@@ -27027,7 +26911,7 @@ M.FEATURES = {
     what = "📘 Add a playbook… on a project's My List tab picks any markdown checklist on this Mac. Its `- [ ]` lines import like TODO.md's, grouped under the file's name, and its ✓ auto and ▶ live run badges follow the file as it changes. Remove playbook stops the import and keeps its items to be verified.",
     why = "A release or deploy checklist you keep outside the repo sits in the same list you verify everything else in." },
   { key = "runner", cat = "Control", new = true, title = "Run selected",
-    what = "▶ Run… on a project's My List tab: pick open items (TODO.md lines, playbook lines, your own) and Run selected works through them one at a time, each in a fresh session in the repo's main checkout, its brief typed into a new tab for you to send. A file line counts once its box is ticked and the turn did something; your own item once its session reports done with cc-run.sh. Then the item gets your checkmark, shown as ✓ by run (uncheck it as usual). Three in a row that finish nothing stop the run; a live-run item, a blocked report, a hold or a freeze pauses it.",
+    what = "▶ Run… on a project's My List tab: pick open items (TODO.md lines, playbook lines, your own) and Run selected works through them one at a time, each in a fresh session in the repo's main checkout, its brief typed into a new tab for you to send. A file line counts once its box is ticked and the turn did something; your own item once its session reports done with cc-run.sh. Then the item gets your checkmark, shown as ✓ by run (uncheck it as usual). Three in a row that finish nothing stop the run; a live-run item or a blocked report pauses it.",
     why = "A checklist of small jobs gets worked through while you verify, instead of you starting each session by hand." },
   { key = "stories", cat = "Control", new = true, title = "User stories",
     what = "When a project has spec/product/user-stories.md, a gated tab shows its stories by capability area — add, edit, and save them in place.",

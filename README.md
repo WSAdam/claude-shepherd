@@ -117,7 +117,7 @@ the fleet idle alert; every other automatic behaviour here waits for its switch.
 - [**Automation rules**](docs/automation.md#automation-rules): when a session finishes, errors or
   stalls, log it, relabel it, nudge it, continue it or feed its queue.
 - [**Automation dry run & trace**](docs/automation.md#dry-run-and-the-automation-trace): see what
-  automation would do, did, or refused and why. [**Hands-off hold**](docs/automation.md#hands-off-hold): stop it for a session, or ❄ freeze the fleet.
+  automation would do, did, or refused and why.
 - [**Routines**](docs/automation.md#routines): spawn a session, push a digest, or run a [**Main-green check**](docs/merging-and-batches.md#is-main-still-green-a-scheduled-check) on a cron schedule.
 - [**Coach**](docs/automation.md#the-coach): a read-only Sonnet reads a repo's last 10 sessions and
   suggests `CLAUDE.md` edits with evidence, and auto-memory changes (backed up, with Undo). A card starts it;
@@ -293,10 +293,10 @@ Full detail: [docs/approvals-and-policies.md](docs/approvals-and-policies.md#the
 |------|--------------|
 | [Install](docs/install.md) | Install, upgrade, uninstall, what the installer changes, the tab bridge, the Dock launcher |
 | [Fleet](docs/fleet.md) | Statuses, grey cards, project cards, Instances, leases, restart in place and its outcomes, the detail panel and its tabs, search, groups, My List, playbooks, Run selected |
-| [Controls](docs/controls.md) | Clicks and menus, detail-panel buttons, Seance, Hold and ❄ Freeze, pinned links, shared windows, spawning, hotkeys, Stream Deck, awake and lock |
+| [Controls](docs/controls.md) | Clicks and menus, detail-panel buttons, Seance, pinned links, shared windows, spawning, hotkeys, Stream Deck, awake and lock |
 | [Approvals and policies](docs/approvals-and-policies.md) | The safety model, the gate, always-ask commands, the worktree fence, policies, questions, the three Stop guards |
 | [Merging and batches](docs/merging-and-batches.md) | Worktree tabs, ready to merge, gates, gate blame, the main-green check, the checker, red-first, receipts, batches, brief pre-flight, grant grading, the overlap radar, main moved, the demo, the tab bridge |
-| [Automation](docs/automation.md) | When automation types, dry run, the hands-off hold, queue and packets, queue hold and the Queues view, templates, respawn, notes, the mailbox, cc-send, tickets, resume, rules, routines, the coach, the fleet idle alert, A/B compare |
+| [Automation](docs/automation.md) | When automation types, dry run, queue and packets, queue hold and the Queues view, templates, respawn, notes, the mailbox, cc-send, tickets, resume, rules, routines, the coach, the fleet idle alert, A/B compare |
 | [Usage and cost](docs/usage-and-cost.md) | Context bars, plan usage, cost, commits, where the time went, the audit ledger and its views, past sessions and Resume, kept transcripts |
 | [Providers and integrations](docs/providers-and-integrations.md) | Providers and models, agent profiles, the find-only audit, MCPs and skills, Remote Control, the SSH bridge |
 | [Make it yours](docs/customizing.md) | Layouts, themes, colours, sizing |
