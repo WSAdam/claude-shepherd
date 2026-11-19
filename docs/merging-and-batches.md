@@ -797,7 +797,8 @@ command in `<pid>.in/` and reads the answer from `<pid>.out/`.
 **Empty chats** are the one exception to closing by name. Never-used chats all read "Claude Code",
 so no name picks one out, but they're interchangeable. A card whose window has any shows
 *🧹 2 empty chats in this window (never used)* with **Close them** (and each gets **Close** in the
-Instances view). The bridge (0.4.0+) then closes any untagged "Claude Code" tab, and only while
+Instances view). A card's own **Close** on a never-used chat goes the same way, closing one of the
+window's empty chats. The bridge (0.4.0+) then closes any untagged "Claude Code" tab, and only while
 their number still equals the empty sessions Shepherd counted there, so a restored old chat (which
 also reads "Claude Code") is never closed by mistake. **Close selected** in Instances uses the same
 count for unnamed sessions, and only when every unnamed session in the window is selected.

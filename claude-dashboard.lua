@@ -5393,6 +5393,20 @@ function FX.closeTab(it, opts)
   -- run alone knows it; FX.fleetUnitTagOf stays batch-only, so core.mergeClosesTab is never widened).
   local unit = (opts and type(opts.unit) == "string" and opts.unit ~= "") and opts.unit or FX.fleetUnitTagOf(it)
   local byName = FX.sessionTabLabel(it)
+  -- 2026-11-19: a never-used chat has no tab name to close by -- it closes as one of its window's
+  -- interchangeable "Claude Code" tabs while their count still matches (core.emptyChatsVerdict); its
+  -- own SessionEnd clears the card. Project Stupid's Close refused twice with "no name yet".
+  if core.closeAsEmptyChat(it, byName, unit) then
+    local n = (FX._emptyChats or {})[hw] or 0
+    local eok, ewhy = core.emptyChatsVerdict(FX.tabBridgeRegistry(hw), n, FX.now())
+    if not eok then return refuse(ewhy) end
+    if not FX.sendEmptyCountdown(hw, n, 1, { key = it.key, name = name }) then
+      return refuse("couldn't write to the bridge's inbox")
+    end
+    print("[cc-dashboard] 🧹 asked the Shepherd tab bridge (host " .. hw .. ") to close 1 of its " .. n
+      .. " empty chat(s) for '" .. name .. "'")
+    return true
+  end
   local ok, why, retryable, by = core.tabCloseVerdict(FX.tabBridgeRegistry(hw), unit, byName, FX.now())
   if not ok then return refuse(why, retryable) end
   if by ~= "unit" then unit = nil end

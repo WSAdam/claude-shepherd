@@ -268,4 +268,48 @@ quiet(function() fx._refreshBody(); fx.closeEmptyChats("r7", "all") end)
 check("an extra \"Claude Code\" tab (a restored old chat) -> nothing sent, and it says why",
       #inbox7() == 0 and table.concat(alerts, " "):find("restored old chat", 1, true) ~= nil)
 check("no keystroke for any of it", taps == 0)
+
+-- ---- 2026-11-19 live: Close on Project Stupid's card refused twice, "its tab has no name yet, so it
+-- can't be told apart" -- its lead was a never-used chat (no transcript yet) sharing a window with a
+-- named session, and the card's Close only ever tried the tab's name. A never-used chat closes as one
+-- of its window's interchangeable "Claude Code" tabs (the empty-chat rule). ----
+os.execute('mkdir -p "' .. T .. '/win8" "' .. BR .. '/800.in" "' .. BR .. '/800.out"')
+write(T .. "/n8.jsonl", '{"type":"ai-title","aiTitle":"Stupid project work","sessionId":"n8"}\n')
+for _, s in ipairs({ { "n8", "801", T .. "/n8.jsonl", "done" }, { "e8", "802", T .. "/e8-never-written.jsonl", "idle" } }) do
+  write(T .. "/status/" .. s[1] .. ".json", string.format(
+    '{"status":"%s","session_id":"%s","name":"win8","cwd":"%s","since":%d,"updated":%d,"editor":"vscode","host_window":"800","session_pid":"%s","transcript_path":"%s"}',
+    s[4], s[1], T .. "/win8", now, now, s[2], s[3]))
+end
+local function reg8(labels)
+  local tabs = {}
+  for _, l in ipairs(labels) do tabs[#tabs + 1] = { label = l, group = 1, active = false } end
+  write(BR .. "/800.json", json.encode({ v = 1, pid = 800, version = "0.6.0", folders = { T .. "/win8" }, tabs = tabs, at = os.time() }))
+end
+local function inbox8()
+  local out, p = {}, io.popen('ls -1 "' .. BR .. '/800.in" 2>/dev/null')
+  if p then for l in p:lines() do local fh = io.open(BR .. "/800.in/" .. l); out[#out + 1] = json.decode(fh:read("*a")); fh:close() end; p:close() end
+  return out
+end
+reg8({ "Stupid project work", "Claude Code" })
+quiet(function() fx._refreshBody() end)
+byK = {}
+for _, it in ipairs(fx._shownItems or {}) do byK[it.key] = it end
+check("the never-used chat is marked empty, in a window it shares", byK.e8 and byK.e8.emptyChat == true and (tonumber(byK.e8.sharedWindow) or 0) >= 2)
+alerts = {}
+local tapsBefore = taps
+local _, r8 = quiet(function() return core.handleAction(fx, byK.e8, "close") end)
+local c8 = inbox8()
+check("Close on its card asks the bridge to close one of the window's \"Claude Code\" tabs  (n=" .. #c8 .. " alerts=" .. table.concat(alerts, " | ") .. ")",
+      r8 == "close" and #c8 == 1 and c8[1].op == "close" and c8[1].label == "Claude Code" and c8[1].empty == 1)
+check("...with no \"has no name yet\" refusal and no keystroke",
+      not table.concat(alerts, " "):find("no name yet", 1, true) and taps == tapsBefore)
+os.execute('rm -f "' .. BR .. '/800.in/"*')
+reg8({ "Stupid project work", "Claude Code", "Claude Code" })
+alerts = {}
+quiet(function() fx._refreshBody() end)
+byK = {}
+for _, it in ipairs(fx._shownItems or {}) do byK[it.key] = it end
+quiet(function() core.handleAction(fx, byK.e8, "close") end)
+check("an extra \"Claude Code\" tab (a restored old chat) -> nothing sent, and it says why",
+      #inbox8() == 0 and table.concat(alerts, " "):find("restored old chat", 1, true) ~= nil)
 finish()

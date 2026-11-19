@@ -17183,5 +17183,15 @@ do
      S({ total = 9, working = 4, approval = 2, error = 1, ready = 1 }, 6), "4 working  ·  2 need you  ·  1 errored  ·  1 ready for you")
 end
 
+-- ---- A card's Close on a never-used chat closes it as an empty chat (2026-11-19) ----
+-- 2026-11-19: Project Stupid's Close refused "its tab has no name yet" -- a never-used chat's tab has no name to close by.
+do
+  eq("empty close: a never-used chat with no tab name closes as an empty chat", core.closeAsEmptyChat({ emptyChat = true }, nil, nil), true)
+  eq("empty close: ...also when its only name is the generic Claude Code", core.closeAsEmptyChat({ emptyChat = true }, "Claude Code", nil), true)
+  eq("empty close: a named session closes by its name", core.closeAsEmptyChat({ emptyChat = true }, "Fix the bug", nil), false)
+  eq("empty close: a batch unit's tab closes by its tag", core.closeAsEmptyChat({ emptyChat = true }, nil, "b1:slug"), false)
+  eq("empty close: a session not known to be empty never does", core.closeAsEmptyChat({ status = "idle" }, nil, nil), false)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

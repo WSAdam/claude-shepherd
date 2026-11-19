@@ -930,6 +930,16 @@ function M.tabBridgeSupports(version, op)
   return versionAtLeast(version, since)
 end
 
+-- A card's Close on a never-used chat (it.emptyChat, stamped by FX.annotateEmptyChats) whose tab has
+-- no name of its own: it closes as one of its window's interchangeable "Claude Code" tabs, under
+-- M.emptyChatsVerdict, instead of being refused for having no name. A batch unit's tab (a tag) and a
+-- named tab close the usual way. 2026-11-19: Project Stupid's Close refused twice this way.
+function M.closeAsEmptyChat(it, label, unit)
+  if type(it) ~= "table" or it.emptyChat ~= true then return false end
+  if type(unit) == "string" and unit ~= "" then return false end
+  return label == nil or label == "" or label == M.EMPTY_TAB_LABEL
+end
+
 function M.emptyChatsVerdict(reg, emptyCount, now)
   emptyCount = math.floor(tonumber(emptyCount) or 0)
   if emptyCount < 1 then return false, "no empty chats in that window" end
