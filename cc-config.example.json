@@ -10,7 +10,7 @@
   },
 
   "automation": {
-    "_comment": "Dry run for ALL automation (auto-continue, rules, respawn, the self-summary, ending tab-less leftovers, mailbox messages, the /rc sweep): each records what it would do -- ☰ → Automation trace, and would_<kind> in the ledger -- and acts on nothing. Each feature also has its own dryRun (autoContinue.dryRun, rules.dryRun, ...). Settings → Automation → Dry run switches them; a Save keeps them.",
+    "_comment": "Dry run for ALL automation (auto-continue, respawn, the self-summary, ending tab-less leftovers, mailbox messages, the /rc sweep): each records what it would do -- ☰ → Automation trace, and would_<kind> in the ledger -- and acts on nothing. Each feature also has its own dryRun (autoContinue.dryRun, respawn.dryRun, ...). Settings → Automation → Dry run switches them; a Save keeps them.",
     "dryRun": false
   },
 
@@ -106,7 +106,7 @@
 
   "providers": [
     {
-      "_comment": "Each profile launches `claude` against a model. kind=anthropic sets ANTHROPIC_MODEL on the normal endpoint; kind=gateway also sets ANTHROPIC_BASE_URL so Claude Code talks to a LiteLLM-style gateway (Gemini/OpenAI/local) or a local/remote REST server. NO API KEYS HERE: authTokenEnv names an ENV VAR the spawned login shell expands ($NAME) — the key lives in your shell, never in this file. A profile may also carry \"ssh\": {\"host\": \"devbox\", \"user\": \"adam\"} to run `claude` on a remote box (the terminal window stays local); pair with the `bridge` block above to see its remote sessions as tiles.",
+      "_comment": "Hand-kept since 2026-11-19 (the Settings editor and the New session dialog's provider choice were removed): spawn.provider names the profile every spawn uses. Each profile launches `claude` against a model. kind=anthropic sets ANTHROPIC_MODEL on the normal endpoint; kind=gateway also sets ANTHROPIC_BASE_URL so Claude Code talks to a LiteLLM-style gateway (Gemini/OpenAI/local) or a local/remote REST server. NO API KEYS HERE: authTokenEnv names an ENV VAR the spawned login shell expands ($NAME) — the key lives in your shell, never in this file. A profile may also carry \"ssh\": {\"host\": \"devbox\", \"user\": \"adam\"} to run `claude` on a remote box (the terminal window stays local); pair with the `bridge` block above to see its remote sessions as tiles.",
       "id": "anthropic-opus",
       "label": "Claude Opus 4.8",
       "kind": "anthropic",
@@ -292,19 +292,11 @@
 
   "policies": {
     "approveRepeats": false,
-    "autopilot": {
-      "enabled": false,
-      "minutes": 15
-    },
     "patterns": {
       "enabled": false,
       "autoAllow": [],
       "autoDeny": []
-    },
-    "_bundles_comment": "L2 named policy/guardrail bundles. Each is a reusable {autoAllow[], autoDeny[], disableGlobal?} set you attach to a session — via the detail-panel Policy dropdown (per session) or `attachments` below (fleet-wide). When a bundle is attached, the panel resolves it (bundle rules UNION the fleet patterns, unless disableGlobal drops the fleet) and writes a per-session file the gate reads — so a bundle applies EVEN IF patterns.enabled is false (attaching is the opt-in). autoDeny wins over autoAllow. Pattern syntax = the same Tool / Tool(glob) as patterns above. Starter ideas: read-only (autoDeny Bash/Write/Edit/MultiEdit/NotebookEdit), no-bash, no-network.",
-    "bundles": {},
-    "_attachments_comment": "Auto-attach a bundle to sessions matching project/group/providerId/key (each a glob; absent = wildcard; first match wins). project is the session's project key -- its launch folder's path with everything but letters and digits turned into - (/Users/me/code/secure-api is -Users-me-code-secure-api) -- so start the glob with *. e.g. [{\"match\":{\"project\":\"*secure-*\"},\"bundle\":\"read-only\"}]. Empty = no auto-attach (use the per-session Policy dropdown instead).",
-    "attachments": []
+    }
   },
 
   "hotkeys": {

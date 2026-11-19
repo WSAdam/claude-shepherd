@@ -18,8 +18,7 @@ category). (The read-only background checks, such as commit counts, the overlap 
 scheduled-tasks lock check, are on too.) A fresh install writes the author's daily
 settings ([defaults/cc-config.json](../defaults/cc-config.json)) when you have no file yet, and
 those also turn on auto-continue, respawn, auto-compact, the three Stop guards (`stopGuards`), the
-merge checker, the worktree fence, the audit ledger and real spawning. Rules, routines (the
-main-green check among them), escalation and the coach's own runs
+merge checker, the worktree fence, the audit ledger and real spawning. Escalation and the coach's own runs
 (`coach.enabled`, which its weekly and evidence runs both need) stay off until you switch them on. On an upgrade, `make setup` adds any of the
 defaults' keys you haven't set, and never changes one you have.
 
@@ -28,7 +27,6 @@ defaults' keys you haven't set, and never changes one you have.
 Click **⚙** in the header for a form with most switches and a one-line explanation of each. **Save**
 writes `~/.claude/cc-config.json` (creating it if missing) and arms or disarms the gate. Blocks the
 form doesn't show survive a Save, and so do the hand-kept keys inside the blocks it does show: the
-[policy bundles and attachments](approvals-and-policies.md#named-policy-bundles),
 `spawn.matchWindowSize`, `risk.weights`, `spawn.searchRoots`, `bridge.staleSlackSeconds` and the
 like, plus any `_`-prefixed note such as `_comment`. Any other key you add by hand inside a
 form-managed block is dropped on Save. Its tabs:
@@ -37,7 +35,7 @@ form-managed block is dropped on Save. Its tabs:
 - **Appearance**: the layout, themes, colours, font, sizing, and the detail-panel switches
   ([Make it yours](customizing.md)).
 - **Approvals**: **Headless approvals** and the gated tools, **Answer questions in Shepherd**, the
-  advanced gate settings, the policies (approve repeats, Autopilot, allow/deny patterns), and the
+  advanced gate settings, the policies (approve repeats, allow/deny patterns), and the
   **Always ask** commands with your own additions
   ([Approvals and policies](approvals-and-policies.md)).
 - **Automation**: escalation, the fleet idle alert, graceful drain, respawn,
@@ -47,20 +45,19 @@ form-managed block is dropped on Save. Its tabs:
   banners, post-run summary, PR status, the hooks inventory, the audit log and **Measure storage**
   ([Usage and cost](usage-and-cost.md)).
 - **Spawn**: editor window pop, spawn defaults (**Actually launch**, editor, flavour), Claude Code
-  Remote Control, the SSH status bridge and provider profiles
+  Remote Control and the SSH status bridge
   ([Controls](controls.md#spawn-new-sessions),
   [Providers and integrations](providers-and-integrations.md)).
 
-File-only switches include, among others: `rules.enabled`, `schedules.enabled` and
-`schedules.maxConcurrent`, `hotkeys`, `voice`, `automodel.*`, `pricing.*`, `merge.*`, `verify.*`,
+File-only switches include, among others: `providers` and `spawn.provider`
+([provider profiles](providers-and-integrations.md#providers-and-models)), `hotkeys`, `voice`, `pricing.*`, `merge.*`, `verify.*`,
 `gate.fence`, `resume.enabled`, `lease.*`,
 `coach.*`, `radar.*`, `schedLock.*`, `timeLost.*`, `score.weights`,
 `subagents.*`, `status.resumeSlack`, `autoContinue.backoff.*`, `fleet.enabled`, `commits.*`,
 `usage.limitAlerts.*`, `ask.waitSeconds`, `ask.awayIdleSeconds`, `tabless.autoEndMinutes`, `escalation.hung`, `search.*`,
-`worklist.*`, `decisions.*`, `notifications.days`, `templates.sourceDir`,
+`worklist.*`, `decisions.*`, `notifications.days`,
 `context.autoCompactFraction`, `stopGuards.*`, `alerts.onScreen` and
 `alerts.voiceEvents`, and the `keystrokes`, `tabBridge` and `stacks` sections.
-Policy bundles and attachments are edited in the 🛡 editor.
 
 ## Editing the file by hand
 
@@ -71,12 +68,12 @@ The panel re-reads the file within about a second (except `hotkeys`, which need 
 
 | Section | What it controls | Reference |
 |---------|------------------|-----------|
-| `gate`, `policies`, `ask`, `stopGuards` | Gated tools, the worktree fence, auto-allow/deny, always-ask commands, bundles, Autopilot, held questions, the three Stop guards (questions asked in prose, "done" checked against the diff, the finished-unit merge reminder) | [Approvals and policies](approvals-and-policies.md) |
+| `gate`, `policies`, `ask`, `stopGuards` | Gated tools, the worktree fence, auto-allow/deny, always-ask commands, held questions, the three Stop guards (questions asked in prose, "done" checked against the diff, the finished-unit merge reminder) | [Approvals and policies](approvals-and-policies.md) |
 | `merge`, `verify`, `fleet`, `radar`, `tabBridge` | Ready to merge, merge gates, the merge checker, batches, the overlap radar, the tab bridge | [Merging and batches](merging-and-batches.md) |
-| `queue`, `templates`, `automodel`, `coach` | Task queue, routing, templates, model auto-routing, the coach | [Automation](automation.md) |
+| `coach` | The coach | [Automation](automation.md) |
 | `respawn`, `autoContinue`, `resume`, `drain`, `prune`, `cleanup`, `tabless` | Recovery, resuming at a usage limit's reset, and cleanup | [Automation](automation.md), [Controls](controls.md#sessions-with-no-tab) |
 | `compact` | Auto-compact at `atPct` with notes kept across it (sets `env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` in Claude Code's `settings.json`) | [Automation](automation.md#auto-compact-with-notes) |
-| `escalation`, `notifications`, `focus`, `summary`, `rules`, `schedules` | Nags, banners, focus pop, rules, routines | [Automation](automation.md) |
+| `escalation`, `notifications`, `focus`, `summary` | Nags, banners, focus pop, the self-summary | [Automation](automation.md) |
 | `automation` (and each feature's `dryRun`) | Dry run for all automation, or one feature at a time | [Automation](automation.md#dry-run-and-the-automation-trace) |
 | `autoTitle`, `prStatus`, `risk`, `collision`, `subagents`, `status` | Tile observability | [Fleet](fleet.md#session-observability) |
 | `schedLock` | The 🔒 scheduled-tasks lock check on project cards | [Troubleshooting](troubleshooting.md#a-card-flags-a-scheduled-tasks-lock) |
@@ -95,7 +92,7 @@ install's [defaults](../defaults/cc-config.json) differ.
 | Key | Default | Fresh install | Reference |
 |-----|---------|---------------|-----------|
 | `automation.dryRun` | `false` | | [Dry run](automation.md#dry-run-and-the-automation-trace) |
-| `<feature>.dryRun` (`autoContinue`, `rules`, `respawn`, `summary`, `tabless`, `mailbox`, `remoteControl`) | `false` | | [Dry run](automation.md#dry-run-and-the-automation-trace) |
+| `<feature>.dryRun` (`autoContinue`, `respawn`, `summary`, `tabless`, `mailbox`, `remoteControl`) | `false` | | [Dry run](automation.md#dry-run-and-the-automation-trace) |
 | `autoContinue.backoff.startSeconds` / `maxSeconds` | `120` / `1800` (`startSeconds: 0` turns it off) | | [Auto-continue](automation.md#auto-respawn-and-auto-continue) |
 | `compact.enabled` | `false` | `true` | [Auto-compact with notes](automation.md#auto-compact-with-notes) |
 | `compact.atPct` / `notesLeadPct` | `85` / `5` | | [Auto-compact with notes](automation.md#auto-compact-with-notes) |
@@ -144,7 +141,6 @@ A starting point for the most common switches:
   "respawn":    { "enabled": false, "auto": { "enabled": false, "maxRetries": 3, "staleSeconds": 600 } },
   "policies": {
     "approveRepeats": false,
-    "autopilot": { "enabled": false, "minutes": 15 },
     "patterns":  { "enabled": false, "autoAllow": [], "autoDeny": [] },
     "alwaysAsk": { "patterns": [] }
   }
@@ -176,26 +172,30 @@ Everything lives under `~/.claude/`:
 | `cc-pins/`, `cc-pin.sh` | Left by pinned links, removed 2026-11-19: nothing reads them; `--purge` deletes them |
 | `cc-talk/` | Left by talk mode, removed 2026-11-19: nothing reads it; `--purge` deletes it |
 | `cc-resume/`, `cc-resume.sh` | Left by resume at the limit reset, removed 2026-11-19: nothing reads them, and `make setup` unwires and deletes the hook; `--purge` deletes them |
-| `cc-notes/` | [Handoff notes](automation.md#handoff-notes), and [auto-compact](automation.md#auto-compact-with-notes)'s due-ats and each session's own notes; `pending/` also holds an [agent profile](providers-and-integrations.md#agent-profiles)'s policy bundle until the session it spawned takes it |
+| `cc-notes/` | [Handoff notes](automation.md#handoff-notes), and [auto-compact](automation.md#auto-compact-with-notes)'s due-ats and each session's own notes |
 | `cc-bridge/` | The tab bridge's per-window tab lists and command folders |
 | `cc-lease/` | [Worktree leases](fleet.md#worktree-leases): each repo's leased ports and database paths, and (by default) the databases in `db/` |
 | `cc-restart.json` | Left by restart in place, removed 2026-11-19: nothing reads it; `--purge` deletes it |
 | `cc-coach/` | [The coach](automation.md#the-coach)'s files per repo, named by the main checkout's encoded project folder (`-Users-you-code-app`): its suggestions, its log (merge notes, checker findings, filed lessons, main-went-red entries), `<repo>.applied.json` (applied edits), `<repo>.lessons.json` (the lessons ledger) and `<repo>.memory-backup/` (auto-memory backups for Undo); `evidence-spend.json` (today's evidence-run spend); `global.json` and `global.claude-backup/` for [lessons learned across repos](automation.md#across-repos) |
 | `cc-lesson/` | Lessons filed with `cc-lesson.sh`, until Shepherd moves them into the coach's log |
-| `cc-policy/`, `cc-policy-override/`, `cc-gate-tools/`, `cc-automodel/` | Per-session policy (the resolved rules, and the **Policy** dropdown's choice), gated-tool and auto-model settings |
-| `cc-approved/`, `cc-autopilot/` | What approve-repeats remembers per session, and each session's Autopilot window |
+| `cc-gate-tools/` | Per-session gated-tool settings |
+| `cc-automodel/` | Leftover of model auto-routing (removed 2026-11-19): its per-session switches. Nothing reads it; `uninstall.sh --purge` deletes it |
+| `cc-policy/`, `cc-policy-override/`, `cc-autopilot/` | Leftovers of named policy bundles and Autopilot (removed 2026-11-19). The gate never reads them; `uninstall.sh --purge` deletes them |
+| `cc-approved/` | What approve-repeats remembers per session |
 | `cc-ledger/` | The audit ledger (one JSONL file per day) |
 | `cc-usage-state.json` | Where the [token totals](usage-and-cost.md#fleet-total) stopped reading each transcript, so a reload reads only what's new |
 | `cc-skill-labels.json` | Your ok / not ok labels on [skill runs](providers-and-integrations.md#how-often-each-skill-works) |
 | `cc-labels.json`, `cc-groups.json`, `cc-hidden.json`, `cc-autotitles.json` | Relabels and groups by project, hidden tiles, and auto-titles |
-| `cc-worklist.json`, `cc-worklist-archive.json` | My List (its items, TODO.md sync state and playbooks) and its archive |
+| `cc-worklist.json`, `cc-worklist-archive.json` | My List (its items and TODO.md sync state) and its archive |
 | `cc-run/` | [Checklist runs](fleet.md#my-list) started with **Run selected**: each run's `<id>.run.json` (Shepherd is its only writer; kept a week after it ends) and the `cc-run.sh` reports waiting for it |
 | `cc-presets.json`, `cc-recent-dirs.json` | Spawn presets and recent folders |
-| `cc-agents.json`, `cc-mcp.json`, `cc-mcp-configs/` | Agent profiles, their MCP server registry, and the `--mcp-config` files written for their spawns |
+| `cc-agents.json`, `cc-mcp.json`, `cc-mcp-configs/` | Leftovers of agent profiles (removed 2026-11-19): the profiles, their MCP server registry and the `--mcp-config` files written for their spawns. Nothing reads them; `uninstall.sh --purge` deletes them |
 | `cc-audit/` | A [find-only audit](providers-and-integrations.md#find-only-audit)'s launch files (its findings are in `~/.cc-audit/`, which a purge keeps) |
-| `cc-templates.json`, `cc-prompts/`, `cc-rules.json`, `cc-schedules.json` | Templates, the folder they import from, automation rules, routines |
+| `cc-templates.json`, `cc-prompts/` | Leftovers of prompt templates (removed 2026-11-19): the templates and the folder they imported from. Nothing reads them; `uninstall.sh --purge` deletes them |
+| `cc-schedules.json` | Leftover of routines (removed 2026-11-19). Nothing reads it; `uninstall.sh --purge` deletes it |
+| `cc-rules.json` | Leftover of automation rules (removed 2026-11-19). Nothing reads it; `uninstall.sh --purge` deletes it |
 | `cc-main-green.json` | Each repo's last [main-green check](merging-and-batches.md#is-main-still-green-a-scheduled-check) verdict, so a reload keeps the card's flag (Shepherd is its only writer) |
-| `cc-ab.json` | A/B compare cohorts |
+| `cc-ab.json` | Leftover of A/B compare (removed 2026-11-19): its cohorts. Nothing reads it; `uninstall.sh --purge` deletes it |
 | `cc-lock.json` | The screen lock's salted password hash |
 | `cc-exports/` | Exported sessions |
 | `cc-scenarios/` | Scrubbed transcript windows saved by [Capture as scenario](development.md#capturing-a-scenario) |

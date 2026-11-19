@@ -89,33 +89,15 @@ end
 local STATUS_DIR = os.getenv("CC_STATUS_DIR") or (os.getenv("HOME") .. "/.claude/cc-status")
 local HEARTBEAT  = STATUS_DIR .. "/.panel-alive"
 local CONFIG_FILE   = os.getenv("CC_CONFIG_FILE") or (os.getenv("HOME") .. "/.claude/cc-config.json")
-local AUTOPILOT_DIR = os.getenv("CC_AUTOPILOT_DIR") or (os.getenv("HOME") .. "/.claude/cc-autopilot")
 local GATE_TOOLS_DIR = os.getenv("CC_GATE_TOOLS_DIR") or (os.getenv("HOME") .. "/.claude/cc-gate-tools")
 local GATE_FLAG     = os.getenv("CC_GATE_FLAG") or (os.getenv("HOME") .. "/.claude/cc-gate.enabled")
 local LABELS_FILE   = os.getenv("CC_LABELS_FILE") or (os.getenv("HOME") .. "/.claude/cc-labels.json")
 local HIDDEN_FILE   = os.getenv("CC_HIDDEN_FILE") or (os.getenv("HOME") .. "/.claude/cc-hidden.json")
 local AUTOTITLE_FILE = os.getenv("CC_AUTOTITLE_FILE") or (os.getenv("HOME") .. "/.claude/cc-autotitles.json")
-local RULES_FILE    = os.getenv("CC_RULES_FILE") or (os.getenv("HOME") .. "/.claude/cc-rules.json")
-local SCHEDULES_FILE = os.getenv("CC_SCHEDULES_FILE") or (os.getenv("HOME") .. "/.claude/cc-schedules.json")
 local GROUPS_FILE   = os.getenv("CC_GROUPS_FILE") or (os.getenv("HOME") .. "/.claude/cc-groups.json")
 local RECENT_FILE   = os.getenv("CC_RECENT_FILE") or (os.getenv("HOME") .. "/.claude/cc-recent-dirs.json")
-local TEMPLATE_FILE = os.getenv("CC_TEMPLATE_FILE") or (os.getenv("HOME") .. "/.claude/cc-templates.json")
 local PRESET_FILE   = os.getenv("CC_PRESET_FILE") or (os.getenv("HOME") .. "/.claude/cc-presets.json")
-local AGENT_FILE    = os.getenv("CC_AGENT_FILE") or (os.getenv("HOME") .. "/.claude/cc-agents.json")
-local MCP_FILE      = os.getenv("CC_MCP_FILE") or (os.getenv("HOME") .. "/.claude/cc-mcp.json")
-local MCP_CONFIG_DIR = os.getenv("CC_MCP_CONFIG_DIR") or (os.getenv("HOME") .. "/.claude/cc-mcp-configs")
 local SKILLS_DIR    = os.getenv("CC_SKILLS_DIR") or (os.getenv("HOME") .. "/.claude/skills")
--- L3 definition source: a local dir of *.prompt / *.md prompt definitions imported
--- into cc-templates.json (config `templates.sourceDir` overrides; strictly local).
-local PROMPTS_DIR   = os.getenv("CC_PROMPTS_DIR") or (os.getenv("HOME") .. "/.claude/cc-prompts")
--- L2 named policy bundles: POLICY_DIR holds the resolved per-session policy the
--- gate reads (MUST match cc-approve.sh's CC_POLICY_DIR default); POLICY_OVERRIDE_DIR
--- holds each session's chosen bundle name (the detail-panel Policy dropdown).
-local POLICY_DIR    = os.getenv("CC_POLICY_DIR") or (os.getenv("HOME") .. "/.claude/cc-policy")
-local POLICY_OVERRIDE_DIR = os.getenv("CC_POLICY_OVERRIDE_DIR") or (os.getenv("HOME") .. "/.claude/cc-policy-override")
--- Change-gate for the per-session resolved-policy file writes (avoid 1s churn):
--- key -> last-written JSON. Cleared when a session resolves back to the fleet.
-local policyCache = {}
 local LEDGER_DIR    = os.getenv("CC_LEDGER_DIR") or (os.getenv("HOME") .. "/.claude/cc-ledger")
 local EXPORT_DIR    = os.getenv("CC_EXPORT_DIR") or (os.getenv("HOME") .. "/.claude/cc-exports")
 local CLAUDE_DIR    = (os.getenv("HOME") or "") .. "/.claude"
@@ -240,7 +222,6 @@ local BRIDGE_SECONDS = 2     -- per-host rsync cadence (SSH status bridge)
 local bridge = {}            -- ns -> { timer, running, lastOkTs, dest, host }: live bridge state
                              -- (module-level so the timers are GC-safe, per the after() lesson)
 local loopAlerted   = {} -- tile key -> true once a loop ledger event fired this episode (L5)
-local ruleFired     = {} -- "ruleName\1tileKey" -> true: a `once` L6 rule already fired for this tile
 local gitChangeFiles = {} -- tile key -> { [path] = orig|false }: the authoritative file
                           -- set from the last detail-changes reply. detail-diff only diffs a
                           -- path in this set (keeps the --no-index fallback from reaching an
@@ -1459,25 +1440,6 @@ function FX.writePendingHandoff(deadKey, editor, lineage, project)
   print("[cc-dashboard] ✅ handoff note left for the respawn of " .. deadKey .. ": " .. path)
   return path
 end
--- 2026-10-15: a spawn from an agent profile naming a policy bundle leaves it beside the note, under
--- the same id: core.pendingPolicy (the choice + the rules the card would write). The session that
--- starts there takes it once at SessionStart (cc_take_pending_policy) and gets the bundle as if it
--- were picked from its card. Returns the pending file's path, or nil when there is no bundle.
-function FX.writePendingPolicy(cfg, editor, lineage, project, name)
-  local pend = core.pendingPolicy(cfg, name)
-  if not pend then return nil end
-  if not core.policyBundle(cfg, pend.bundle) then
-    print("[cc-dashboard] ⚠️ policy bundle '" .. pend.bundle .. "' isn't in the config -- the session gets the fleet's rules under that name")
-  end
-  pcall(function() hs.fs.mkdir(FX.NOTES_DIR) end)
-  local path = FX.NOTES_DIR .. "/pending/" .. core.pendingNoteId(editor, lineage, project) .. ".policy.json"
-  if not FX.writeFileAtomic(path, core.json.encode(pend)) then
-    print("[cc-dashboard] ❌ couldn't leave policy bundle '" .. pend.bundle .. "' for the session spawning in " .. tostring(project))
-    return nil
-  end
-  print("[cc-dashboard] ✅ policy bundle '" .. pend.bundle .. "' left for the session spawning in " .. tostring(project) .. ": " .. path)
-  return path
-end
 -- Notes and pending notes older than 14 days (core.notesToPrune). At startup, then hourly.
 function FX.pruneNotes(now)
   FX._notesPrunedAt = now or FX.now()
@@ -2509,41 +2471,6 @@ function FX.writeRecent(state)
   FX.writeFile(RECENT_FILE, core.json.encode(state or { dirs = {} }))
 end
 
--- Saved task templates (roadmap #5c). Missing/garbled -> empty. readRecent mirrors.
-function FX.readTemplates()
-  local c = FX.readFile(TEMPLATE_FILE)
-  if not c or #c == 0 then return { templates = {} } end
-  local ok, t = pcall(function() return core.json.decode(c) end)
-  return (ok and type(t) == "table") and t or { templates = {} }
-end
-function FX.writeTemplates(state)
-  hs.fs.mkdir(CLAUDE_DIR)
-  FX.writeFile(TEMPLATE_FILE, core.json.encode(state or { templates = {} }))
-end
--- L6 event-callback rules (cc-rules.json). Missing/garbled -> empty.
-function FX.readRules()
-  local c = FX.readFile(RULES_FILE)
-  if not c or #c == 0 then return { rules = {} } end
-  local ok, t = pcall(function() return core.json.decode(c) end)
-  return (ok and type(t) == "table") and t or { rules = {} }
-end
--- L6 rules editor writes cc-rules.json (the engine read it before; now it's editable).
-function FX.writeRules(state)
-  hs.fs.mkdir(CLAUDE_DIR)
-  FX.writeFile(RULES_FILE, core.json.encode(state or { rules = {} }))
-end
--- L7 scheduled routines (cc-schedules.json). Missing/garbled -> empty.
-function FX.readSchedules()
-  local c = FX.readFile(SCHEDULES_FILE)
-  if not c or #c == 0 then return { schedules = {} } end
-  local ok, t = pcall(function() return core.json.decode(c) end)
-  return (ok and type(t) == "table") and t or { schedules = {} }
-end
-function FX.writeSchedules(state)
-  hs.fs.mkdir(CLAUDE_DIR)
-  FX.writeFile(SCHEDULES_FILE, core.json.encode(state or { schedules = {} }))
-end
-
 -- Spawn presets (roadmap #4a). Missing/garbled -> empty.
 function FX.readPresets()
   local c = FX.readFile(PRESET_FILE)
@@ -2554,29 +2481,6 @@ end
 function FX.writePresets(state)
   hs.fs.mkdir(CLAUDE_DIR)
   FX.writeFile(PRESET_FILE, core.json.encode(state or { presets = {}, lastByProject = {} }))
-end
-
--- L1 Agent Profiles registry (cc-agents.json) + MCP registry (cc-mcp.json).
--- Operator data, same posture as presets/templates. Missing/garbled -> empty.
-function FX.readAgents()
-  local c = FX.readFile(AGENT_FILE)
-  if not c or #c == 0 then return { agents = {} } end
-  local ok, t = pcall(function() return core.json.decode(c) end)
-  return (ok and type(t) == "table") and t or { agents = {} }
-end
-function FX.writeAgents(state)
-  hs.fs.mkdir(CLAUDE_DIR)
-  FX.writeFile(AGENT_FILE, core.json.encode(state or { agents = {} }))
-end
-function FX.readMcp()
-  local c = FX.readFile(MCP_FILE)
-  if not c or #c == 0 then return { servers = {} } end
-  local ok, t = pcall(function() return core.json.decode(c) end)
-  return (ok and type(t) == "table") and t or { servers = {} }
-end
-function FX.writeMcp(state)
-  hs.fs.mkdir(CLAUDE_DIR)
-  FX.writeFile(MCP_FILE, core.json.encode(state or { servers = {} }))
 end
 
 -- Enumerate ~/.claude/skills (dual-shape: directory SKILL.md AND flat *.md) into
@@ -2636,7 +2540,7 @@ end
 
 -- Read the ACTUALLY-installed MCP servers from ~/.claude.json (user + per-project
 -- mcpServers), normalized + env-redacted by core.extractInstalledMcp. Distinct
--- from FX.readMcp (the cc-mcp.json agent registry). Sync: ~/.claude.json is small
+-- from the cc-mcp.json agent registry (removed 2026-11-19). Sync: ~/.claude.json is small
 -- (~50KB) and this only runs on the user opening the 🔌 viewer, never per-tick.
 function FX.readInstalledMcp()
   local CLAUDE_JSON = os.getenv("CC_CLAUDE_JSON") or (os.getenv("HOME") .. "/.claude.json")
@@ -3066,32 +2970,10 @@ function FX.todoAutoSyncTick(list)
   pcall(function() wv:evaluateJavaScript("window.ccTodoImported(" .. hs.json.encode(r) .. ")") end)
 end
 
--- ---- Playbooks: a picked markdown checklist as a My List source (2026-10-03) ----
--- Mining round 2, unit D3a. The file is picked through a NATIVE chooser (FX.choosePlaybookFile),
--- never typed into the webview, which only ever names a source by its id. Its lines import through
--- core.worklistImportPlaybook (the TODO.md merge, so the HARD RULE holds: never done/doneTs), and a
--- per-tick mtime watch re-imports a changed file so the badges follow it. Shepherd never writes a
--- playbook. The sources list is state.playbooks in cc-worklist.json.
-
--- One markdown file, starting in startDir. Through FX.runModal, so a pending keystroke chain can't
--- press the dialog's default button. Returns the picked path, or nil on Cancel.
-function FX.choosePlaybookFile(startDir)
-  local r = FX.runModal(function()
-    return hs.dialog.chooseFileOrFolder("Pick a playbook: a markdown checklist", startDir,
-      true, false, false, { "md", "markdown" }, true)
-  end)
-  if type(r) ~= "table" then return nil end
-  local p = r["1"] or r[1]      -- Hammerspoon keys the picked paths "1", "2", ...
-  if type(p) ~= "string" or p == "" then return nil end
-  if p:sub(1, 7) == "file://" then
-    p = p:sub(8):gsub("%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end)
-  end
-  return p
-end
-
--- The roots whose TODO.md already imports into a tab, main first: where the chooser opens, and the
--- files core.worklistPlaybookRefusal turns away. Derived here, never from the webview.
-function FX.playbookTodoRoots(scope, st)
+-- The roots whose TODO.md imports into a My List tab, main first -- Run selected finds a plain
+-- folder's root here. Derived from Shepherd's own records, never from the webview. (It was
+-- FX.playbookTodoRoots; playbooks, its first user, were removed 2026-11-19.)
+function FX.tabTodoRoots(scope, st)
   local out = {}
   local roots = FX.stackRootsFor(scope, st, {})
   if roots then
@@ -3108,70 +2990,6 @@ function FX.playbookTodoRoots(scope, st)
   local meta = ((st or {}).todoMeta or {})[scope]
   if #out == 0 and type(meta) == "table" and type(meta.cwd) == "string" and meta.cwd ~= "" then out[1] = meta.cwd end
   return out
-end
-
--- Read one playbook and merge its lines into its tab. Records the file's mtime on the entry (the
--- watch compares against it, and it survives a restart, so a change made while Shepherd was down
--- syncs once). Returns core's counts, plus unreadable = true when the file couldn't be read.
-function FX.playbookImport(st, key, entry)
-  local content = FX.readFile(entry.path)
-  local parsed = content and core.parseTodoFile(content) or nil
-  local c = core.worklistImportPlaybook(st, key, entry.id, parsed, FX.now(), FX.worklistNewId)
-  -- parenthesised: a missing file answers nil + a message, and tonumber(nil, msg) throws
-  local m = tonumber((hs.fs.attributes(entry.path, "modification")))
-  if m then entry.mtime = m end
-  if not content then c.unreadable = true end
-  return c
-end
-
--- The watch list: one { key, id, path, mtime } per ACTIVE playbook on every tab. Rebuilt from the
--- store after every add, remove and sync, and lazily on the first tick.
-function FX.playbookRebuildWatch(st)
-  local w = {}
-  for k in pairs((st or {}).playbooks or {}) do
-    for _, e in ipairs(core.worklistPlaybooks(st, k)) do
-      w[#w + 1] = { key = k, id = e.id, path = e.path, mtime = tonumber(e.mtime) }
-    end
-  end
-  FX._pbWatch = w
-end
-
--- 1 Hz (the refresh tick): stat each playbook and re-import the ones whose file moved. The 2s
--- settle guard, like TODO.md's, skips a file written under 2s ago (an automation may be mid-write).
--- One worklist read and one write for the whole batch, and none at all while nothing changed.
-function FX.playbookSyncTick()
-  if FX._pbWatch == nil then FX.playbookRebuildWatch(FX.readWorklist()) end
-  if #FX._pbWatch == 0 then return end
-  local now, due = FX.now(), nil
-  for _, w in ipairs(FX._pbWatch) do
-    local m = tonumber((hs.fs.attributes(w.path, "modification")))
-    if m and m ~= w.mtime and (now - m) >= 2 then due = due or {}; due[#due + 1] = w end
-  end
-  if not due then return end
-  local st = FX.readWorklist()
-  local r = { auto = true, added = 0, updated = 0, missing = 0 }
-  for _, w in ipairs(due) do
-    for _, e in ipairs(core.worklistPlaybooks(st, w.key)) do
-      if e.id == w.id then
-        local c = FX.playbookImport(st, w.key, e)
-        r.name = e.name
-        r.added, r.updated, r.missing = r.added + c.added, r.updated + c.updated, r.missing + c.missing
-      end
-    end
-  end
-  FX.writeWorklist(st)
-  FX.playbookRebuildWatch(st)
-  print("[cc-dashboard] 📘 My List: playbook synced -- " .. r.added .. " new, " .. r.updated .. " updated")
-  pcall(function() wv:evaluateJavaScript("window.ccWorklist(" .. hs.json.encode(FX.worklistPayload()) .. ")") end)
-  pcall(function() wv:evaluateJavaScript("window.ccPlaybookResult(" .. hs.json.encode(r) .. ")") end)
-end
-
--- What the panel shows of a tab's playbooks: id (all Remove sends back), name, and the path for the
--- tooltip. nil with none, so a tab without playbooks carries nothing extra.
-function FX.playbookList(st, key)
-  local out = {}
-  for _, e in ipairs(core.worklistPlaybooks(st, key)) do out[#out + 1] = { id = e.id, name = e.name, path = e.path } end
-  return (#out > 0) and out or nil
 end
 
 -- ---- Run selected: the checklist runner in My List (2026-10-03) ----
@@ -3253,7 +3071,7 @@ function FX.runBatchActive(root)
 end
 
 -- Run selected: Adam's click (the bridge's worklist-run). ids = the selected item ids, as JSON. The
--- main checkout comes from the tab's own roots (FX.playbookTodoRoots), never from the webview.
+-- main checkout comes from the tab's own roots (FX.tabTodoRoots), never from the webview.
 -- Returns what the panel's toast says: { started, refused } or { error }.
 function FX.runStart(key, idsText)
   local okd, ids = pcall(function() return core.json.decode(tostring(idsText or "")) end)
@@ -3266,7 +3084,7 @@ function FX.runStart(key, idsText)
     for _, rt in ipairs(roots) do if rt.isMain and not root then root = rt.root end end
     if not root then return { error = "Shepherd doesn't know this repo's main checkout yet -- open a session in it first." } end
   else
-    root = FX.playbookTodoRoots(key, st)[1]
+    root = FX.tabTodoRoots(key, st)[1]
   end
   if not root then return { error = "Shepherd doesn't know this project's folder yet -- open a session in it first." } end
   root = core.normDir(root)
@@ -3492,32 +3310,6 @@ function FX.sessionAiTitle(item)
   local title = tail and core.aiTitleFromTranscript(tail) or nil
   FX._sessTitle[key] = { title = title, ts = now }
   return title
-end
-
--- L3 definition source: enumerate prompt-definition files (*.prompt / *.md, skip
--- README) in `dir` -> { {stem, text}, ... }. Synchronous readDir+readFile (a flat,
--- bounded dir, like FX.listSkills -- not the async folder-scan). Missing dir -> {}.
-function FX.listPromptFiles(dir)
-  local out = {}
-  for _, name in ipairs(FX.readDir(dir)) do
-    if name ~= "." and name ~= ".." and (name:match("%.prompt$") or name:match("%.md$"))
-       and name:lower() ~= "readme.md" then
-      local txt = FX.readFile(dir .. "/" .. name)
-      if txt then
-        out[#out + 1] = { stem = (name:gsub("%.prompt$", ""):gsub("%.md$", "")), text = txt }
-      end
-    end
-  end
-  return out
-end
-
--- Write a resolved agent's --mcp-config JSON to a per-agent file; returns the path.
-function FX.writeMcpConfig(agentName, cfgTable)
-  hs.fs.mkdir(MCP_CONFIG_DIR)
-  local safe = tostring(agentName or "agent"):gsub("[^%w%-_.]", "_")
-  local path = MCP_CONFIG_DIR .. "/" .. safe .. ".json"
-  FX.writeFile(path, core.json.encode(cfgTable or { mcpServers = {} }))
-  return path
 end
 
 -- Create a project folder (F3), with real `mkdir -p` semantics: every missing
@@ -3764,20 +3556,6 @@ function FX.ensureKittyRemote()
   return "ok"
 end
 
--- Per-session autopilot (Phase 4c-C): a file holding an expiry epoch.
-function FX.autopilotExpiry(key)
-  return tonumber(FX.readFile(AUTOPILOT_DIR .. "/" .. key) or "") or 0
-end
-function FX.autopilotActive(key) return FX.autopilotExpiry(key) > FX.now() end
-function FX.setAutopilot(key, expiry)
-  hs.fs.mkdir(AUTOPILOT_DIR)
-  -- Atomic (temp+rename): cc-approve.sh reads this on the gated hot path, and a
-  -- torn truncate-then-write read would evaluate as expiry 0 (autopilot off) --
-  -- same invariant FX.writeResolvedPolicy documents.
-  FX.writeFileAtomic(AUTOPILOT_DIR .. "/" .. key, tostring(math.floor(expiry)))
-end
-function FX.clearAutopilot(key) os.remove(AUTOPILOT_DIR .. "/" .. key) end
-
 -- Per-session gated-tools override (Feature D): a dedicated file per session that
 -- cc-approve.sh reads on its hot path. "" / nil = no override; "-" = gate nothing.
 function FX.gateToolsOverride(key) return FX.readFile(GATE_TOOLS_DIR .. "/" .. key) end
@@ -3789,40 +3567,6 @@ function FX.setGateToolsOverride(key, str)
   FX.writeFileAtomic(GATE_TOOLS_DIR .. "/" .. key, str)
 end
 function FX.clearGateToolsOverride(key) os.remove(GATE_TOOLS_DIR .. "/" .. key) end
-
--- DR6 per-session model auto-routing opt-in (off by default, NEVER fleet-wide). The
--- file's mere presence under cc-automodel/<key> = on for that session; same per-session
--- file posture as gate-tools, reaped on SessionEnd (cc-lib.sh). Wrapped in a do-block so
--- AUTOMODEL_DIR is an FX upvalue, NOT a main-chunk local (the file is at Lua's 200-cap).
-do
-  local AUTOMODEL_DIR = os.getenv("CC_AUTOMODEL_DIR") or (os.getenv("HOME") .. "/.claude/cc-automodel")
-  function FX.autoModelOn(key) return key ~= nil and FX.readFile(AUTOMODEL_DIR .. "/" .. key) ~= nil end
-  function FX.setAutoModel(key, on)
-    if on then hs.fs.mkdir(AUTOMODEL_DIR); FX.writeFile(AUTOMODEL_DIR .. "/" .. key, "1")
-    else os.remove(AUTOMODEL_DIR .. "/" .. key) end
-  end
-end
-
--- L2 named policy bundles. The override file = the session's chosen bundle name
--- (detail-panel Policy dropdown); the resolved file = core.resolvePolicy output
--- the gate (cc-approve.sh) reads. KEEP IN SYNC: cc-approve.sh reads POLICY_DIR/<key>.
-function FX.policyOverride(key) return FX.readFile(POLICY_OVERRIDE_DIR .. "/" .. key) end
-function FX.setPolicyOverride(key, name)
-  hs.fs.mkdir(POLICY_OVERRIDE_DIR)
-  FX.writeFile(POLICY_OVERRIDE_DIR .. "/" .. key, name)
-end
-function FX.clearPolicyOverride(key) os.remove(POLICY_OVERRIDE_DIR .. "/" .. key) end
-function FX.writeResolvedPolicy(key, str)
-  hs.fs.mkdir(POLICY_DIR)
-  -- Atomic (temp + rename) like FX.patchStatus/writeDecision: cc-approve.sh reads
-  -- this file on the gated hot path, so a torn truncate-then-write could briefly
-  -- drop the bundle's deny rules. os.rename is atomic on the same filesystem.
-  local path = POLICY_DIR .. "/" .. key
-  local tmp = path .. ".tmp." .. tostring(FX.now())
-  local f = io.open(tmp, "w")
-  if f then f:write(str); f:close(); os.rename(tmp, path) end
-end
-function FX.clearResolvedPolicy(key) os.remove(POLICY_DIR .. "/" .. key) end
 
 -- Cached git-root resolver (Feature B). Shells out at most once per distinct cwd
 -- for the panel's life (a session's cwd rarely changes), so the 1s refresh never
@@ -4430,10 +4174,6 @@ function FX.removeStatus(key)
   end
   os.remove(GATE_TOOLS_DIR .. "/" .. key)
   os.remove((os.getenv("CC_APPROVED_DIR") or (home .. "/.claude/cc-approved")) .. "/" .. key)
-  os.remove(AUTOPILOT_DIR .. "/" .. key)
-  os.remove(POLICY_DIR .. "/" .. key)
-  os.remove(POLICY_OVERRIDE_DIR .. "/" .. key)
-  os.remove((os.getenv("CC_AUTOMODEL_DIR") or (home .. "/.claude/cc-automodel")) .. "/" .. key)
   -- ready-to-merge request + Shepherd's answer (cc_remove drops the same files)
   local mergeDir = os.getenv("CC_MERGE_DIR") or (home .. "/.claude/cc-merge")
   os.remove(mergeDir .. "/" .. key .. ".json")
@@ -6397,20 +6137,21 @@ function FX.gateBlamePrune(reqs)
 end
 
 -- ---- Main is still green (2026-10-03, mining round 2 unit E1b) ---------------------------------
--- A routine with action "gate" (cc-schedules.json; opt-in, none by default) runs its repo's merge
--- gate (core.mainGreenGateFor) in the repo's MAIN checkout through the gate lane, `low`
--- (FX.mergeGatePump), one check per repo at a time. The routine tick only queues it
--- (FX._mainGreen.due): FX.stepMainGreen runs after the stacks are stamped, starts it, judges each finished run once (core.mainGreenVerdict) and stamps it.mainRed on every
+-- A check runs its repo's merge gate (core.mainGreenGateFor) in the repo's MAIN checkout through the
+-- gate lane, `low` (FX.mergeGatePump), one check per repo at a time. A { name, folder, branch? }
+-- record put on FX._mainGreen.due is a request (a routine with action "gate" put it there until
+-- routines were removed on 2026-11-19; nothing in the panel does now): FX.stepMainGreen runs after
+-- the stacks are stamped, starts it, judges each finished run once (core.mainGreenVerdict) and stamps it.mainRed on every
 -- card of a red repo. Red: ONE banner (plus ntfy when escalation push is on) and a coach-log entry;
 -- the next green clears the flag; couldn't-run and timed-out change nothing. Each repo's record is
 -- kept in ~/.claude/cc-main-green.json, so a reload keeps the flag and doesn't banner it again.
 FX.MAIN_GREEN_FILE = os.getenv("CC_MAIN_GREEN_FILE") or (CLAUDE_DIR .. "/cc-main-green.json")
-FX._mainGreen = { state = nil, due = {} }   -- state: common dir -> record (nil until read); due: routines fired
+FX._mainGreen = { state = nil, due = {} }   -- state: common dir -> record (nil until read); due: checks asked for
 
 function FX.mainGreenLoad()
   if FX._mainGreen.state == nil then
-    FX._mainGreen.state = core.mainGreenPrune(core.parseMainGreen(FX.readFile(FX.MAIN_GREEN_FILE)),
-      core.scheduleList(FX.readSchedules()))
+    -- 2026-11-19: no longer pruned to the repos a gate routine names (routines were removed)
+    FX._mainGreen.state = core.parseMainGreen(FX.readFile(FX.MAIN_GREEN_FILE))
   end
   return FX._mainGreen.state
 end
@@ -6419,20 +6160,7 @@ function FX.mainGreenSave()
   if not ok then print("[cc-dashboard] ❌ main green: couldn't write " .. FX.MAIN_GREEN_FILE) end
   return ok
 end
--- The routines changed (the board): a repo no gate routine checks any more drops its flag.
-function FX.mainGreenPruneTo(routines)
-  local st = FX.mainGreenLoad()
-  local kept, before, after = core.mainGreenPrune(st, routines), 0, 0
-  for _ in pairs(st) do before = before + 1 end
-  for _ in pairs(kept) do after = after + 1 end
-  if after ~= before then
-    FX._mainGreen.state = kept
-    FX.mainGreenSave()
-    print("[cc-dashboard] 🔍 main green: " .. (before - after) .. " repo(s) no gate routine checks any more")
-  end
-end
-
--- Start (queue) one check for routine `r` -- the board's Run, or a due routine FX.stepMainGreen let
+-- Start (queue) one check for request `r` ({ name, folder, branch? }) that FX.stepMainGreen let
 -- through. Returns the lane record, or nil and why. A check already waiting or running is the one.
 function FX.mainGreenFire(r, cfg, ident)
   local name = tostring(type(r) == "table" and r.name or "?")
@@ -6552,7 +6280,7 @@ end
 -- Tick, after the stacks (repoKey) are stamped.
 function FX.stepMainGreen(list, cfg)
   local state = FX.mainGreenLoad()
-  -- the routines fired this tick
+  -- the checks asked for since the last tick
   local due = FX._mainGreen.due
   FX._mainGreen.due = {}
   for _, r in ipairs(due) do
@@ -8891,10 +8619,9 @@ local injectionTailAt = 0
 -- the in-flight ones instead of interleaving (keys land in the wrong session).
 -- (Assigned to the local forward-declared above FX.runImprove, whose async
 -- callback needs it before this line runs.)
--- extraStagger (DR6, optional): seconds ADDED to this slot's reservation so the next
--- serialized dispatch waits longer. A model-auto-routing feed prepends a `/model` switch
--- (~0.74s of extra keystroke ladder inside the one paste); reserving the extra keeps the
--- chain from running past BULK_STAGGER and interleaving with the next target's keys.
+-- extraStagger (optional): seconds ADDED to this slot's reservation so the next serialized
+-- dispatch waits longer, for a chain longer than BULK_STAGGER. (Model auto-routing's `/model`
+-- preface was its first user; it was removed 2026-11-19 and no caller passes one today.)
 function dispatchSerialized(item, action, fn, extraStagger)
   if core.actionIsHeadless(item, action) then fn() return end
   local delay
@@ -8925,9 +8652,9 @@ end
 
 -- ---- Automation dry run and trace (2026-09-29) ----
 -- Build program unit 14. Every AUTOMATIC effect goes through FX.automationAct: the typed ones in
--- FX.typeWhenReady's slot (a rule's nudge or continue, auto-continue, the
+-- FX.typeWhenReady's slot (auto-continue, the
 -- self-summary, a mailbox line, the /rc sweep), the rest at their call sites (auto-respawn,
--- ending a tab-less leftover, a rule's log/relabel, a mailbox send). With automation.dryRun or the kind's own <feature>.dryRun on (core.automationDryRun) it
+-- ending a tab-less leftover, a mailbox send). With automation.dryRun or the kind's own <feature>.dryRun on (core.automationDryRun) it
 -- records would_<kind> and acts on nothing. Otherwise it runs the effect exactly as before: fn's
 -- `false, why` -- or FX.automationRefuse(why) inside it -- records a refusal, anything else acted.
 -- Every decision goes to the Trace ring (core.traceAdd: a repeat bumps a count) and, once per new
@@ -8982,8 +8709,7 @@ function FX.automationAct(kind, it, detail, fn)
 end
 
 -- ---- Readiness before typing (2026-09-28) ----
--- Build program unit 11. Every AUTOMATED send -- a rule's nudge or
--- continue, auto-continue, the self-summary, the /rc sweep -- comes here instead of straight to
+-- Build program unit 11. Every AUTOMATED send -- auto-continue, the self-summary, the /rc sweep -- comes here instead of straight to
 -- dispatchSerialized. It waits out the settle time, then, in the serialized slot right before
 -- typing, asks core.readyToType about the live status file and (kitty) the screen. A refusal
 -- ledgers ONE typing_refused event and holds the session until its status changes
@@ -9977,7 +9703,7 @@ end
 -- as one burst, which Claude Code's input can read as a paste -- the Return becomes a newline in
 -- the composer instead of submitting it. The first text goes synchronously, after the liveness
 -- probe (R1-15), so the result is a real delivery; each Return is its own send-key a beat later,
--- and a second line (a /model preface's task) follows its predecessor's Return.
+-- and a second line follows its predecessor's Return.
 FX.KITTY_RETURN_GAP = 0.15
 function FX.kittyType(target, lines)
   local item = kittyItem(target)
@@ -10023,21 +9749,15 @@ end
 -- more reliable in the VS Code extension. payload = { text=…, imagePath=… }.
 -- Best-effort: depends on the chat input being focusable. The prior text
 -- clipboard is restored afterwards.
--- payload.preface (DR6): a slash command (e.g. "/model opus") typed + submitted ONCE
--- before the main text, WITHIN the same focus session, so the model switch and the task
--- feed are a single atomic delivery (one window match, one synchronous return -- the
--- caller's pop/commit can't race a 2nd tick). The preface is always a slash command, so
--- it gets the autocomplete double-Return.
+-- (2026-11-19: the preface -- model auto-routing's "/model <tier>" typed before a fed task --
+-- went with model auto-routing.)
 function FX.pasteIntoWindow(target, payload)
   payload = payload or {}
-  local preface = (type(payload.preface) == "string" and #payload.preface > 0) and payload.preface or nil
-  -- kitty: no clipboard-image attach via @; send the text (if any) headlessly. A preface
-  -- goes first; FX.kittyType sequences the writes (each waited for), so the two submits keep
-  -- their order and never race the control socket. 2026-09-28: each line and its Return are
-  -- separate writes. (DR6 auto-routing never prefaces a kitty/terminal feed.)
+  -- kitty: no clipboard-image attach via @; send the text (if any) headlessly. FX.kittyType
+  -- sequences the writes (each waited for). 2026-09-28: each line and its Return are separate
+  -- writes.
   if isKitty(target) then
     local lines = {}
-    if preface then lines[#lines + 1] = preface end
     if payload.text and #payload.text > 0 then lines[#lines + 1] = payload.text end
     if #lines == 0 then return false end
     -- R1-15: liveness-probe so a paste into a dead window reports false (task stays queued).
@@ -10104,22 +9824,7 @@ function FX.pasteIntoWindow(target, payload)
           pcall(function() hs.eventtap.keyStroke({ "cmd" }, "v") end)
           after(0.12, function() runFrom(i + 1) end)
         end
-        -- DR6: an optional slash-command preface (e.g. "/model opus") is submitted
-        -- first (autocomplete double-Return), then we settle before the main steps so
-        -- the switch applies before the task lands -- all in this one focus session.
-        if preface then
-          hs.pasteboard.setContents(preface)
-          hs.eventtap.keyStroke({ "cmd" }, "v")
-          after(0.12, function()
-            hs.eventtap.keyStroke({}, "return")           -- accept the autocomplete
-            after(0.12, function()
-              hs.eventtap.keyStroke({}, "return")         -- submit the slash command
-              after(0.5, function() runFrom(1) end)       -- let /model apply, then feed
-            end)
-          end)
-        else
-          runFrom(1)
-        end
+        runFrom(1)
       end)
     end)
   end)
@@ -10639,9 +10344,9 @@ function FX.spawnSession(editor, project, task, permissionMode, providerId, agen
   -- bare `claude`, unchanged.
   local profile = core.providerById(cfg, core.spawnProviderKey(cfg, providerId))
   local env = profile and core.providerEnv(profile) or nil
-  -- DR7: a raw per-variant ANTHROPIC_MODEL (A/B model-axis on native Anthropic, no
-  -- provider profile needed). Only when there's no provider env already (a profile's
-  -- model wins) and the model is non-empty.
+  -- A raw ANTHROPIC_MODEL (respawn relaunching a session on the model it ran; A/B compare's
+  -- model axis used it too until it was removed 2026-11-19). Only when there's no provider env
+  -- already (a profile's model wins) and the model is non-empty.
   if (not env) and type(modelOverride) == "string" and modelOverride ~= "" then
     env = { { name = "ANTHROPIC_MODEL", value = modelOverride, secret = false } }
   end
@@ -10672,8 +10377,8 @@ function FX.spawnSession(editor, project, task, permissionMode, providerId, agen
     vscodeFlavor   = core.config(cfg, "spawn.vscodeFlavor", "extension"),  -- extension | terminal
     isNew          = isNew == true,  -- brand-new project folder -> cold-start-robust spawn ladder
   }
-  -- L1 "spawn from a saved agent": profile-derived launch flags (persona, MCP
-  -- config, --agent, --add-dir knowledge, --plugin-dir). Absent -> byte-identical.
+  -- Extra launch flags (the find-only audit preset, restart in place; saved agent profiles used them
+  -- too until they were removed 2026-11-19). Absent -> byte-identical.
   if type(agentOpts) == "table" then
     opts.appendSystemPrompt = agentOpts.appendSystemPrompt
     opts.mcpConfigPath = agentOpts.mcpConfigPath
@@ -10720,24 +10425,11 @@ function FX.spawnSession(editor, project, task, permissionMode, providerId, agen
     local okh, p = pcall(FX.writePendingHandoff, agentOpts.except, editor, lineage, project)
     handoff = okh and p or nil
   end
-  -- 2026-10-15: a profile's policy bundle (agentOpts.policyBundle) goes the same way: left before
-  -- the launch for the new session's SessionStart, whose key isn't known until then.
-  -- An ssh spawn's hook runs on its own host and the panel never resolves a remote session's
-  -- policy, so nothing is left here for it.
-  local pendPolicy = nil
-  local wantPolicy = type(agentOpts) == "table" and tostring(agentOpts.policyBundle or ""):match("%S") ~= nil
-  if wantPolicy and isSshProfile then
-    print("[cc-orch] ⚠️ policy bundle '" .. tostring(agentOpts.policyBundle) .. "' not applied: a session on an ssh host reads its own host's policy")
-  elseif wantPolicy then
-    local okp, p = pcall(FX.writePendingPolicy, cfg, editor, lineage, project, agentOpts.policyBundle)
-    pendPolicy = okp and p or nil
-  end
   if spec.kind == "kitty" then
     -- R3-02: a nil argv means spawnSpec fail-closed (e.g. invalid ssh dest). Abort
     -- and log instead of crashing on table.concat / indexing a nil argv.
     if not spec.argv then
       if handoff then os.remove(handoff) end
-      if pendPolicy then os.remove(pendPolicy) end
       print("[cc-orch] kitty spawn aborted: " .. tostring(spec.error))
       pcall(function() FX.alert("Claude Shepherd: kitty spawn aborted (" .. tostring(spec.error) .. ")") end)
       return false
@@ -11528,7 +11220,7 @@ end
 
 -- "Open" on an idle worktree row. The path is only ever used if the repo ITSELF lists it
 -- (core.openWorktreeVerdict), so a crafted webview message can't spawn anywhere else.
--- Spawns like FX.abLaunch does (isNew: the cold-start window wait, which only accepts the
+-- Spawns as a brand-new folder (isNew: the cold-start window wait, which only accepts the
 -- worktree's own window); honours spawn.live (a dry run arms no pending guard).
 function FX.openWorktree(stackKey, path)
   local any
@@ -11726,218 +11418,11 @@ function FX.newWorktreeTab(stackKey, specJson)
                      prompt = core.worktreeTabPrompt(req, spec.task, lease) })
 end
 
--- ---- DR7: A/B fork-to-compare (explicitly-invoked, operator-aware) ------------
--- Registry of active cohorts (cc-ab.json). AB_FILE lives in this do-block so it is an
--- FX upvalue, not a main-chunk local (the file is at Lua's 200-local cap).
-do
-  local AB_FILE = os.getenv("CC_AB_FILE") or (os.getenv("HOME") .. "/.claude/cc-ab.json")
-  function FX.readAbCohorts()
-    local c = FX.readFile(AB_FILE)
-    if c then
-      local ok, t = pcall(function() return hs.json.decode(c) end)
-      if ok and type(t) == "table" and type(t.cohorts) == "table" then return t end
-    end
-    return { cohorts = {} }
-  end
-  function FX.writeAbCohorts(t) FX.writeFile(AB_FILE, hs.json.encode(t or { cohorts = {} })) end
-end
-
--- Match a cohort variant to its live tile by cwd == worktreePath (the spawn opens VS
--- Code on the worktree folder, so the session's cwd is that path). An FX member (no
--- main-chunk local) to stay under Lua's 200-local cap.
-function FX.abTileForPath(path)
-  for _, it in pairs(byKey) do if it.cwd == path then return it end end
-  return nil
-end
-
--- Launch a cohort: a git worktree per variant (rolling back created ones on any add
--- failure), then spawn each variant into its worktree (VS Code, cold-start so the
--- untrusted worktree folder can't swallow the task), then record the registry. Variants
--- differ by model (raw ANTHROPIC_MODEL) and/or provider and/or prompt.
-function FX.abLaunch(spec)
-  spec = type(spec) == "table" and spec or {}
-  -- millisecond cohort id so two launches in the same wall-clock second can't collide
-  -- on branch/worktree names (the modal never supplies a cohort).
-  if not spec.cohort or spec.cohort == "" then
-    spec.cohort = "c" .. tostring(math.floor(hs.timer.secondsSinceEpoch() * 1000))
-  end
-  local plan = core.abCohortPlan(spec)
-  if not plan.ok then
-    pcall(function() FX.alert("Claude Shepherd: A/B — " .. tostring(plan.error)) end)
-    return { ok = false, error = plan.error }
-  end
-  -- Require a real git repo (worktree add would fail anyway -- fail early + clearly).
-  if not FX.gitRoot(plan.repoRoot) then
-    pcall(function() FX.alert("Claude Shepherd: A/B needs a git repo (no repo at that folder)") end)
-    return { ok = false, error = "not a git repo" }
-  end
-  local created = {}
-  for _, v in ipairs(plan.variants) do
-    local out, ok = hs.execute(core.gitWorktreeAddCmd(plan.repoRoot, v.worktreePath, v.branch, plan.base) .. " 2>&1", true)
-    if not ok then
-      -- roll back the worktrees AND branches already created -> a failed launch leaves no trace
-      for _, c in ipairs(created) do
-        hs.execute(core.gitWorktreeRemoveCmd(plan.repoRoot, c.path) .. " 2>&1", true)
-        hs.execute(core.gitBranchDeleteCmd(plan.repoRoot, c.branch) .. " 2>&1", true)
-      end
-      pcall(function() FX.alert("Claude Shepherd: A/B worktree failed — " .. tostring(out):sub(1, 140)) end)
-      return { ok = false, error = out }
-    end
-    created[#created + 1] = { path = v.worktreePath, branch = v.branch }
-  end
-  for _, v in ipairs(plan.variants) do
-    -- R2-12: pass the explicit bare-claude sentinel ("") for a provider-less variant
-    -- (matching the respawn paths), NOT nil. spawnProviderKey treats nil as "use the
-    -- configured spawn.provider default" -- so a model-axis variant with a default
-    -- provider configured would inherit that provider's model and never apply v.model,
-    -- defeating the A/B model comparison. "" forces bare claude -> env stays nil ->
-    -- the modelOverride branch applies v.model as a raw ANTHROPIC_MODEL.
-    FX.spawnSession("vscode", v.worktreePath, v.task, spec.mode, v.provider or "", nil, true, v.model)
-  end
-  local reg = FX.readAbCohorts()
-  reg.cohorts[plan.cohort] = { repoRoot = plan.repoRoot, base = plan.base, task = spec.task or "",
-    created = os.time(), variants = plan.variants }
-  FX.writeAbCohorts(reg)
-  ledgerFor({ name = "A/B " .. plan.cohort, cwd = plan.repoRoot },
-    { type = "ab_launch", cohort = plan.cohort, count = #plan.variants })
-  pcall(function() FX.alert("Claude Shepherd: launched A/B — " .. #plan.variants .. " variants in worktrees") end)
-  return { ok = true, cohort = plan.cohort }
-end
-
--- Compare payload for the A/B panel: each cohort's variants matched to their live tile +
--- DR4 run score (when the ledger is on), with abCompare's suggested winner.
-function FX.abData()
-  local reg = FX.readAbCohorts()
-  local led = ledgerEnabled() and FX.readLedger({}) or nil
-  local scoreOpts = core.scoreOpts(loadConfig())   -- 2026-09-30: score.weights reaches the compare
-  local out = {}
-  for cohort, c in pairs(reg.cohorts or {}) do
-    local variants, scores = {}, {}
-    for _, v in ipairs(c.variants or {}) do
-      local tile = FX.abTileForPath(v.worktreePath)
-      local sid = tile and tile.session_id
-      local score, hadData
-      if led and sid and tostring(sid) ~= "" then
-        local r = core.runScore(led.events, sid, scoreOpts); score, hadData = r.score, r.hadData
-        scores[v.label] = { score = score, hadData = hadData }
-      end
-      variants[#variants + 1] = { label = v.label, model = v.model, provider = v.provider,
-        branch = v.branch, worktreePath = v.worktreePath, live = tile ~= nil,
-        status = tile and tile.status or nil, activity = (tile and tile.activity) or "",
-        score = score, hadData = hadData }
-    end
-    local cmp = core.abCompare(c.variants, scores)
-    out[#out + 1] = { cohort = cohort, repoRoot = c.repoRoot, task = c.task or "",
-      created = c.created, variants = variants, winner = cmp.winner }
-  end
-  return { cohorts = out, ledgerOn = ledgerEnabled() }
-end
-
--- Keep the winner: close the LOSER tiles + remove their worktrees (winner's worktree +
--- branch stay for you to merge), then drop the cohort. Gated by a confirm in the handler.
-function FX.abKeep(cohort, winnerLabel)
-  local reg = FX.readAbCohorts()
-  local c = reg.cohorts[cohort]
-  if not c then return { ok = false } end
-  local removed = 0
-  for _, v in ipairs(c.variants or {}) do
-    if v.label ~= winnerLabel then
-      local tile = FX.abTileForPath(v.worktreePath)
-      if tile then
-        -- #29: serialize each loser's ⌘⇧W on the shared injection tail like every
-        -- other close path (ctx-menu, drain, bulk, detail panel). Called DIRECTLY in
-        -- this synchronous loop -- with ~100-300ms blocking git hs.execute()s between
-        -- iterations -- every scheduled close beat came due at once and fired
-        -- back-to-back into whichever window was frontmost: the second chord could
-        -- close the WINNER's window (or an unrelated VS Code project). Each slot
-        -- re-focuses its own loser right before its chord.
-        local target = FX.targetFor(tile)
-        dispatchSerialized(tile, "close", function() FX.closeWindow(target) end)
-        FX.removeStatus(tile.key)
-      end
-      hs.execute(core.gitWorktreeRemoveCmd(c.repoRoot, v.worktreePath) .. " 2>&1", true)
-      hs.execute(core.gitBranchDeleteCmd(c.repoRoot, v.branch) .. " 2>&1", true)  -- discard the loser fully
-      removed = removed + 1
-    end
-  end
-  reg.cohorts[cohort] = nil
-  FX.writeAbCohorts(reg)
-  ledgerFor({ name = "A/B " .. cohort, cwd = c.repoRoot },
-    { type = "ab_keep", cohort = cohort, winner = winnerLabel or "?", removed = removed })
-  return { ok = true, removed = removed }
-end
-
--- Optional LLM-judge pass: build the rubric from each variant's recent output and paste
--- it into the FIRST live variant's session (serialized + delivery-gated). The verdict
--- appears there for the operator to read (explicit, never silent).
-function FX.abJudge(cohort)
-  local reg = FX.readAbCohorts()
-  local c = reg.cohorts[cohort]
-  if not c then return false end
-  local entries, firstTile = {}, nil
-  for _, v in ipairs(c.variants or {}) do
-    local tile = FX.abTileForPath(v.worktreePath)
-    local out = ""
-    if tile and tile.transcript_path and not tile.remote then
-      out = table.concat(core.transcriptRecent(FX.readTail(tile.transcript_path, 32768), 6, 400), "\n")
-    end
-    entries[#entries + 1] = { label = v.label, model = v.model, output = out }
-    if not firstTile and tile and not tile.remote then firstTile = tile end
-  end
-  if not firstTile then
-    pcall(function() FX.alert("Claude Shepherd: A/B judge needs at least one live local variant") end)
-    return false
-  end
-  local prompt = core.abJudgePrompt(c.task, entries)
-  dispatchSerialized(firstTile, "ab-judge", function()
-    if FX.pasteIntoWindow(winTarget(firstTile), { text = prompt }) then
-      pcall(function() FX.alert("Claude Shepherd: sent the A/B judge prompt to " .. tostring(firstTile.name)) end)
-    else
-      pcall(function() FX.alert("Claude Shepherd: couldn't deliver the judge prompt (no window match)") end)
-    end
-  end)
-  return true
-end
-
 -- Relabel + close are driven by IN-WEBVIEW UI (inline rename input / inline
 -- confirm), not native hs.dialog — native dialogs activate the Hammerspoon app,
 -- which yanks its console window over your work. The right-click popup just asks
 -- the webview to start the interaction; the webview posts back "relabel"/"close".
 
--- Enriched template list for the panel: each {name, body, vars[], version,
--- versionCount}. Surfaces any dropped (corrupt/hand-edited) records to the console
--- so a save/delete can't silently reap them (mirrors the L1 agent-load posture).
--- Shared by the nudge "Tpl ▾" menu reply and the New-Session modal picker.
-local function enrichedTemplates()
-  local loaded = core.templateLoad(FX.readTemplates())
-  if #loaded.errors > 0 then
-    local names = {}
-    for _, e in ipairs(loaded.errors) do names[#names + 1] = e.name end
-    print("[cc-tpl] dropped " .. #loaded.errors .. " invalid template(s): " .. table.concat(names, ", "))
-  end
-  local out = {}
-  for _, r in ipairs(loaded.valid) do
-    out[#out + 1] = { name = r.name, body = core.composeTemplate(r) or "",
-      vars = core.effectiveVars(r), version = r.version or 1,
-      versionCount = (r.versions and #r.versions) or 0 }
-  end
-  return out
-end
-
--- Richer reply for the Templates EDITOR (L3 deferred-polish): the structured
--- fields (description / expected_output / legacy text) the inline Tpl menu hides,
--- plus the composed body + detected vars + version count. A superset of
--- enrichedTemplates (which sends only the composed body for the insert menu).
-local function editorTemplates()
-  local out = {}
-  for _, r in ipairs(core.templateList(FX.readTemplates())) do
-    out[#out + 1] = { name = r.name, description = r.description or "",
-      expected_output = r.expected_output or "", text = r.text or "",
-      body = core.composeTemplate(r) or "", vars = core.effectiveVars(r),
-      version = r.version or 1, versionCount = (r.versions and #r.versions) or 0 }
-  end
-  return out
-end
 
 -- 🔌 MCPs & Skills viewer payload. Config MCPs (env-redacted) merged with the
 -- last live `claude mcp list` status (nil until the user clicks Re-check), plus
@@ -12017,7 +11502,6 @@ function FX.worklistPayload()
         items = core.worklistScopeList(st, k),
         todoOn = (tm ~= nil) or nil,
         hasTodo = hasTodo or nil,
-        playbooks = FX.playbookList(st, k),
         run = FX.runPanel(k),                                  -- ▶ the tab's checklist run (2026-10-03)
         runWhy = core.runWhyMap(core.worklistScopeList(st, k)),
       }
@@ -12035,7 +11519,6 @@ function FX.worklistPayload()
         items = list,
         todoOn = (tm ~= nil) or nil,
         hasTodo = (type(tm) == "table" and tm.cwd and FX.todoFileAt(tm.cwd)) or nil,
-        playbooks = FX.playbookList(st, k),
         run = FX.runPanel(k),
         runWhy = core.runWhyMap(list),
       }
@@ -12436,17 +11919,12 @@ local function handleBridgeMsg(msg)
     local recent = core.recentSeed(FX.readRecent(), active)
     local browse = FX.listDirs(ORCH_DEFAULT_DIR)
     local pstate = FX.readPresets()
-    local agentState = { agents = core.agentList(FX.readAgents()),
-                         mcp = core.mcpList(FX.readMcp()), skills = FX.listSkills() }
-    local tpls = enrichedTemplates()
-    local tplJson = (#tpls > 0) and hs.json.encode(tpls) or "[]"
     FX.scanFolders()
     pcall(function()
       wv:evaluateJavaScript("showNew(" .. hs.json.encode(cfg) .. ", "
         .. hs.json.encode(recent.dirs) .. ", " .. hs.json.encode(browse) .. ", "
         .. hs.json.encode({ presets = core.presetList(pstate),
-                            lastByProject = pstate.lastByProject or {} }) .. ", "
-        .. hs.json.encode(agentState) .. ", " .. tplJson .. ")")
+                            lastByProject = pstate.lastByProject or {} }) .. ")")
     end)
     return
   end
@@ -12454,51 +11932,6 @@ local function handleBridgeMsg(msg)
     local path = (payload.v and tostring(payload.v) ~= "") and tostring(payload.v) or ORCH_DEFAULT_DIR
     local browse = FX.listDirs(path)
     pcall(function() wv:evaluateJavaScript("ccBrowse(" .. hs.json.encode(browse) .. ")") end)
-    return
-  end
-  -- DR7 A/B fork-to-compare. open-ab: feed the panel the active cohorts + provider list +
-  -- recent repos. ab-launch / ab-keep / ab-judge drive the worktree spawn / keep-winner /
-  -- judge effects (all FX, all operator-invoked). Each re-pushes ccAb so the panel refreshes.
-  if a == "open-ab" then
-    local cfg = loadConfig()
-    local recent = {}
-    for _, it in pairs(byKey) do if it.cwd then recent[#recent + 1] = it.cwd end end
-    recent = core.recentSeed(FX.readRecent(), recent).dirs
-    pcall(function() wv:evaluateJavaScript("window.ccAb(" .. hs.json.encode(FX.abData())
-      .. ", " .. hs.json.encode({ providers = core.config(cfg, "providers", {}) or {},
-                                  recent = recent }) .. ")") end)
-    return
-  end
-  if a == "ab-launch" then
-    local oks, spec = pcall(function() return hs.json.decode(payload.text or "{}") end)
-    if oks and type(spec) == "table" then
-      FX.abLaunch(spec)
-      refresh()
-      pcall(function() wv:evaluateJavaScript("window.ccAb(" .. hs.json.encode(FX.abData()) .. ")") end)
-    end
-    return
-  end
-  if a == "ab-keep" then
-    local okk, req = pcall(function() return hs.json.decode(payload.text or "{}") end)
-    if okk and type(req) == "table" and req.cohort and req.winner then
-      pcall(function()
-        -- #31: FX.runModal holds pending injection beats (a chain's Return would
-        -- press the default "Keep winner" button unconfirmed).
-        if FX.runModal(function() return hs.dialog.blockAlert("Keep \"" .. tostring(req.winner) .. "\"?",
-             "Close the OTHER variants and remove their git worktrees? The winner's worktree "
-             .. "and branch stay (merge it when ready). This can't be undone.",
-             "Keep winner", "Cancel") end) == "Keep winner" then
-          FX.abKeep(tostring(req.cohort), tostring(req.winner))
-          refresh()
-          wv:evaluateJavaScript("window.ccAb(" .. hs.json.encode(FX.abData()) .. ")")
-        end
-      end)
-    end
-    return
-  end
-  if a == "ab-judge" then
-    local okj, req = pcall(function() return hs.json.decode(payload.text or "{}") end)
-    if okj and type(req) == "table" and req.cohort then FX.abJudge(tostring(req.cohort)) end
     return
   end
   -- Spawn presets (roadmap #4a): save / delete; both reply with the fresh list.
@@ -12514,192 +11947,6 @@ local function handleBridgeMsg(msg)
     local list = core.presetList(FX.readPresets())
     local listJson = (#list > 0) and hs.json.encode(list) or "[]"
     pcall(function() wv:evaluateJavaScript("ccPresets(" .. listJson .. ")") end)
-    return
-  end
-  -- L1 Agent Profiles: save / delete / fork; reply with the fresh list.
-  if a == "agent-save" or a == "agent-delete" or a == "agent-fork" then
-    if a == "agent-save" then
-      local okp, p = pcall(hs.json.decode, payload.text or "{}")
-      local st, saved, errs = core.agentPush(FX.readAgents(), (okp and type(p) == "table") and p or {})
-      if saved then FX.writeAgents(st)
-      else pcall(function() FX.alert("Claude Shepherd: agent invalid — "
-        .. table.concat(errs or { "?" }, "; ")) end) end
-    elseif a == "agent-fork" then
-      local st, ok = core.agentFork(FX.readAgents(), tostring(payload.v or ""))
-      if ok then FX.writeAgents(st) end
-    else
-      FX.writeAgents(core.agentRemove(FX.readAgents(), tostring(payload.v or "")))
-    end
-    local list = core.agentList(FX.readAgents())
-    pcall(function() wv:evaluateJavaScript("ccAgents("
-      .. ((#list > 0) and hs.json.encode(list) or "[]") .. ")") end)
-    return
-  end
-  -- L1 MCP registry: save / delete; reply with the fresh list.
-  if a == "mcp-save" or a == "mcp-delete" then
-    if a == "mcp-save" then
-      local okp, p = pcall(hs.json.decode, payload.text or "{}")
-      local st, saved, errs = core.mcpPush(FX.readMcp(), (okp and type(p) == "table") and p or {})
-      if saved then FX.writeMcp(st)
-      else pcall(function() FX.alert("Claude Shepherd: MCP server invalid — "
-        .. table.concat(errs or { "?" }, "; ")) end) end
-    else
-      FX.writeMcp(core.mcpRemove(FX.readMcp(), tostring(payload.v or "")))
-    end
-    local list = core.mcpList(FX.readMcp())
-    pcall(function() wv:evaluateJavaScript("ccMcp("
-      .. ((#list > 0) and hs.json.encode(list) or "[]") .. ")") end)
-    return
-  end
-  -- L1 Agents registry EDITOR (deferred-polish): full-field authoring + skills/MCP/
-  -- knowledge attach + favorite/fork/archive + an MCP-registry surface. Every action
-  -- replies with the full editor bundle (ccAgentEd) so one round-trip refreshes it all.
-  if a == "open-agents-editor" or a == "agent-ed-save" or a == "agent-ed-delete"
-     or a == "agent-ed-fork" or a == "agent-ed-flag"
-     or a == "mcp-ed-save" or a == "mcp-ed-delete" then
-    if a == "agent-ed-save" then
-      local okp, p = pcall(hs.json.decode, payload.text or "{}")
-      p = (okp and type(p) == "table") and p or {}
-      -- a rename carries the old name; look up the prior record under it
-      local oldName = tostring(p.oldName or "")
-      local lookup = (oldName ~= "") and oldName or tostring(p.name or "")
-      local prior = core.agentGet(FX.readAgents(), lookup)
-      -- carry forward the fields the form doesn't expose, so an edit can't drop
-      -- them (modelByMode/requiredEnv/versions + the management flags + lineage).
-      if prior then
-        for _, k in ipairs({ "modelByMode", "requiredEnv", "versions", "forkedFrom",
-                             "lastSpawnedAt", "agentName", "favorite", "hidden", "archived", "deleted" }) do
-          if p[k] == nil and prior[k] ~= nil then p[k] = prior[k] end
-        end
-      end
-      p.oldName = nil  -- not an AGENT_FIELD; strip before validate (would flag unknown)
-      local st0 = FX.readAgents()
-      if oldName ~= "" and oldName ~= tostring(p.name or "") then
-        st0 = core.agentRemove(st0, oldName)  -- name-keyed push won't replace a renamed record
-      end
-      local st, saved, errs = core.agentPush(st0, p)
-      if saved then FX.writeAgents(st)
-      else pcall(function() FX.alert("Claude Shepherd: agent invalid — "
-        .. table.concat(errs or { "?" }, "; ")) end) end
-    elseif a == "agent-ed-delete" then
-      FX.writeAgents(core.agentRemove(FX.readAgents(), tostring(payload.v or "")))
-    elseif a == "agent-ed-fork" then
-      local st, ok = core.agentFork(FX.readAgents(), tostring(payload.v or ""))
-      if ok then FX.writeAgents(st) end
-    elseif a == "agent-ed-flag" then
-      local okp, p = pcall(hs.json.decode, payload.text or "{}")
-      p = (okp and type(p) == "table") and p or {}
-      FX.writeAgents(core.agentSetFlag(FX.readAgents(), tostring(payload.v or ""), p.flag, p.value == true))
-    elseif a == "mcp-ed-save" then
-      local okp, p = pcall(hs.json.decode, payload.text or "{}")
-      local st, saved, errs = core.mcpPush(FX.readMcp(), (okp and type(p) == "table") and p or {})
-      if saved then FX.writeMcp(st)
-      else pcall(function() FX.alert("Claude Shepherd: MCP server invalid — "
-        .. table.concat(errs or { "?" }, "; ")) end) end
-    elseif a == "mcp-ed-delete" then
-      FX.writeMcp(core.mcpRemove(FX.readMcp(), tostring(payload.v or "")))
-    end
-    local lc = loadConfig()
-    local bundleNames = {}
-    for name in pairs(core.policyBundles(lc)) do bundleNames[#bundleNames + 1] = name end
-    table.sort(bundleNames)
-    local bundle = {
-      agents = core.agentList(FX.readAgents()), mcp = core.mcpList(FX.readMcp()),
-      skills = FX.listSkills(), providers = core.config(lc, "providers", {}) or {},
-      bundles = bundleNames,
-    }
-    pcall(function() wv:evaluateJavaScript("ccAgentEd(" .. hs.json.encode(bundle) .. ")") end)
-    return
-  end
-  -- L2 policy bundle/attachment EDITOR (deferred-polish): author policies.bundles
-  -- (a name->bundle MAP) + policies.attachments (an ORDERED array, first match wins)
-  -- INSIDE cc-config.json. Reads the RAW config file, applies a pure cc-core op to
-  -- the policies subtree (the rest of the file rides through), writes it back.
-  if a == "open-policy-editor" or a == "policy-bundle-save" or a == "policy-bundle-delete"
-     or a == "policy-att-add" or a == "policy-att-save" or a == "policy-att-delete"
-     or a == "policy-att-move" then
-    local raw = FX.readFile(CONFIG_FILE)
-    local cfg, malformed = {}, false
-    if raw and #raw > 0 then
-      local ok, parsed = pcall(function() return hs.json.decode(raw) end)
-      if ok and type(parsed) == "table" then cfg = parsed
-      else malformed = true end
-    end
-    -- A non-empty file that won't parse: NEVER write (we'd clobber the user's
-    -- file, losing whatever else is in it). A read (open) still replies with the
-    -- defaults view so the overlay opens, but every mutation bails here.
-    if malformed then
-      pcall(function() FX.alert("Claude Shepherd: cc-config.json is malformed — fix it before editing policies") end)
-      if a ~= "open-policy-editor" then return end
-    end
-    local policies = type(cfg.policies) == "table" and cfg.policies or {}
-    local changed = false
-    local function badAlert(errs) pcall(function() FX.alert("Claude Shepherd: invalid — "
-      .. table.concat(errs or { "?" }, "; ")) end) end
-    if a == "policy-bundle-save" then
-      local okp, p = pcall(hs.json.decode, payload.text or "{}")
-      p = (okp and type(p) == "table") and p or {}
-      local name, oldName = tostring(p.name or ""), tostring(p.oldName or "")
-      p.name = nil; p.oldName = nil  -- not bundle fields
-      if oldName ~= "" and oldName ~= name then policies = core.policyRemoveBundle(policies, oldName) end
-      local np, ok, errs = core.policySetBundle(policies, name, p)
-      if ok then policies = np; changed = true else badAlert(errs) end
-    elseif a == "policy-bundle-delete" then
-      policies = core.policyRemoveBundle(policies, tostring(payload.v or "")); changed = true
-    elseif a == "policy-att-add" then
-      local okp, p = pcall(hs.json.decode, payload.text or "{}")
-      local np, ok, errs = core.policyAddAttachment(policies, (okp and type(p) == "table") and p or {})
-      if ok then policies = np; changed = true else badAlert(errs) end
-    elseif a == "policy-att-save" then
-      local okp, p = pcall(hs.json.decode, payload.text or "{}")
-      p = (okp and type(p) == "table") and p or {}
-      local np, ok, errs = core.policySetAttachment(policies, p.index, p)
-      if ok then policies = np; changed = true else badAlert(errs) end
-    elseif a == "policy-att-delete" then
-      policies = core.policyRemoveAttachment(policies, tonumber(payload.v)); changed = true
-    elseif a == "policy-att-move" then
-      local okp, p = pcall(hs.json.decode, payload.text or "{}")
-      p = (okp and type(p) == "table") and p or {}
-      policies = core.policyMoveAttachment(policies, p.index, p.dir); changed = true
-    end
-    if changed then
-      cfg.policies = policies
-      FX.writeFile(CONFIG_FILE, hs.json.encode(cfg, true))
-    end
-    -- reply with the editor bundle (read fresh so it reflects the write)
-    local nc = loadConfig()
-    local atts = core.config(nc, "policies.attachments", {}) or {}
-    local reply = "{\"bundles\":" .. hs.json.encode(core.policyBundles(nc))
-      .. ",\"attachments\":" .. ((#atts > 0) and hs.json.encode(atts) or "[]")
-      .. ",\"starters\":" .. hs.json.encode(core.DEFAULT_POLICY_BUNDLES)
-      .. ",\"armed\":" .. ((FX.readFile(GATE_FLAG) ~= nil) and "true" or "false") .. "}"
-    pcall(function() wv:evaluateJavaScript("ccPolicyEd(" .. reply .. ")") end)
-    return
-  end
-  -- L6 rules EDITOR (deferred-polish): author cc-rules.json (the engine read it
-  -- before; now it's editable). Each action replies with the fresh rule list +
-  -- the rules.enabled master-switch state.
-  if a == "open-rules-editor" or a == "rule-ed-save" or a == "rule-ed-delete" or a == "rule-ed-toggle" then
-    if a == "rule-ed-save" then
-      local okp, p = pcall(hs.json.decode, payload.text or "{}")
-      p = (okp and type(p) == "table") and p or {}
-      local oldName = tostring(p.oldName or ""); p.oldName = nil  -- not a RULE_FIELD
-      local st0 = FX.readRules()
-      if oldName ~= "" and oldName ~= tostring(p.name or "") then st0 = core.ruleRemove(st0, oldName) end
-      local st, saved, errs = core.rulePush(st0, p)
-      if saved then FX.writeRules(st)
-      else pcall(function() FX.alert("Claude Shepherd: rule invalid — "
-        .. table.concat(errs or { "?" }, "; ")) end) end
-    elseif a == "rule-ed-delete" then
-      FX.writeRules(core.ruleRemove(FX.readRules(), tostring(payload.v or "")))
-    elseif a == "rule-ed-toggle" then
-      local on = (payload.text == "true" or payload.text == true)
-      FX.writeRules(core.ruleSetEnabled(FX.readRules(), tostring(payload.v or ""), on))
-    end
-    local rulesEnabled = core.config(loadConfig(), "rules.enabled", false) == true
-    local list = core.ruleList(FX.readRules())
-    pcall(function() wv:evaluateJavaScript("ccRuleEd("
-      .. ((#list > 0) and hs.json.encode(list) or "[]") .. ", " .. tostring(rulesEnabled) .. ")") end)
     return
   end
   -- Fuzzy folder search (roadmap #4b): rank the CACHED index (no per-keystroke
@@ -12755,40 +12002,8 @@ local function handleBridgeMsg(msg)
     -- Per-project last-used recall (roadmap #4a): every modal spawn records its
     -- options so re-opening the modal on this folder pre-fills them.
     FX.writePresets(core.presetMarkUsed(FX.readPresets(), dir, {
-      editor = editor, permMode = payload.permMode and tostring(payload.permMode) or nil,
-      provider = payload.provider and tostring(payload.provider) or nil }))
-    -- L1 "spawn from a saved agent": resolve the profile -> persona / MCP-config /
-    -- knowledge / plugin flags, write its --mcp-config file, and pass the extra opts.
-    local agentOpts = nil
-    local agentName = payload.agent and tostring(payload.agent) or nil
-    if agentName and agentName ~= "" then
-      local profile = core.agentGet(FX.readAgents(), agentName)
-      if profile then
-        local res = core.resolveAgent(profile, { mcpState = FX.readMcp() })
-        if #res.errors > 0 then
-          print("[cc-orch] agent '" .. agentName .. "' resolve warnings: " .. table.concat(res.errors, "; "))
-        end
-        local mcpPath = res.mcpConfig and FX.writeMcpConfig(profile.name, res.mcpConfig) or nil
-        -- selected skills ride the appended system prompt (native auto-load also applies)
-        local persona = res.appendSystemPrompt
-        if profile.skills and #profile.skills > 0 then
-          local cmds = {}
-          for _, s in ipairs(profile.skills) do cmds[#cmds + 1] = core.skillCommand(s) or s end
-          persona = (persona and (persona .. "\n") or "") .. "Skills available to you: " .. table.concat(cmds, ", ")
-        end
-        -- 2026-10-15: and its policy bundle, which FX.spawnSession leaves for the session it starts
-        agentOpts = { appendSystemPrompt = persona, mcpConfigPath = mcpPath, strictMcp = false,
-                      agentName = res.agentName, addDirs = res.addDirs, pluginDirs = res.pluginDirs,
-                      policyBundle = res.policyBundle }
-        if (not task or task == "") and res.seedPrompt then task = res.seedPrompt end
-        FX.appendLedger({ type = "spawn_agent", name = profile.name, cwd = dir, by = "agent" })
-        -- record lastSpawnedAt for the registry's "last used" sort
-        local pp = {}; for k, v in pairs(profile) do pp[k] = v end; pp.lastSpawnedAt = os.time()
-        FX.writeAgents((core.agentPush(FX.readAgents(), pp)))
-      else
-        print("[cc-orch] spawn-agent: no saved agent named '" .. agentName .. "'")
-      end
-    end
+      editor = editor, permMode = payload.permMode and tostring(payload.permMode) or nil }))
+    local agentOpts = nil   -- the find-only audit preset's launch flags
     -- Find-only audit (build program unit 38, 2026-09-29): the 🔍 chip's built-in preset. It reads
     -- and drives the app, and writes only its findings file, ~/.cc-audit/<project>/AUDIT-FINDINGS.md;
     -- core.auditSpawnPlan holds every rule, this only writes its two launch files (under
@@ -12810,177 +12025,9 @@ local function handleBridgeMsg(msg)
       print("[cc-orch] 🔍 find-only audit of " .. dir .. " -> " .. plan.paths.findings)
       FX.appendLedger({ type = "spawn_agent", name = plan.name, cwd = dir, by = "audit" })
     end
+    -- 2026-11-19: the dialog has no provider choice; nil = the spawn.provider default, as ⌘⌥S
     FX.spawnSession(editor, dir, task, payload.permMode and tostring(payload.permMode) or nil,
-      payload.provider and tostring(payload.provider) or nil, agentOpts, mode == "new")
-    return
-  end
-  -- Saved task templates (roadmap #5c; L3): named reusable task strings in
-  -- cc-templates.json (operator data, outside the Settings round-trip). L3 adds
-  -- structured/versioned records + {{var}} interpolation -- cc-core stays the
-  -- authoritative renderer (no JS render twin to drift).
-  if a == "template-render" then
-    -- Resolve a template to its rendered body: compose, then interpolate the
-    -- operator-supplied vars + built-ins (date/now, and {{prev_output}} = the
-    -- selected tile's latest output) and hand it back to drop into the input
-    -- (NEVER auto-sent). A missing required var alerts instead of rendering.
-    local rec = core.templateGetRecord(FX.readTemplates(), tostring(payload.v or ""))
-    if rec then
-      local opts = {}
-      pcall(function() opts = hs.json.decode(tostring(payload.text or "")) or {} end)
-      local sel = byKey[tostring(opts.key or "")]
-      local prevOut = (sel and type(sel.activity) == "string") and sel.activity or ""
-      local rendered, missing = core.renderTemplate(core.composeTemplate(rec) or "",
-        type(opts.vars) == "table" and opts.vars or {}, { now = os.time(), prevOutput = prevOut })
-      if rendered then
-        pcall(function() wv:evaluateJavaScript("ccTemplateRendered(" .. hs.json.encode({ text = rendered }) .. ")") end)
-      else
-        pcall(function() FX.alert("Claude Shepherd: fill required variables: " .. table.concat(missing or {}, ", ")) end)
-      end
-    end
-    return
-  end
-  if a == "template-import" then
-    -- L3 definition source: import *.prompt / *.md files from the local prompts dir
-    -- (config templates.sourceDir, default ~/.claude/cc-prompts) into the template
-    -- store (versioned via cc-core; strictly local-disk, no network).
-    local dir = core.config(loadConfig(), "templates.sourceDir", nil)
-    dir = (type(dir) == "string" and dir ~= "") and dir or PROMPTS_DIR
-    local files = FX.listPromptFiles(dir)
-    local st, summary = core.promptImport(FX.readTemplates(), files, { now = os.time() })
-    if summary.imported > 0 then FX.writeTemplates(st) end
-    pcall(function() FX.alert("Claude Shepherd: imported " .. summary.imported ..
-      " template(s) from " .. dir .. (summary.skipped > 0 and (" (" .. summary.skipped .. " skipped)") or "")) end)
-    local out = enrichedTemplates()
-    local listJson = (#out > 0) and hs.json.encode(out) or "[]"
-    pcall(function() wv:evaluateJavaScript("ccTemplates(" .. listJson .. ")") end)
-    return
-  end
-  if a == "template-list" or a == "template-save" or a == "template-delete" then
-    if a == "template-save" then
-      -- versioned save (duplicate-on-edit): re-saving a name snapshots the prior
-      -- body into its history and bumps the version; an identical save is a no-op.
-      local nm = tostring(payload.v or ""):gsub("^%s+", ""):gsub("%s+$", "")
-      local tx = tostring(payload.text or ""):gsub("^%s+", ""):gsub("%s+$", "")
-      local st, saved = core.templatePushVersioned(FX.readTemplates(), { name = nm, text = tx }, { now = os.time() })
-      if saved then FX.writeTemplates(st)
-      else pcall(function() FX.alert("Claude Shepherd: template needs a name and text") end) end
-    elseif a == "template-delete" then
-      FX.writeTemplates(core.templateRemove(FX.readTemplates(), tostring(payload.v or "")))
-    end
-    -- enriched reply: each {name, body, vars[], version, versionCount} so the
-    -- panel renders the menu + knows which templates need a var prompt.
-    local out = enrichedTemplates()
-    local listJson = (#out > 0) and hs.json.encode(out) or "[]"
-    pcall(function() wv:evaluateJavaScript("ccTemplates(" .. listJson .. ")") end)
-    return
-  end
-  -- L3 Templates EDITOR (deferred-polish): authoring (description/expected_output
-  -- structured fields, not just the legacy text the Tpl menu saves) + a versioned
-  -- save + revert. Replies with editorTemplates() (the structured list).
-  if a == "template-editor-list" or a == "template-editor-save"
-     or a == "template-editor-delete" or a == "template-revert" then
-    if a == "template-editor-save" then
-      local okp, p = pcall(hs.json.decode, payload.text or "{}")
-      p = (okp and type(p) == "table") and p or {}
-      local rec = { name = tostring(p.name or ""), description = tostring(p.description or ""),
-        expected_output = tostring(p.expected_output or ""), text = tostring(p.text or "") }
-      local stt = FX.readTemplates()
-      -- a rename: move the record under the new name FIRST (preserves version
-      -- history), then the versioned save below snapshots the prior body + bumps.
-      local oldName = tostring(p.oldName or "")
-      if oldName ~= "" and oldName ~= rec.name then
-        local rn, ok = core.templateRename(stt, oldName, rec.name)
-        if ok then stt = rn end
-      end
-      -- carry forward a hand-authored vars schema (labels/defaults) the editor
-      -- doesn't expose, so editing the body can't silently drop it (L7's lesson).
-      local prior = core.templateGetRecord(stt, rec.name)
-      if prior and prior.vars then rec.vars = prior.vars end
-      local st, saved, errs = core.templatePushVersioned(stt, rec, { now = os.time() })
-      if saved then FX.writeTemplates(st)
-      else pcall(function() FX.alert("Claude Shepherd: template invalid — "
-        .. table.concat(errs or { "?" }, "; ")) end) end
-    elseif a == "template-editor-delete" then
-      FX.writeTemplates(core.templateRemove(FX.readTemplates(), tostring(payload.v or "")))
-    elseif a == "template-revert" then
-      local st, ok = core.templateRevert(FX.readTemplates(), tostring(payload.v or ""),
-        tonumber(payload.text), { now = os.time() })
-      if ok then FX.writeTemplates(st) end
-    end
-    local out = editorTemplates()
-    pcall(function() wv:evaluateJavaScript("ccTplEditor("
-      .. ((#out > 0) and hs.json.encode(out) or "[]") .. ")") end)
-    return
-  end
-  -- Version history for the revert view (current head first, then prior snapshots).
-  if a == "template-versions" then
-    local name = tostring(payload.v or "")
-    local vers = core.templateVersions(FX.readTemplates(), name)
-    pcall(function() wv:evaluateJavaScript("ccTplVersions(" .. jsString(name) .. ", "
-      .. ((#vers > 0) and hs.json.encode(vers) or "[]") .. ")") end)
-    return
-  end
-  -- L7 routine board (deferred-polish): open / save / delete / pause-resume. The
-  -- routines live in cc-schedules.json (operator data); the FIRING engine in
-  -- refresh() is untouched -- this is just the editor that replaces hand-editing JSON.
-  if a == "open-routines" or a == "schedule-save" or a == "schedule-delete"
-     or a == "schedule-toggle" then
-    if a == "schedule-save" then
-      local okp, p = pcall(hs.json.decode, payload.text or "{}")
-      local st, saved, errs = core.schedulePush(FX.readSchedules(), (okp and type(p) == "table") and p or {})
-      if saved then FX.writeSchedules(st)
-      else pcall(function() FX.alert("Claude Shepherd: routine invalid — "
-        .. table.concat(errs or { "?" }, "; ")) end) end
-    elseif a == "schedule-delete" then
-      FX.writeSchedules(core.scheduleRemove(FX.readSchedules(), tostring(payload.v or "")))
-    elseif a == "schedule-toggle" then
-      local on = (payload.text == "true" or payload.text == true)
-      FX.writeSchedules(core.scheduleSetEnabled(FX.readSchedules(), tostring(payload.v or ""), on))
-    end
-    -- 2026-10-03 (E1b): a repo whose gate routine went keeps no main-is-red flag
-    pcall(FX.mainGreenPruneTo, core.scheduleList(FX.readSchedules()))
-    local board = core.scheduleBoard(core.scheduleList(FX.readSchedules()), os.time())
-    local lc = loadConfig()
-    local sOn = core.config(lc, "schedules.enabled", false) == true
-    local live = core.config(lc, "spawn.live", false) == true
-    pcall(function() wv:evaluateJavaScript("ccSchedules("
-      .. ((#board > 0) and hs.json.encode(board) or "[]") .. ", "
-      .. tostring(sOn) .. ", " .. tostring(live) .. ")") end)
-    return
-  end
-  -- Run a routine NOW (manual trigger from the board): fire the spawn/digest
-  -- effect immediately, bypassing cron/enabled. Does NOT mutate schedule state --
-  -- the natural firing stays intact (the user explicitly clicked it). Spawns still
-  -- respect spawn.live's dry-run (FX.spawnSession), so this is safe by default.
-  if a == "schedule-run-now" then
-    local r = core.scheduleGet(FX.readSchedules(), tostring(payload.v or ""))
-    if not r then pcall(function() FX.alert("Claude Shepherd: routine not found") end); return end
-    local cfg = loadConfig()
-    if r.action == "digest" then
-      local hours = tonumber(r.digestHours) or 24
-      local report = core.fleetStandup(ledgerSnapshot(), { sinceTs = os.time() - hours * 3600 })
-      local topic = (r.pushTopic and r.pushTopic ~= "") and r.pushTopic
-        or tostring(core.config(cfg, "escalation.pushTopic", ""))
-      if topic and topic ~= "" then
-        FX.push(topic, "Claude Shepherd: shift report (" .. hours .. "h)",
-          core.standupMarkdown(report, { windowLabel = hours .. "h" }):sub(1, 800))
-        pcall(function() FX.alert("Claude Shepherd: pushed '" .. tostring(r.name) .. "' digest") end)
-      else
-        pcall(function() FX.alert("Claude Shepherd: no push topic (set escalation.pushTopic)") end)
-      end
-    -- 2026-10-03 (E1b): Run on a gate routine checks main now -- Adam's own click, so no hold stands it down
-    elseif r.action == "gate" then
-      local g, why = FX.mainGreenFire(r, cfg)
-      pcall(function() FX.alert(g and ("Claude Shepherd: checking " .. tostring(r.branch or "main") .. " is green ('"
-        .. tostring(r.name) .. "', " .. tostring(g.state) .. ")")
-        or ("Claude Shepherd: '" .. tostring(r.name) .. "' can't check main: " .. tostring(why))) end)
-    else
-      FX.spawnSession(r.editor or core.config(cfg, "spawn.editor", "terminal"),
-        r.folder, r.prompt, r.permMode, r.provider or "")
-    end
-    if ledgerEnabled() then ledgerFor({ name = r.name, projectKey = r.folder, cwd = r.folder },
-      { type = "schedule_fire", routine = r.name, kind = r.kind, by = "manual",
-        action = r.action or "spawn" }) end
+      nil, agentOpts, mode == "new")
     return
   end
   if a == "clear" or a == "compact" then
@@ -13021,31 +12068,6 @@ local function handleBridgeMsg(msg)
     if item then FX.runImprove(item) end
     return
   end
-  if a == "autopilot" then
-    local key = tostring(payload.v or "")
-    if key ~= "" then
-      if FX.autopilotActive(key) then
-        FX.clearAutopilot(key)
-        print("[cc-autopilot] off for " .. key)
-      else
-        local cfg = loadConfig()
-        -- R3-16: the gate (cc-approve.sh) honors the per-session autopilot file ONLY when
-        -- policies.autopilot.enabled is true (default off). With the flag off, arming would
-        -- be a dead control plus a FALSE autopilot_arm ledger entry and a misleading "on"
-        -- log. Refuse the arm when the feature is globally disabled.
-        if core.config(cfg, "policies.autopilot.enabled", false) ~= true then
-          print("[cc-autopilot] arm refused for " .. key .. " (disabled in Settings)")
-          pcall(function() FX.alert("Claude Shepherd: Autopilot is disabled in Settings") end)
-          return
-        end
-        local mins = tonumber(core.config(cfg, "policies.autopilot.minutes", 15)) or 15
-        FX.setAutopilot(key, FX.now() + mins * 60)
-        ledgerFor(byKey[key], { type = "autopilot_arm", minutes = mins })
-        print("[cc-autopilot] on for " .. key .. " (" .. mins .. "m)")
-      end
-    end
-    return
-  end
   if a == "set-gate-tools" then
     -- Feature D: per-session gated-tools override. "" -> clear (use fleet default);
     -- "all" -> gate the full fleet list; "none" -> sentinel "-" (gate nothing);
@@ -13065,58 +12087,6 @@ local function handleBridgeMsg(msg)
       end
       ledgerFor(byKey[key], { type = "gate_tools", scope = v })
       print("[cc-gate] per-session tools for " .. key .. " -> " .. (v == "" and "(default)" or v))
-    end
-    refresh()
-    return
-  end
-  -- DR6: per-session model auto-routing opt-in (off by default, NEVER fleet-wide).
-  -- "1" enables for this session, "" clears. Local native-Anthropic only -- a remote
-  -- or gateway tile is rejected (the /model tier switch doesn't apply there).
-  if a == "set-automodel" then
-    local key = tostring(payload.v or "")
-    local on  = tostring(payload.text or "") == "1"
-    local it  = byKey[key]
-    if key == "" or not it then return end
-    -- R1-31: reject kitty/terminal too -- their /model is an interactive picker so
-    -- autoModelPreface no-ops, making the opt-in a silent dead control otherwise.
-    if on and (it.remote or not core.isAnthropicSession(it.model, it.base_url)
-               or it.editor == "kitty" or it.editor == "terminal") then
-      pcall(function() FX.alert("Claude Shepherd: model auto-routing needs a local native-Anthropic chat-input session (VS Code/Cursor)") end)
-      refresh(); return
-    end
-    FX.setAutoModel(key, on)
-    ledgerFor(it, { type = "automodel_toggle", on = on })
-    print("[cc-automodel] per-session auto-routing for " .. key .. " -> " .. (on and "ON" or "off"))
-    refresh()
-    return
-  end
-  -- L2: per-session policy bundle. "" clears (back to attachment/fleet); a name
-  -- attaches that bundle. Resolve + write the gate's per-session file immediately
-  -- so it applies without waiting a tick; refresh() re-resolves with full context.
-  if a == "set-policy" then
-    local key  = tostring(payload.v or "")
-    local name = tostring(payload.text or "")
-    if key ~= "" then
-      if name == "" then
-        FX.clearPolicyOverride(key); FX.clearResolvedPolicy(key); policyCache[key] = nil
-      else
-        FX.setPolicyOverride(key, name)
-        local cfg = loadConfig()
-        local it = byKey[key]
-        local prov = it and core.providerByModel(cfg, it.model, it.base_url) or nil
-        local resolved = core.resolvePolicy(cfg,
-          { project = it and it.projectKey, projectKey = it and it.projectKey,
-            group = it and it.group, providerId = prov and prov.id or nil, key = key }, name)
-        local t = core.policyFileFor(resolved)
-        if t then
-          local enc = core.json.encode(t)
-          FX.writeResolvedPolicy(key, enc); policyCache[key] = enc
-        else
-          FX.clearResolvedPolicy(key); policyCache[key] = nil
-        end
-      end
-      ledgerFor(byKey[key], { type = "policy_set", scope = name })
-      print("[cc-policy] per-session bundle for " .. key .. " -> " .. (name == "" and "(default)" or name))
     end
     refresh()
     return
@@ -13487,9 +12457,6 @@ local function handleBridgeMsg(msg)
     pcall(function() wv:evaluateJavaScript("window.ccTodoImported(" .. hs.json.encode(r or {}) .. ")") end)
     return
   end
-  -- 📘 Playbooks (2026-10-03): Add picks the file through the NATIVE chooser -- the message names
-  -- only the tab, never a path -- and Remove names a source by its id. Remove keeps every item (they
-  -- stay to be verified). Both answer window.ccPlaybookResult for the toast.
   -- ▶ Run selected (2026-10-03): the message names the tab and, for a start, the selected item ids
   -- (JSON) -- never a path; Resume, Stop and Dismiss name only the tab (its run is FX.runFor's). Each
   -- answers window.ccRunResult for the toast, and the tab's run bar follows in the payload.
@@ -13517,43 +12484,6 @@ local function handleBridgeMsg(msg)
     print("[cc-dashboard] " .. (r.error and ("⚠️ My List run: " .. r.error) or ("✅ My List run: " .. a)))
     FX.runPush()
     pcall(function() wv:evaluateJavaScript("window.ccRunResult(" .. hs.json.encode(r) .. ")") end)
-    return
-  end
-  if a == "worklist-playbook-add" or a == "worklist-playbook-remove" then
-    local scope = tostring(payload.v or "")
-    if scope == "" or scope == "generic" or scope == "master" or scope == "archive" then return end
-    local st = FX.readWorklist()
-    local r
-    if a == "worklist-playbook-add" then
-      local roots = FX.playbookTodoRoots(scope, st)
-      local path = FX.choosePlaybookFile(roots[1] or os.getenv("HOME"))
-      if not path then return end                          -- Cancel
-      local why = core.worklistPlaybookRefusal(path, roots)
-      local entry, err
-      if not why then entry, err = core.worklistPlaybookAdd(st, scope, path, FX.now(), FX.worklistNewId) end
-      if why or not entry then
-        r = { error = why or ((err == "already") and "That playbook is already on this tab."
-                              or "That file can't be a playbook.") }
-      else
-        local c = FX.playbookImport(st, scope, entry)
-        r = { name = entry.name, added = c.added, updated = c.updated, missing = c.missing, unreadable = c.unreadable }
-      end
-    else
-      local id, name = tostring(payload.text or ""), nil
-      for _, e in ipairs(core.worklistPlaybooks(st, scope)) do if e.id == id then name = e.name end end
-      r = core.worklistPlaybookRemove(st, scope, id, FX.now()) and { removed = name }
-          or { error = "That playbook is no longer on this tab." }
-    end
-    if r.error then
-      print("[cc-dashboard] ⚠️ My List playbook: " .. r.error)
-    else
-      FX.writeWorklist(st)
-      FX.playbookRebuildWatch(st)
-      print("[cc-dashboard] ✅ My List playbook " .. (r.removed and ("removed: " .. tostring(r.removed))
-        or ("added: " .. tostring(r.name) .. " (" .. tostring(r.added) .. " new)")))
-    end
-    pcall(function() wv:evaluateJavaScript("window.ccWorklist(" .. hs.json.encode(FX.worklistPayload()) .. ")") end)
-    pcall(function() wv:evaluateJavaScript("window.ccPlaybookResult(" .. hs.json.encode(r) .. ")") end)
     return
   end
   if a == "open-audit-view" then
@@ -14158,7 +13088,7 @@ local function handleBridgeMsg(msg)
   -- Remote (bridge) tiles are headless-only in v1: approve/deny route over ssh
   -- (remoteActionAllowed gates on the remote gate actually waiting); local-data
   -- actions (relabel/group/menu) stay fine; everything keystroke- or
-  -- local-file-shaped (nudge/stop/clear/compact/focus/autopilot/gate-tools/
+  -- local-file-shaped (nudge/stop/clear/compact/focus/gate-tools/
   -- mode/model/effort/improve/continue) is refused loudly, never silently.
   if item.remote and a ~= "ctx-menu" and a ~= "relabel" and a ~= "set-group" then
     local ks = core.config(loadConfig(), "bridge.keystrokes", false) == true
@@ -14220,12 +13150,6 @@ local function handleBridgeMsg(msg)
         -- 2026-09-29: a scrubbed window + a label to fill in, for the detector corpus.
         { title = "Capture as scenario…", fn = function()
             pcall(function() wv:evaluateJavaScript("send('capture-scenario', " .. keyJson .. ")") end)
-          end },
-        -- A/B fork-to-compare, scoped to THIS project's folder (opens the modal with the
-        -- repo pre-filled; still editable). Was a global header button -- it's a
-        -- per-project action, so it lives here with the other per-tile actions.
-        { title = "⚖ A/B fork-to-compare…", fn = function()
-            pcall(function() wv:evaluateJavaScript("openAb(" .. jsString(item.cwd or "") .. ")") end)
           end },
         { title = "-" },
         -- Clear / Compact: same effect as the detail-panel buttons (type the slash
@@ -14885,11 +13809,6 @@ local HTML = [[
   .s-txt { flex:1; min-width:120px; background:var(--surface-2); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:2px 6px; }
   .s-area { width:100%; height:54px; background:var(--surface-2); color:var(--text); border:1px solid var(--border);
             border-radius:6px; padding:5px 7px; font-family:ui-monospace,monospace; font-size:12px; box-sizing:border-box; }
-  .prov { border:1px solid var(--border); border-radius:8px; padding:6px 8px; margin:6px 0; background:var(--surface-3); }
-  .prov-head { display:flex; align-items:center; gap:6px; }
-  .prov-head .s-txt { flex:1; }
-  .prov-del { background:var(--surface); color:#e88; border:1px solid #3a2c2f; border-radius:6px; padding:2px 7px; cursor:pointer; }
-  .prov-gw { margin-top:4px; }
   #s-foot { display:flex; gap:8px; padding:10px 12px; border-top:1px solid var(--border); }
   #s-save { background:var(--surface); color:var(--ok); border:1px solid var(--ok); border-radius:8px; font-size:13px; padding:6px 14px; cursor:pointer; }
   #s-foot button:not(#s-save) { background:var(--surface); color:var(--text-2); border:1px solid var(--border); border-radius:8px; font-size:13px; padding:6px 14px; cursor:pointer; }
@@ -15261,19 +14180,6 @@ local HTML = [[
   .wl-lane:hover { background:var(--surface-hover); border-color:var(--accent); color:var(--accent-text); }
   .wl-lane.on { background:var(--accent-bg); border-color:var(--accent); color:var(--accent-text); font-weight:600; }
   .wl-lane .wl-lanen { opacity:.75; }
-  /* 📘 playbooks (2026-10-03): the Add button, the tab's sources as chips (each with a Remove ✕),
-     and a header over each playbook's rows -- the file's name as written, so no uppercase. */
-  #wl-pbadd { background:var(--surface); color:var(--text-2); border:1px solid var(--border);
-    border-radius:14px; padding:2px clamp(7px,2.4cqw,12px); font-size:clamp(10px,2.8cqw,12px);
-    cursor:pointer; white-space:nowrap; }
-  #wl-pbadd:hover { background:var(--surface-hover); border-color:var(--accent); color:var(--accent-text); }
-  #wl-pbrow { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin:-2px 0 8px; }
-  .wl-pb { display:inline-flex; align-items:center; gap:4px; max-width:100%; font-size:clamp(9px,2.6cqw,11px);
-    color:var(--text-2); background:var(--surface-2); border:1px solid var(--border-weak); border-radius:10px; padding:0 2px 0 7px; }
-  .wl-pbname { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:22em; }
-  .wl-pbdel { background:none; border:none; color:var(--muted); cursor:pointer; padding:0 4px; font-size:inherit; }
-  .wl-pbdel:hover { color:var(--danger); }
-  .wl-pbgroup { text-transform:none; letter-spacing:0; font-size:clamp(9px,2.6cqw,11px); color:var(--text-3); }
   /* ▶ Run selected (2026-10-03): the picking buttons, a pick box in place of the done box, the
      tab's run bar (what runs now, Resume / Stop / close) with one chip per item, and ✓ by run. */
   .wl-runbtn { background:var(--surface); color:var(--text-2); border:1px solid var(--border);
@@ -15755,12 +14661,6 @@ local HTML = [[
              font-size:12px; padding:0 2px; }
   #b-nudge { background:var(--surface); color:var(--text-2); border:1px solid var(--border);
              border-radius:8px; font-size:12px; padding:5px 10px; cursor:pointer; }
-  /* saved task templates (roadmap #5c) */
-  #b-tpl { background:var(--surface); color:var(--text-2); border:1px solid var(--border); border-radius:8px;
-           font-size:12px; padding:4px 8px; cursor:pointer; }
-  #tpl-menu { display:none; margin-top:4px; border:1px solid var(--border); border-radius:8px;
-              background:var(--surface-3); max-height:160px; overflow-y:auto; }
-  #tpl-menu.show { display:block; }
   /* 2026-09-22: Appearance > "Hide the detail panel's controls" (opt-in). Adam doesn't want
      the buttons or the nudge box on screen. Hiding #d-actions outright would take away the
      panel's ONLY Deny (the hotkey approves the front-most session; nothing is bound to Deny),
@@ -15770,34 +14670,11 @@ local HTML = [[
      ORDER MATTERS: `body.mctl #d-controls { display:flex }` above has EQUAL specificity, so
      only source order decides. These rules must stay below it (tests/ui.test.lua pins that). */
   body.nochrome #d-controls, body.nochrome #nudge-row,
-  body.nochrome #tpl-menu,   body.nochrome #nudge-chip { display:none; }
+  body.nochrome #nudge-chip { display:none; }
   body.nochrome #d-actions { display:none; }
   body.nochrome #d-actions.dc-gate, body.nochrome #d-actions.dc-err { display:flex; }
   body.nochrome #d-actions.dc-gate > :not(#b-approve):not(#b-deny):not(#deny-note):not(#b-stop) { display:none; }
   body.nochrome #d-actions.dc-err  > :not(#b-approve) { display:none; }
-  .tpl-row { display:flex; align-items:center; gap:6px; padding:4px 8px;
-             border-bottom:1px solid var(--border-weak); font-size:12px; cursor:pointer; }
-  .tpl-row:hover { background:var(--surface); }
-  .tpl-row:last-child { border-bottom:none; }
-  .tpl-name { color:var(--text-2); white-space:nowrap; font-weight:600; }
-  .tpl-text { flex:1; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .tpl-row button { background:none; border:1px solid #3a2c2f; color:#e88; border-radius:5px;
-                    padding:0 5px; cursor:pointer; font-size:11px; }
-  .tpl-save { color:var(--ok); font-style:italic; }
-  .tpl-badge { color:var(--purple); font-size:10px; margin-left:5px; opacity:0.85; }
-  .tpl-ver { color:#7f93b8; font-size:10px; margin-left:5px; }
-  .tpl-form { padding:8px; font-size:12px; }
-  .tpl-form-head { color:var(--text-2); font-weight:600; margin-bottom:6px; }
-  .tpl-var { display:flex; flex-direction:column; gap:2px; margin-bottom:6px; }
-  .tpl-var > span { color:var(--muted); font-size:11px; }
-  .tpl-var input { background:var(--surface-2); border:1px solid #2a2d36; color:var(--text);
-                   border-radius:5px; padding:4px 6px; font-size:12px; }
-  .tpl-req { color:#e88; }
-  .tpl-form-foot { display:flex; justify-content:flex-end; gap:6px; margin-top:4px; }
-  .tpl-form-foot button { background:var(--surface); color:var(--text-2); border:1px solid #3a3d47;
-                          border-radius:6px; padding:3px 10px; cursor:pointer; font-size:12px; }
-  .tpl-form-foot button#tpl-var-go, .tpl-form-foot button#m-tpl-go { color:var(--ok); border-color:var(--ok); }
-  .tpl-form-foot button:disabled { opacity:0.4; cursor:default; }
   #d-plan { display:none; margin-top:6px; }
   .d-plan-h { color:var(--text-3); font-size:11px; text-transform:uppercase; letter-spacing:.04em; margin:4px 0 2px; }
   .todo-row { font-size:12px; color:var(--text); padding:1px 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -15811,34 +14688,6 @@ local HTML = [[
   #newsession { display:none; position:fixed; inset:0; background:var(--bg); z-index:11;
                 flex-direction:column; }
   #newsession.show { display:flex; }
-  /* DR7 A/B fork-to-compare modal (same full-screen overlay pattern as #newsession) */
-  #abmodal { display:none; position:fixed; inset:0; background:var(--bg); z-index:12; flex-direction:column; }
-  #abmodal.show { display:flex; }
-  #ab-head { display:flex; align-items:center; justify-content:space-between; padding:10px 12px;
-             border-bottom:1px solid var(--border); font-weight:700; color:var(--text-strong); }
-  #ab-body { flex:1; overflow-y:auto; padding:10px 12px; }
-  #ab-foot { display:flex; gap:8px; margin-top:10px; }
-  #ab-launch-btn { background:var(--surface); color:var(--warn); border:1px solid #5a4a22; border-radius:8px; font-size:13px; padding:6px 14px; cursor:pointer; }
-  #ab-foot button:not(#ab-launch-btn) { background:var(--surface); color:var(--text-2); border:1px solid var(--border); border-radius:8px; font-size:13px; padding:6px 14px; cursor:pointer; }
-  #ab-repo, #ab-task { width:100%; box-sizing:border-box; }
-  .ab-sep { margin:14px 0 6px; font-size:10px; text-transform:uppercase; letter-spacing:.5px; color:var(--muted); border-top:1px solid var(--border-weak); padding-top:9px; }
-  .ab-vrow { display:flex; gap:6px; align-items:center; margin:4px 0; flex-wrap:wrap; }
-  .ab-vrow input, .ab-vrow select { background:var(--surface-2); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:3px 6px; font-size:12px; }
-  .ab-vrow .ab-vlabel { width:84px; } .ab-vrow .ab-vmodel { width:110px; } .ab-vrow .ab-vprompt { flex:1; min-width:140px; }
-  .ab-vrow .ab-vx { background:none; border:none; color:var(--muted); cursor:pointer; font-size:13px; }
-  .ab-cohort { border:1px solid var(--border); border-radius:8px; padding:8px 10px; margin-bottom:8px; background:var(--surface-3); }
-  .ab-cohort .ab-ctitle { display:flex; align-items:center; gap:8px; color:var(--text-2); font-size:12px; margin-bottom:6px; }
-  .ab-cohort .ab-ctitle .ab-task { color:var(--muted); font-weight:400; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; min-width:0; }
-  .ab-vr { display:flex; align-items:center; gap:8px; padding:3px 0; border-top:1px solid var(--border-weak); font-size:12px; }
-  .ab-vr.win { background:#1c2418; border-radius:5px; }
-  .ab-vr .ab-vn { flex:0 0 auto; color:var(--text); min-width:84px; }
-  .ab-vr .ab-vm { flex:0 0 auto; color:var(--accent-text); font-size:11px; min-width:64px; }
-  .ab-vr .ab-vs { flex:0 0 auto; font-family:ui-monospace,Menlo,monospace; font-size:11px; min-width:64px; }
-  .ab-vr .ab-va { flex:1 1 auto; color:var(--muted); font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .ab-vr .ab-keep { background:transparent; color:var(--ok); border:1px solid #2c5a3a; border-radius:6px; padding:1px 8px; font-size:11px; cursor:pointer; }
-  .ab-cohort .ab-cacts { display:flex; gap:6px; margin-top:6px; }
-  .ab-cohort .ab-cacts button { background:transparent; color:var(--accent-text); border:1px solid #34435a; border-radius:6px; padding:2px 9px; font-size:11px; cursor:pointer; }
-  .ab-win-tag { color:var(--ok); font-size:10px; }
   #n-head { display:flex; align-items:center; justify-content:space-between;
             padding:10px 12px; border-bottom:1px solid var(--border); font-weight:700; color:var(--text-strong); }
   #n-body { flex:1; overflow-y:auto; padding:10px 12px; }
@@ -16218,157 +15067,6 @@ local HTML = [[
 .mk-lbl{ font-size:10px; padding:0 6px; border-radius:8px; border:1px solid var(--border-weak); background:transparent; color:var(--text-3); cursor:pointer; }
 .mk-lbl.on{ background:var(--border-weak); color:var(--text); font-weight:600; }
 .mk-run-more{ color:var(--dim); font-size:10px; padding:2px 0; }
-/* L7 routine board overlay (modeled on #audit). Edits cc-schedules.json. */
-#routines{ position:fixed; inset:0; background:var(--bg-overlay); z-index:11; display:none; flex-direction:column; font-size:12px; }
-#routines.show{ display:flex; }
-#r-head{ display:flex; align-items:center; gap:8px; padding:8px 10px; border-bottom:1px solid var(--border); font-weight:600; }
-#r-head .s-x{ margin-left:auto; }
-#r-warn{ padding:6px 10px; background:#2a2410; color:var(--warn); border-bottom:1px solid #3a3320; font-size:11px; display:none; }
-#r-warn.show{ display:block; }
-#r-body{ flex:1; overflow:auto; padding:8px 10px; }
-.r-row{ display:flex; gap:10px; align-items:center; padding:7px 8px; border:1px solid var(--border-weak); border-radius:8px; margin-bottom:6px; background:var(--surface-3); }
-.r-dot{ width:9px; height:9px; border-radius:50%; flex:0 0 auto; background:#3a3f4b; }
-.r-dot.on{ background:var(--ok); }
-.r-main{ flex:1; min-width:0; }
-.r-name{ color:var(--text); font-weight:600; }
-.r-sub{ color:var(--muted); font-size:11px; margin-top:1px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.r-badge{ display:inline-block; background:var(--border-weak); color:var(--text-3); border:1px solid var(--border); border-radius:5px; padding:0 5px; font-size:10px; margin-right:4px; }
-.r-badge.digest{ color:var(--accent-text); border-color:#34435a; }
-.r-next{ color:var(--dim); font-size:11px; white-space:nowrap; font-variant-numeric:tabular-nums; }
-.r-acts{ display:flex; gap:5px; flex:0 0 auto; }
-.r-btn{ background:none; border:1px solid var(--border); color:var(--text-3); border-radius:5px; padding:2px 7px; cursor:pointer; font-size:11px; }
-.r-btn:hover{ color:var(--text-strong); background:var(--border-weak); }
-.r-btn.danger{ border-color:#3a2c2c; color:#d08; }
-.r-empty{ color:var(--dim); font-style:italic; padding:12px 4px; }
-#r-foot{ display:flex; gap:8px; align-items:center; padding:8px 10px; border-top:1px solid var(--border); }
-/* Add/Edit Routine form (slides over #r-body) */
-#r-form{ display:none; flex-direction:column; gap:7px; padding:4px 2px; }
-#r-form.show{ display:flex; }
-#r-form label{ display:flex; flex-direction:column; gap:3px; color:var(--text-3); font-size:11px; }
-#r-form input, #r-form select, #r-form textarea{ background:var(--surface-2); border:1px solid var(--border); color:var(--text); border-radius:6px; padding:4px 7px; font-size:12px; }
-#r-form textarea{ resize:vertical; min-height:48px; font-family:inherit; }
-.r-grid{ display:flex; gap:8px; flex-wrap:wrap; }
-.r-grid > label{ flex:1; min-width:120px; }
-.r-cron{ background:var(--surface-2); border:1px solid var(--border-weak); border-radius:8px; padding:8px; }
-.r-cron-row{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-.r-wd{ display:flex; gap:4px; flex-wrap:wrap; }
-.r-wd button{ background:var(--surface-2); border:1px solid var(--border); color:var(--text-3); border-radius:5px; padding:2px 7px; cursor:pointer; font-size:11px; }
-.r-wd button.on{ background:var(--accent-bg); border-color:var(--accent); color:var(--accent-text); }
-#r-preview{ color:var(--accent-text); font-size:11px; margin-top:6px; font-family:ui-monospace,Menlo,monospace; }
-/* L3 Templates editor overlay (modeled on #routines). Edits cc-templates.json. */
-#tpleditor{ position:fixed; inset:0; background:var(--bg-overlay); z-index:11; display:none; flex-direction:column; font-size:12px; }
-#tpleditor.show{ display:flex; }
-#te-head{ display:flex; align-items:center; gap:8px; padding:8px 10px; border-bottom:1px solid var(--border); font-weight:600; }
-#te-head .s-x{ margin-left:auto; }
-#te-body{ flex:1; overflow:auto; padding:8px 10px; }
-.te-row{ display:flex; gap:10px; align-items:center; padding:7px 8px; border:1px solid var(--border-weak); border-radius:8px; margin-bottom:6px; background:var(--surface-3); }
-.te-main{ flex:1; min-width:0; }
-.te-name{ color:var(--text); font-weight:600; }
-.te-sub{ color:var(--muted); font-size:11px; margin-top:1px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.te-badge{ display:inline-block; background:var(--border-weak); color:var(--text-3); border:1px solid var(--border); border-radius:5px; padding:0 5px; font-size:10px; margin-right:4px; }
-.te-badge.var{ color:var(--purple); border-color:#43345a; }
-.te-acts{ display:flex; gap:5px; flex:0 0 auto; }
-.te-empty{ color:var(--dim); font-style:italic; padding:12px 4px; }
-#te-form{ display:none; flex-direction:column; gap:7px; padding:4px 2px; }
-#te-form.show{ display:flex; }
-#te-form label{ display:flex; flex-direction:column; gap:3px; color:var(--text-3); font-size:11px; }
-#te-form input, #te-form select, #te-form textarea{ background:var(--surface-2); border:1px solid var(--border); color:var(--text); border-radius:6px; padding:4px 7px; font-size:12px; }
-#te-form textarea{ resize:vertical; min-height:60px; font-family:inherit; }
-#te-vars{ color:var(--purple); font-size:11px; font-family:ui-monospace,Menlo,monospace; }
-#te-versions{ display:none; flex-direction:column; gap:6px; padding:4px 2px; }
-#te-versions.show{ display:flex; }
-.te-ver-row{ display:flex; gap:10px; align-items:flex-start; padding:7px 8px; border:1px solid var(--border-weak); border-radius:8px; background:var(--surface-3); }
-.te-ver-row.cur{ border-color:#34507a; }
-.te-ver-meta{ flex:0 0 92px; color:var(--muted); font-size:11px; }
-.te-ver-body{ flex:1; min-width:0; color:var(--text-2); font-family:ui-monospace,Menlo,monospace; font-size:11px; white-space:pre-wrap; word-break:break-word; max-height:120px; overflow:auto; }
-/* L1 Agents registry editor overlay (modeled on #tpleditor). Edits cc-agents.json / cc-mcp.json. */
-#agented{ position:fixed; inset:0; background:var(--bg-overlay); z-index:11; display:none; flex-direction:column; font-size:12px; }
-#agented.show{ display:flex; }
-#ae-head{ display:flex; align-items:center; gap:8px; padding:8px 10px; border-bottom:1px solid var(--border); font-weight:600; flex-wrap:wrap; }
-#ae-head select, #ae-head label{ font-weight:400; color:var(--text-3); font-size:11px; }
-#ae-head select{ background:var(--surface-2); border:1px solid var(--border); color:var(--text-2); border-radius:6px; padding:2px 6px; }
-#ae-head .s-x{ margin-left:auto; }
-#ae-body{ flex:1; overflow:auto; padding:8px 10px; }
-.ae-row{ display:flex; gap:10px; align-items:center; padding:7px 8px; border:1px solid var(--border-weak); border-radius:8px; margin-bottom:6px; background:var(--surface-3); }
-.ae-row.arch{ opacity:.55; }
-.ae-star{ flex:0 0 auto; cursor:pointer; font-size:14px; color:var(--dim); background:none; border:0; }
-.ae-star.on{ color:var(--warn); }
-.ae-main{ flex:1; min-width:0; }
-.ae-name{ color:var(--text); font-weight:600; }
-.ae-sub{ color:var(--muted); font-size:11px; margin-top:1px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.ae-badge{ display:inline-block; background:var(--border-weak); color:var(--text-3); border:1px solid var(--border); border-radius:5px; padding:0 5px; font-size:10px; margin-right:4px; }
-.ae-badge.cat{ color:var(--accent-text); border-color:#34435a; }
-.ae-badge.sk{ color:var(--purple); border-color:#43345a; }
-.ae-acts{ display:flex; gap:5px; flex:0 0 auto; flex-wrap:wrap; }
-.ae-empty{ color:var(--dim); font-style:italic; padding:12px 4px; }
-#ae-form, #ae-mcp{ display:none; flex-direction:column; gap:7px; padding:4px 2px; }
-#ae-form.show, #ae-mcp.show{ display:flex; }
-#ae-form label, #ae-mcp label{ display:flex; flex-direction:column; gap:3px; color:var(--text-3); font-size:11px; }
-#ae-form input, #ae-form select, #ae-form textarea, #ae-mcp input, #ae-mcp select{ background:var(--surface-2); border:1px solid var(--border); color:var(--text); border-radius:6px; padding:4px 7px; font-size:12px; }
-#ae-form textarea{ resize:vertical; min-height:46px; font-family:inherit; }
-.ae-grid{ display:flex; gap:8px; flex-wrap:wrap; }
-.ae-grid > label{ flex:1; min-width:130px; }
-.ae-sec{ font-weight:600; color:var(--text-2); margin:6px 0 2px; font-size:11px; }
-.ae-chips{ display:flex; gap:5px; flex-wrap:wrap; }
-.ae-chip{ background:var(--surface-2); border:1px solid var(--border); color:var(--text-3); border-radius:6px; padding:2px 8px; cursor:pointer; font-size:11px; }
-.ae-chip.on{ background:var(--accent-bg); border-color:var(--accent); color:var(--accent-text); }
-.ae-list{ display:flex; flex-direction:column; gap:4px; }
-.ae-list-row{ display:flex; gap:5px; align-items:center; }
-.ae-list-row input{ flex:1; }
-/* L2 policy bundle/attachment editor overlay (modeled on #agented). Edits cc-config.json policies. */
-#policyed{ position:fixed; inset:0; background:var(--bg-overlay); z-index:11; display:none; flex-direction:column; font-size:12px; }
-#policyed.show{ display:flex; }
-#pe-head{ display:flex; align-items:center; gap:8px; padding:8px 10px; border-bottom:1px solid var(--border); font-weight:600; flex-wrap:wrap; }
-#pe-head .s-x{ margin-left:auto; }
-#pe-warn{ padding:6px 10px; background:#2a2410; color:var(--warn); border-bottom:1px solid #3a3320; font-size:11px; display:none; }
-#pe-warn.show{ display:block; }
-#pe-body{ flex:1; overflow:auto; padding:8px 10px; }
-.pe-sec{ font-weight:600; color:var(--text-2); margin:8px 0 5px; display:flex; align-items:center; gap:8px; }
-.pe-row{ display:flex; gap:10px; align-items:center; padding:7px 8px; border:1px solid var(--border-weak); border-radius:8px; margin-bottom:6px; background:var(--surface-3); }
-.pe-main{ flex:1; min-width:0; }
-.pe-name{ color:var(--text); font-weight:600; }
-.pe-sub{ color:var(--muted); font-size:11px; margin-top:1px; word-break:break-word; }
-.pe-badge{ display:inline-block; background:var(--border-weak); color:var(--text-3); border:1px solid var(--border); border-radius:5px; padding:0 5px; font-size:10px; margin-right:4px; }
-.pe-badge.deny{ color:#e08; border-color:#5a3340; }
-.pe-badge.allow{ color:var(--ok); border-color:#2c5a3a; }
-.pe-acts{ display:flex; gap:5px; flex:0 0 auto; }
-.pe-empty{ color:var(--dim); font-style:italic; padding:6px 4px; }
-.pe-starter{ background:var(--surface-2); border:1px dashed #3a4a5a; color:var(--accent-text); border-radius:6px; padding:2px 8px; cursor:pointer; font-size:11px; }
-#pe-bform, #pe-aform{ display:none; flex-direction:column; gap:7px; padding:4px 2px; border:1px solid var(--border-weak); border-radius:8px; margin:6px 0; background:var(--surface-2); padding:10px; }
-#pe-bform.show, #pe-aform.show{ display:flex; }
-#pe-bform label, #pe-aform label{ display:flex; flex-direction:column; gap:3px; color:var(--text-3); font-size:11px; }
-#pe-bform input, #pe-bform select, #pe-bform textarea, #pe-aform input, #pe-aform select{ background:var(--surface-2); border:1px solid var(--border); color:var(--text); border-radius:6px; padding:4px 7px; font-size:12px; }
-#pe-bform textarea{ resize:vertical; min-height:42px; font-family:ui-monospace,Menlo,monospace; }
-.pe-grid{ display:flex; gap:8px; flex-wrap:wrap; }
-.pe-grid > label{ flex:1; min-width:120px; }
-.pe-check{ flex-direction:row !important; align-items:center; gap:6px; }
-/* L6 rules editor overlay (modeled on #routines). Edits cc-rules.json. */
-#ruleed{ position:fixed; inset:0; background:var(--bg-overlay); z-index:11; display:none; flex-direction:column; font-size:12px; }
-#ruleed.show{ display:flex; }
-#re-head{ display:flex; align-items:center; gap:8px; padding:8px 10px; border-bottom:1px solid var(--border); font-weight:600; flex-wrap:wrap; }
-#re-head .s-x{ margin-left:auto; }
-#re-warn{ padding:6px 10px; background:#2a2410; color:var(--warn); border-bottom:1px solid #3a3320; font-size:11px; display:none; }
-#re-warn.show{ display:block; }
-#re-body{ flex:1; overflow:auto; padding:8px 10px; }
-.re-row{ display:flex; gap:10px; align-items:center; padding:7px 8px; border:1px solid var(--border-weak); border-radius:8px; margin-bottom:6px; background:var(--surface-3); }
-.re-dot{ width:9px; height:9px; border-radius:50%; flex:0 0 auto; background:#3a3f4b; }
-.re-dot.on{ background:var(--ok); }
-.re-main{ flex:1; min-width:0; }
-.re-name{ color:var(--text); font-weight:600; }
-.re-sub{ color:var(--muted); font-size:11px; margin-top:1px; word-break:break-word; }
-.re-badge{ display:inline-block; background:var(--border-weak); color:var(--text-3); border:1px solid var(--border); border-radius:5px; padding:0 5px; font-size:10px; margin-right:4px; }
-.re-badge.trig{ color:var(--accent-text); border-color:#34435a; }
-.re-badge.proc{ color:var(--purple); border-color:#43345a; }
-.re-acts{ display:flex; gap:5px; flex:0 0 auto; }
-.re-empty{ color:var(--dim); font-style:italic; padding:12px 4px; }
-#re-form{ display:none; flex-direction:column; gap:7px; padding:4px 2px; }
-#re-form.show{ display:flex; }
-#re-form label{ display:flex; flex-direction:column; gap:3px; color:var(--text-3); font-size:11px; }
-#re-form input, #re-form select, #re-form textarea{ background:var(--surface-2); border:1px solid var(--border); color:var(--text); border-radius:6px; padding:4px 7px; font-size:12px; }
-.re-grid{ display:flex; gap:8px; flex-wrap:wrap; }
-.re-grid > label{ flex:1; min-width:120px; }
-.re-check{ flex-direction:row !important; align-items:center; gap:6px; }
-.re-sec{ font-weight:600; color:var(--text-2); margin:4px 0 0; font-size:11px; }
 /* insights sparklines (Feature 6): trend lines over the ledger */
 .spark-row{ display:flex; align-items:center; gap:8px; padding:4px 0; }
 .spark-lbl{ width:110px; flex:0 0 auto; color:var(--text-3); font-size:11px; }
@@ -16412,12 +15110,7 @@ local HTML = [[
           <button class="tm-item" onclick="menuPick('fsearch')"><span class="tm-ic">🔎</span> Find in fleet</button>
           <button class="tm-item" onclick="menuPick('insights')"><span class="tm-ic">📊</span> Fleet insights</button>
           <button class="tm-item" onclick="menuPick('audit')"><span class="tm-ic">📜</span> Audit ledger</button>
-          <button class="tm-item" onclick="menuPick('routines')"><span class="tm-ic">⏰</span> Routines</button>
-          <button class="tm-item" onclick="menuPick('templates')"><span class="tm-ic">📝</span> Templates</button>
-          <button class="tm-item" onclick="menuPick('agents')"><span class="tm-ic">✦</span> Agents</button>
           <button class="tm-item" onclick="menuPick('mcpskills')"><span class="tm-ic">🔌</span> MCPs &amp; Skills</button>
-          <button class="tm-item" onclick="menuPick('policies')"><span class="tm-ic">🛡</span> Policy bundles</button>
-          <button class="tm-item" onclick="menuPick('rules')"><span class="tm-ic">⚙️</span> Automation rules</button>
           <button class="tm-item" onclick="menuPick('trace')"><span class="tm-ic">⚡</span> Automation trace</button>
           <button class="tm-item" onclick="menuPick('cost')"><span class="tm-ic">💰</span> Cost &amp; tokens</button>
           <button class="tm-item" onclick="menuPick('doctor')"><span class="tm-ic">🩺</span> Diagnostics</button>
@@ -16479,7 +15172,6 @@ local HTML = [[
       <button id="wl-todobtn" onclick="todoImportScope()" title="Import this project's TODO.md checkboxes as list items">⇪ Import TODO.md</button>
       <button id="wl-todoall" onclick="todoImportAll()" title="Import/refresh TODO.md for every known project">⇪ All projects</button>
       <button id="wl-markall" onclick="worklistMarkAll()" title="Tick off everything still open on this tab (asks first)">✓ Mark all done</button>
-      <button id="wl-pbadd" onclick="playbookAdd()" style="display:none" title="Pick a markdown checklist on this Mac: its checkbox lines import into this tab like TODO.md's and follow the file as it changes">📘 Add a playbook…</button>
       <button id="wl-runsel" class="wl-runbtn" onclick="wlRunPickStart()" style="display:none" title="Pick open items to run, one at a time, each in a fresh session in this project's main checkout">▶ Run…</button>
       <button id="wl-rungo" class="wl-runbtn" onclick="wlRunGo()" style="display:none" title="Run the picked items one at a time, each in a fresh session">▶ Run selected</button>
       <button id="wl-runcancel" class="wl-runbtn" onclick="wlRunPickCancel()" style="display:none">Cancel</button>
@@ -16487,7 +15179,6 @@ local HTML = [[
     </div>
     <div id="wl-lanerow"></div>
     <div id="wl-runbar" style="display:none"></div>
-    <div id="wl-pbrow" style="display:none"></div>
     <div id="wl-addrow">
       <button id="wl-addbtn" onclick="wlModalOpen('')">＋ Add an item…</button>
     </div>
@@ -16669,7 +15360,6 @@ local HTML = [[
       <button id="b-deny"    onclick="act('deny')">Deny</button>
       <input id="deny-note" maxlength="500" placeholder="Why? (goes back with Deny)" onkeydown="onDenyNoteKey(event)" title="Optional. Sent to the session as the reason its tool call was refused, so it can change course instead of just failing. Enter denies with this reason.">
       <button id="b-stop"    onclick="act('stop')">Stop</button>
-      <button id="b-auto"    onclick="act('autopilot')">Autopilot</button>
       <span class="sep"></span>
       <button id="b-clear"   onclick="act('clear')">Clear</button>
       <button id="b-compact" onclick="act('compact')">Compact</button>
@@ -16711,24 +15401,11 @@ local HTML = [[
           <option value="custom">Custom…</option>
         </select>
       </label>
-      <label class="ctl">Policy
-        <select id="d-policy" onchange="onPolicyChange()" title="Attach a named policy/guardrail bundle (policies.bundles in config) to this session. Its autoAllow/autoDeny rules apply on top of the fleet policy (or replace it if the bundle sets disableGlobal). Default = no per-session bundle (attachment/fleet policy applies). Only enforced while headless approvals are armed.">
-          <option value="">Default</option>
-        </select>
-      </label>
-      <!-- DR6: per-session model auto-routing. OFF by default, NEVER fleet-wide. When on,
-           each queued/routed feed picks a model by task difficulty (cheap→Haiku, hard→Opus)
-           and switches via /model just before the task. Local native-Anthropic sessions only. -->
-      <label class="ctl" id="d-automodel-lbl" title="Auto-pick the model per task by difficulty (cheap→Haiku, standard→Sonnet, hard→Opus) and switch via /model just before each queued/routed feed. Per-session only — never fleet-wide. Local native-Anthropic chat-input sessions only (VS Code/Cursor; terminal/Kitty use an interactive /model picker, and a gateway serves fixed models).">
-        <input type="checkbox" id="d-automodel" onchange="onAutoModelChange()"> Auto-model
-      </label>
     </div>
     <div id="nudge-row">
       <textarea id="nudge" rows="1" placeholder="Nudge now... (Enter sends, Shift+Enter newline, paste an image)" onkeydown="onNudgeKey(event)" oninput="autoGrow(this)"></textarea>
       <button id="b-nudge" onclick="sendNudge()">Send</button>
-      <button id="b-tpl" onclick="toggleTemplates()" title="Saved task templates — insert into the input (never auto-sends)">Tpl ▾</button>
     </div>
-    <div id="tpl-menu"></div>
     <div id="nudge-chip"><span id="nudge-chip-label"></span><button onclick="clearImage()" title="Remove image">✕</button></div>
   </div>
 
@@ -16819,7 +15496,7 @@ local HTML = [[
             <span class="ap-val" id="a-tilemin-v">170</span></div>
           <div class="ap-srow"><label class="ap-toggle"><input type="checkbox" id="a-density" onchange="previewAp()"> Compact density</label></div>
           <div class="ap-srow"><label class="ap-toggle"><input type="checkbox" id="a-motion" onchange="previewAp()"> Reduce motion (no pulsing / spinning)</label></div>
-          <div class="ap-srow"><label class="ap-toggle" title="Show the per-session Effort, Mode, Model, Gate, Policy and Auto-model controls in the detail panel. Off by default: they stay available, but a panel you never use them from stays clear."><input type="checkbox" id="a-mctl" onchange="previewAp()"> Model controls (Effort, Mode, Model, Gate, Policy, Auto-model)</label></div>
+          <div class="ap-srow"><label class="ap-toggle" title="Show the per-session Effort, Mode, Model and Gate controls in the detail panel. Off by default: they stay available, but a panel you never use them from stays clear."><input type="checkbox" id="a-mctl" onchange="previewAp()"> Model controls (Effort, Mode, Model, Gate, Policy, Auto-model)</label></div>
           <div class="ap-srow"><label class="ap-toggle" title="Takes the detail panel's button row, model-control row and nudge box off screen. Approve, Deny, the deny reason and Stop come back on their own while a session is waiting on you, and Continue while one has errored — so you never lose the only way to refuse a gated tool. A held question and the plan/TODO box are content, and stay."><input type="checkbox" id="a-nochrome" onchange="previewAp()"> Hide the detail panel's controls (Jump, Stop, nudge&hellip;)</label></div>
         </div>
       </div>
@@ -16946,7 +15623,6 @@ local HTML = [[
       <label class="s-row"><input type="checkbox" id="s-kitty-remote"> Give spawned Kitty windows remote control (recommended)</label>
       <label class="s-row"><input type="checkbox" id="s-kitty-auto"> Auto-enable Kitty remote control in kitty.conf when Kitty is in use</label>
       <label class="s-row"><button class="s-x" style="border:1px solid #2c2f3a;border-radius:6px;padding:3px 8px;color:#cfd2db;" onclick="send('kitty-remote')">Enable Kitty remote control now</button></label>
-      <label class="s-row">Default provider <select id="s-spawn-provider"></select></label>
 
       <div class="s-sec">Claude Code Remote Control (drive sessions from claude.ai / mobile)</div>
       <label class="s-row"><input type="checkbox" id="s-rc-spawn"> Launch new sessions with <code>--remote-control</code> (auto-register RC)</label>
@@ -16957,16 +15633,9 @@ local HTML = [[
       <label class="s-row"><input type="checkbox" id="s-br-en"> Mirror remote sessions from ssh providers into the panel</label>
       <div class="s-help">For providers that declare <code>ssh:{host,user}</code> (hand-edit in cc-config.json for now): rsync-pulls each host's remote <code>~/.claude/cc-status/</code> every <input type="number" id="s-br-int" class="s-num" min="1"> s so its sessions render as ⇄ tiles. Remote tiles are <b>headless-only</b>: Approve/Deny route back over ssh (nonce-bound); keystroke actions are disabled. Needs key-based ssh auth (BatchMode) and the remote box set up with <code>make install</code>. Off by default.</div>
 
-      <div class="s-sec">Providers (model / company per session)</div>
-      <div class="s-help">Each profile launches <code>claude</code> against a model. <b>Claude</b> just sets the model; a <b>Gateway</b> points Claude Code at an Anthropic-compatible endpoint (a LiteLLM proxy for Gemini/OpenAI, or a local/remote REST server) via its base URL. <b>No API keys are stored here</b> — put the key in an environment variable and name that variable below; the spawned shell expands <code>$NAME</code> at launch.</div>
-      <div id="s-providers"></div>
-      <label class="s-row"><button class="s-x" style="border:1px solid #2c2f3a;border-radius:6px;padding:3px 8px;color:#cfd2db;" onclick="addProvider()">+ Add provider</button></label>
-
       <div class="s-sec">Policies (auto-decide — gate must be armed)</div>
-      <div class="s-help">Each one ON lets some requests be decided WITHOUT you. Headless approvals keeps all three OFF.</div>
+      <div class="s-help">Each one ON lets some requests be decided WITHOUT you. Headless approvals keeps both OFF.</div>
       <label class="s-row"><input type="checkbox" id="s-p-rep"> Auto-approve a command already approved this session</label>
-      <label class="s-row"><input type="checkbox" id="s-ap-en"> Enable per-session Autopilot, window of <input type="number" id="s-ap-min" class="s-num" min="1"> min</label>
-      <div class="s-help">Autopilot auto-approves <i>everything</i> for that one session for N minutes — use sparingly.</div>
       <label class="s-row"><input type="checkbox" id="s-pat-en"> Enable pattern rules</label>
       <div class="s-lbl">Auto-allow (one per line, e.g. Read or Bash(npm test*))</div>
       <textarea id="s-pat-allow" class="s-area"></textarea>
@@ -16976,12 +15645,12 @@ local HTML = [[
       <div class="s-help">Same syntax, e.g. <code>Bash(rm -rf*)</code> or <code>WebFetch</code>. A request matching both lists is denied — deny always wins.</div>
 
       <div class="s-sec">Always ask (held for your click, gate armed or not)</div>
-      <div class="s-help">These Bash commands wait for your click on the card whatever the gate, autopilot, auto-allow, repeat approvals or a bundle says. With Shepherd closed, or no answer in 120 s, Claude Code's own prompt asks instead, even in Auto mode. An auto-deny rule still wins. Wrapped and compound forms count (<code>cd x &amp;&amp; git push</code>, <code>git -C dir push</code>, <code>sh -c "…"</code>, <code>sudo</code>, <code>xargs</code>, <code>find -exec</code>); quoted text doesn't (<code>echo "git push"</code>).</div>
+      <div class="s-help">These Bash commands wait for your click on the card whatever the gate, auto-allow or repeat approvals say. With Shepherd closed, or no answer in 120 s, Claude Code's own prompt asks instead, even in Auto mode. An auto-deny rule still wins. Wrapped and compound forms count (<code>cd x &amp;&amp; git push</code>, <code>git -C dir push</code>, <code>sh -c "…"</code>, <code>sudo</code>, <code>xargs</code>, <code>find -exec</code>); quoted text doesn't (<code>echo "git push"</code>).</div>
       <div class="s-lbl">Built in (always on)</div>
       <div id="s-aa-builtins" class="s-help"><code>git push</code> · <code>rm -rf</code> · <code>git reset --hard</code> · <code>git clean -f</code> · <code>git branch -D</code> · <code>git worktree remove --force</code> · <code>git checkout -- .</code> · <code>publish</code> (any tool's) · <code>gh release create</code> · <code>gh pr merge</code> · <code>wrangler deploy</code> (through npx, pnpm dlx…) · <code>npm run deploy</code> (a package script named deploy)</div>
       <div class="s-lbl">Also always ask (one per line)</div>
       <textarea id="s-aa-extra" class="s-area"></textarea>
-      <div class="s-help">A command name, then words it contains in that order: <code>terraform apply</code>, <code>kubectl delete</code>, <code>docker push</code>. <code>*</code> and <code>?</code> work inside a word. A policy bundle can add its own with <code>alwaysAsk</code>.</div>
+      <div class="s-help">A command name, then words it contains in that order: <code>terraform apply</code>, <code>kubectl delete</code>, <code>docker push</code>. <code>*</code> and <code>?</code> work inside a word.</div>
     </div>
     <div id="s-foot">
       <button id="s-save" onclick="saveSettings()">Save</button>
@@ -17015,11 +15684,10 @@ local HTML = [[
       </div>
       <div class="s-lbl">Presets</div>
       <div id="n-presets" class="n-recent"></div>
-      <div class="s-lbl">Agents <span class="n-dim">— saved profiles you hand work off to (persona · skills · MCP)</span></div>
+      <div class="s-lbl">Built-in <span class="n-dim">— a find-only auditor for the folder below</span></div>
       <div id="n-builtin" class="n-recent">
         <button class="n-chip" onclick="auditSpawn()" title="Spawn a find-only auditor in the folder below: it reads the code and drives the running app in a headless browser, and can write only its findings file (~/.cc-audit/). The initial task, if any, is its focus. Findings import into My List.">🔍 Audit (find-only)</button>
       </div>
-      <div id="n-agents" class="n-recent"></div>
       <div class="s-lbl">Project folder (type to fuzzy-search your project roots)</div>
       <input id="n-path" class="s-txt" placeholder="/Users/you/Programming/project" autocomplete="off"
              oninput="onPathInput()" onkeydown="onPathKey(event)" onchange="applyLastUsed(this.value)">
@@ -17037,8 +15705,6 @@ local HTML = [[
         <button onclick="useThisFolder()">Use this folder</button>
         <span id="n-browse-path" class="n-dim"></span>
       </div>
-      <div class="s-lbl">Templates <span class="n-dim">— seed the task; any {{vars}} are filled in before spawn</span></div>
-      <div id="n-templates" class="n-recent"></div>
       <div class="s-lbl">Initial task (optional)</div>
       <textarea id="n-task" class="s-area"></textarea>
       <label class="s-row" style="margin-top:8px;">Open in
@@ -17057,46 +15723,11 @@ local HTML = [[
           <option value="bypassPermissions">Automate (bypass)</option>
         </select>
       </label>
-      <label class="s-row">Provider <select id="n-provider"></select></label>
-      <div class="s-lbl">Skills available (<span id="n-skills-count">0</span>) <span class="n-dim" id="n-skills-tog" onclick="toggleSkills()" style="cursor:pointer;text-decoration:underline;">show</span></div>
-      <div id="n-skills" class="n-recent" style="display:none;"></div>
     </div>
     <div id="n-foot">
       <button id="n-spawn" onclick="submitNew()">Spawn</button>
-      <button onclick="savePreset()" title="Save the current folder + editor + mode + provider as a one-click preset">Save as preset</button>
-      <button onclick="saveAgent()" title="Save the current setup (folder/editor/mode/provider/task + a persona role) as a reusable agent you can spawn from">Save as agent</button>
-      <button onclick="closeNew();openAgentEd()" title="Open the Agents editor: full-field authoring, skills/MCP/knowledge attach, fork/favorite/archive">Manage agents…</button>
+      <button onclick="savePreset()" title="Save the current folder + editor + mode as a one-click preset">Save as preset</button>
       <button onclick="closeNew()">Cancel</button>
-    </div>
-  </div>
-
-  <!-- DR7: A/B fork-to-compare. Top = active cohorts (compare scores + Judge + Keep);
-       bottom = launch a new run (repo + base task + variant rows). -->
-  <div id="abmodal">
-    <div id="ab-head"><span>⚖ A/B fork-to-compare</span><button class="s-x" onclick="closeAb()">✕</button></div>
-    <div id="ab-body">
-      <div id="ab-active"></div>
-      <div class="ab-sep">New A/B run</div>
-      <div class="s-lbl">Repo folder (must be a git repo — each variant builds in its own worktree)</div>
-      <input id="ab-repo" class="s-txt" placeholder="/Users/you/Programming/project" list="ab-recent" autocomplete="off">
-      <datalist id="ab-recent"></datalist>
-      <div class="s-lbl">Base task (shared by all variants unless a variant sets its own prompt)</div>
-      <textarea id="ab-task" class="s-area"></textarea>
-      <label class="s-row" style="margin-top:6px;">Permission mode
-        <select id="ab-mode">
-          <option value="">Default</option>
-          <option value="plan">Plan</option>
-          <option value="acceptEdits">Accept edits</option>
-          <option value="bypassPermissions">Automate (bypass)</option>
-        </select>
-      </label>
-      <div class="s-lbl">Variants <span class="n-dim">— label · model (opus/sonnet/haiku or blank) · provider · optional prompt override</span></div>
-      <div id="ab-variants"></div>
-      <button onclick="addAbVariant('','','','')" style="background:#21232c;color:#cfd2db;border:1px solid #2c2f3a;border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer;margin-top:4px;">+ variant</button>
-      <div id="ab-foot">
-        <button id="ab-launch-btn" onclick="launchAb()">Launch A/B</button>
-        <button onclick="closeAb()">Cancel</button>
-      </div>
     </div>
   </div>
 
@@ -17235,7 +15866,6 @@ local HTML = [[
         <option value="clear">Clear</option>
         <option value="compact">Compact</option>
         <option value="nudge">Nudge</option>
-        <option value="autopilot_arm">Autopilot</option>
         <option value="spawn">Spawn</option>
         <option value="relabel">Relabel</option>
         <option value="redact">Redact</option>
@@ -17262,296 +15892,6 @@ local HTML = [[
       <button class="s-x" onclick="closeFleetSearch()">✕</button>
     </div>
     <div id="fs-body"><div class="s-help" style="margin-left:0;">Searches every session's transcript JSONL (live and dead) plus the audit ledger. Instant with ripgrep installed (<code>brew install ripgrep</code>); falls back to grep.</div></div>
-  </div>
-
-  <div id="routines">
-    <div id="r-head">
-      <span>⏰ Routines</span>
-      <button class="r-btn" onclick="routineNew()">+ Add routine</button>
-      <button class="s-x" onclick="closeRoutines()">✕</button>
-    </div>
-    <div id="r-warn"></div>
-    <div id="r-body"></div>
-    <div id="r-form">
-      <label>Name<input type="text" id="rf-name" placeholder="e.g. Morning standup digest"></label>
-      <div class="r-grid">
-        <label>Action
-          <select id="rf-action" onchange="routineFormVis()">
-            <option value="spawn">Spawn a session</option>
-            <option value="digest">Push a shift-report digest</option>
-            <option value="gate">Check main is green (the repo's merge gate)</option>
-          </select>
-        </label>
-        <label>Kind
-          <select id="rf-kind" onchange="routineFormVis()">
-            <option value="cron">Recurring (cron)</option>
-            <option value="oneShot">Once (one-shot)</option>
-          </select>
-        </label>
-      </div>
-      <div class="r-cron" id="rf-cron-wrap">
-        <div class="r-cron-row" id="rf-cron-build">
-          <label style="flex-direction:row;align-items:center;gap:6px;">Every
-            <select id="rf-freq" onchange="routineFormSync()">
-              <option value="minute">N minutes</option>
-              <option value="hour">hour</option>
-              <option value="day" selected>day</option>
-              <option value="week">week</option>
-              <option value="month">month</option>
-            </select>
-          </label>
-          <label id="rf-every-wrap" style="flex-direction:row;align-items:center;gap:4px;display:none;">N=<input type="number" id="rf-every" min="1" max="59" value="5" style="width:54px;" oninput="routineFormSync()"></label>
-          <label id="rf-hm-wrap" style="flex-direction:row;align-items:center;gap:4px;">at <input type="number" id="rf-hour" min="0" max="23" value="9" style="width:48px;" oninput="routineFormSync()">:<input type="number" id="rf-min" min="0" max="59" value="0" style="width:48px;" oninput="routineFormSync()"></label>
-          <label id="rf-dom-wrap" style="flex-direction:row;align-items:center;gap:4px;display:none;">day <input type="number" id="rf-dom" min="1" max="31" value="1" style="width:54px;" oninput="routineFormSync()"></label>
-        </div>
-        <div class="r-wd" id="rf-wd-wrap" style="margin-top:6px;display:none;"></div>
-        <label style="flex-direction:row;align-items:center;gap:6px;margin-top:6px;">cron <input type="text" id="rf-cron-raw" value="0 9 * * *" style="flex:1;font-family:ui-monospace,Menlo,monospace;" oninput="routinePreview()"></label>
-        <div id="r-preview"></div>
-      </div>
-      <label id="rf-at-wrap" style="display:none;">Run at (local, YYYY-MM-DD HH:MM)<input type="text" id="rf-at" placeholder="2026-06-15 14:30" oninput="routineFormSync()"></label>
-      <div class="r-grid" id="rf-spawn-fields">
-        <label>Folder<input type="text" id="rf-folder" placeholder="/Users/you/Programming/project"></label>
-        <label id="rf-editor-wrap">Editor
-          <select id="rf-editor"><option value="">(default)</option><option value="terminal">Terminal</option><option value="kitty">Kitty</option><option value="vscode">VS Code</option><option value="cursor">Cursor</option></select>
-        </label>
-        <label id="rf-branch-wrap" style="display:none;">Branch (the main checkout's)<input type="text" id="rf-branch" placeholder="main"></label>
-      </div>
-      <div class="r-grid" id="rf-spawn-fields2">
-        <label>Provider<input type="text" id="rf-provider" placeholder="(default — blank for bare claude)"></label>
-        <label>Perm mode
-          <select id="rf-permmode"><option value="">(default)</option><option value="default">default</option><option value="acceptEdits">acceptEdits</option><option value="plan">plan</option></select>
-        </label>
-      </div>
-      <label id="rf-prompt-wrap">Initial prompt (optional)<textarea id="rf-prompt" placeholder="Seed task typed into the new session…"></textarea></label>
-      <div class="r-grid" id="rf-digest-wrap" style="display:none;">
-        <label>Digest window (hours)<input type="number" id="rf-digesthours" min="1" max="168" value="24" style="width:80px;"></label>
-        <label>Push topic (blank = default escalation.pushTopic)<input type="text" id="rf-pushtopic" placeholder="ntfy topic"></label>
-      </div>
-      <div class="r-grid">
-        <button class="r-btn" style="border-color:#3b6;color:#bdf;" onclick="routineSave()">Save routine</button>
-        <button class="r-btn" onclick="routineCancel()">Cancel</button>
-      </div>
-    </div>
-    <div id="r-foot"><span class="n-dim" id="r-info"></span></div>
-  </div>
-
-  <div id="tpleditor">
-    <div id="te-head">
-      <span id="te-title">📝 Templates</span>
-      <button class="r-btn" onclick="tplEditNew()">+ New template</button>
-      <button class="s-x" onclick="closeTplEditor()">✕</button>
-    </div>
-    <div id="te-body"></div>
-    <div id="te-form">
-      <label>Name<input type="text" id="te-name" placeholder="e.g. Bug triage"></label>
-      <div class="r-grid">
-        <label style="flex-direction:row;align-items:center;gap:6px;">Body
-          <select id="te-mode" onchange="tplEditModeSync()">
-            <option value="structured">Structured (description + expected output)</option>
-            <option value="text">Raw text</option>
-          </select>
-        </label>
-      </div>
-      <label id="te-desc-wrap">Description / task<textarea id="te-desc" placeholder="What the session should do. Use {{var}} for required vars, {{var?}} optional." oninput="tplEditVarsSync()"></textarea></label>
-      <label id="te-exp-wrap">Expected output (optional)<textarea id="te-exp" placeholder="What a good result looks like (appended under “Expected output:”)." oninput="tplEditVarsSync()"></textarea></label>
-      <label id="te-text-wrap" style="display:none;">Text<textarea id="te-text" placeholder="The raw template body. Use {{var}} / {{var?}} for variables." oninput="tplEditVarsSync()"></textarea></label>
-      <div>Variables: <span id="te-vars">none</span></div>
-      <div class="r-grid">
-        <button class="r-btn" style="border-color:#3b6;color:#bdf;" onclick="tplEditSave()">Save template</button>
-        <button class="r-btn" onclick="tplEditCancel()">Cancel</button>
-      </div>
-    </div>
-    <div id="te-versions">
-      <div class="r-grid"><button class="r-btn" onclick="tplVersionsBack()">← Back</button><span class="n-dim" id="te-ver-info"></span></div>
-      <div id="te-ver-list"></div>
-    </div>
-    <div id="r-foot" style="border-top:1px solid #2c2f3a;"><span class="n-dim" id="te-info"></span></div>
-  </div>
-
-  <div id="agented">
-    <div id="ae-head">
-      <span id="ae-title">✦ Agents</span>
-      <button class="r-btn" onclick="agentEdNew()">+ New agent</button>
-      <label>Sort <select id="ae-sort" onchange="renderAgentEd()">
-        <option value="name">name</option><option value="favorite">favorite</option><option value="lastUsed">last used</option>
-      </select></label>
-      <label><input type="checkbox" id="ae-show-arch" onchange="renderAgentEd()"> show archived</label>
-      <button class="r-btn" onclick="mcpEdOpen()">⚙ MCP servers</button>
-      <button class="s-x" onclick="closeAgentEd()">✕</button>
-    </div>
-    <div id="ae-body"></div>
-    <div id="ae-form">
-      <div class="ae-grid">
-        <label>Name<input type="text" id="af-name" placeholder="e.g. code-reviewer"></label>
-        <label>Category<input type="text" id="af-category" placeholder="e.g. review (groups in the list)"></label>
-      </div>
-      <label>Folder (absolute — the launch dir)<input type="text" id="af-folder" placeholder="/Users/you/Programming/project"></label>
-      <div class="ae-grid">
-        <label>Provider<select id="af-provider"></select></label>
-        <label>Model<input type="text" id="af-model" placeholder="(provider default)"></label>
-        <label>Perm mode<select id="af-permmode"><option value="">(default)</option><option value="default">default</option><option value="acceptEdits">acceptEdits</option><option value="plan">plan</option></select></label>
-      </div>
-      <div class="ae-sec">Persona (→ --append-system-prompt)</div>
-      <div class="ae-grid">
-        <label>Role<input type="text" id="af-role" placeholder="a senior code reviewer"></label>
-        <label>Goal<input type="text" id="af-goal" placeholder="find correctness bugs"></label>
-      </div>
-      <label>Backstory<textarea id="af-backstory" placeholder="Background/context for the persona block."></textarea></label>
-      <label>Seed prompt (first task queued on spawn)<textarea id="af-seed" placeholder="Optional initial task."></textarea></label>
-      <div class="ae-sec">Skills (→ --append-system-prompt) <span class="n-dim" id="af-skills-n"></span></div>
-      <div class="ae-chips" id="af-skills"></div>
-      <div class="ae-sec">MCP servers (→ --mcp-config) <span class="n-dim" id="af-mcp-n"></span></div>
-      <div class="ae-chips" id="af-mcp"></div>
-      <div class="ae-sec">Knowledge dirs (→ --add-dir)</div>
-      <div class="ae-list" id="af-knowledge"></div>
-      <button class="r-btn" style="align-self:flex-start;" onclick="aeListAdd('knowledge','')">+ knowledge path</button>
-      <div class="ae-sec">Plugins (→ --plugin-dir; gated by spawn.live)</div>
-      <div class="ae-list" id="af-plugins"></div>
-      <button class="r-btn" style="align-self:flex-start;" onclick="aeListAdd('plugins','')">+ plugin dir</button>
-      <div class="ae-sec">Folder globs (auto-attach this agent in the modal when the chosen dir matches)</div>
-      <div class="ae-list" id="af-globs"></div>
-      <button class="r-btn" style="align-self:flex-start;" onclick="aeListAdd('globs','')">+ glob</button>
-      <div class="ae-grid">
-        <label>Policy bundle (L2)<select id="af-bundle"></select></label>
-      </div>
-      <div class="ae-grid">
-        <button class="r-btn" style="border-color:#3b6;color:#bdf;" onclick="agentEdSave()">Save agent</button>
-        <button class="r-btn" onclick="agentEdCancel()">Cancel</button>
-        <span class="n-dim" id="af-note" style="align-self:center;">Per-mode model binding (modelByMode) + requiredEnv are preserved on edit; hand-edit those in cc-agents.json.</span>
-      </div>
-    </div>
-    <div id="ae-mcp">
-      <div class="ae-sec">MCP server registry (cc-mcp.json) — attachable to any agent above</div>
-      <div id="ae-mcp-list" class="ae-list"></div>
-      <div class="ae-sec">Add / edit a server</div>
-      <div class="ae-grid">
-        <label>ID<input type="text" id="mf-id" placeholder="e.g. linear"></label>
-        <label>Label<input type="text" id="mf-label" placeholder="optional display name"></label>
-        <label>Transport<select id="mf-transport" onchange="mcpFormSync()"><option value="stdio">stdio</option><option value="sse">sse</option><option value="http">http</option></select></label>
-      </div>
-      <label id="mf-cmd-wrap">Command (stdio)<input type="text" id="mf-command" placeholder="npx"></label>
-      <label id="mf-args-wrap">Args (space-separated)<input type="text" id="mf-args" placeholder="-y @scope/server"></label>
-      <label id="mf-url-wrap" style="display:none;">URL (sse/http)<input type="text" id="mf-url" placeholder="https://mcp.example.com/sse"></label>
-      <div class="ae-grid">
-        <label>Allowed tools (space-separated, optional)<input type="text" id="mf-tools" placeholder=""></label>
-        <label>Auth token ENV var (name only — never the value)<input type="text" id="mf-tokenenv" placeholder="MY_MCP_TOKEN"></label>
-      </div>
-      <div class="ae-grid">
-        <button class="r-btn" style="border-color:#3b6;color:#bdf;" onclick="mcpEdSave()">Save server</button>
-        <button class="r-btn" onclick="mcpEdReset()">Clear form</button>
-        <button class="r-btn" onclick="mcpEdBack()">← Back to agents</button>
-      </div>
-    </div>
-    <div id="r-foot" style="border-top:1px solid #2c2f3a;"><span class="n-dim" id="ae-info"></span></div>
-  </div>
-
-  <div id="policyed">
-    <div id="pe-head">
-      <span>🛡 Policy bundles &amp; attachments</span>
-      <button class="s-x" onclick="closePolicyEd()">✕</button>
-    </div>
-    <div id="pe-warn"></div>
-    <div id="pe-body">
-      <div class="pe-sec">Bundles <button class="r-btn" onclick="peBundleNew()">+ New bundle</button>
-        <span class="n-dim">starters:</span>
-        <button class="pe-starter" onclick="peStarter('read-only')">read-only</button>
-        <button class="pe-starter" onclick="peStarter('no-bash')">no-bash</button>
-        <button class="pe-starter" onclick="peStarter('no-network')">no-network</button>
-      </div>
-      <div id="pe-bform">
-        <label>Name<input type="text" id="bf-name" placeholder="e.g. tight"></label>
-        <label>autoDeny — patterns to HOLD/escalate, one per line (e.g. Bash, Bash(rm*), Write)<textarea id="bf-deny" placeholder="Bash&#10;Write&#10;Edit"></textarea></label>
-        <label>autoAllow — patterns to auto-approve, one per line<textarea id="bf-allow" placeholder="Read&#10;Bash(ls*)"></textarea></label>
-        <label>gateTools — per-bundle hold-for-approval list (space-separated; not yet enforced at spawn)<input type="text" id="bf-gate" placeholder="(blank = inherit fleet gate.tools)"></label>
-        <div class="pe-grid">
-          <label>Locked perm mode (not yet enforced)<select id="bf-lockmode"><option value="">(none)</option><option value="default">default</option><option value="acceptEdits">acceptEdits</option><option value="plan">plan</option></select></label>
-          <label>toolLimits — soft per-tool ceilings, "Tool=N" space-separated (advisory)<input type="text" id="bf-limits" placeholder="Bash=5 Write=10"></label>
-        </div>
-        <div class="pe-grid">
-          <label class="pe-check"><input type="checkbox" id="bf-autopilot"> autopilot (auto-approve everything not denied)</label>
-          <label class="pe-check"><input type="checkbox" id="bf-disable"> disableGlobal (ignore the fleet policy for this session)</label>
-        </div>
-        <div class="pe-grid">
-          <button class="r-btn" style="border-color:#3b6;color:#bdf;" onclick="peBundleSave()">Save bundle</button>
-          <button class="r-btn" onclick="peBundleCancel()">Cancel</button>
-        </div>
-      </div>
-      <div id="pe-bundles"></div>
-      <div class="pe-sec" style="margin-top:14px;">Attachments <button class="r-btn" onclick="peAttNew()">+ New attachment</button>
-        <span class="n-dim">first match wins → its bundle applies</span>
-      </div>
-      <div id="pe-aform">
-        <div class="pe-grid">
-          <label>Match project (glob; blank = any)<input type="text" id="af2-project" placeholder="shepherd* or *"></label>
-          <label>Match group<input type="text" id="af2-group" placeholder="(any)"></label>
-        </div>
-        <div class="pe-grid">
-          <label>Match providerId<input type="text" id="af2-provider" placeholder="(any)"></label>
-          <label>Match session key<input type="text" id="af2-key" placeholder="(any)"></label>
-        </div>
-        <label>Bundle to apply<select id="af2-bundle"></select></label>
-        <div class="pe-grid">
-          <button class="r-btn" style="border-color:#3b6;color:#bdf;" onclick="peAttSave()">Save attachment</button>
-          <button class="r-btn" onclick="peAttCancel()">Cancel</button>
-        </div>
-      </div>
-      <div id="pe-atts"></div>
-    </div>
-    <div id="r-foot" style="border-top:1px solid #2c2f3a;"><span class="n-dim" id="pe-info"></span></div>
-  </div>
-
-  <div id="ruleed">
-    <div id="re-head">
-      <span>⚙️ Automation rules</span>
-      <button class="r-btn" onclick="ruleEdNew()">+ New rule</button>
-      <button class="s-x" onclick="closeRuleEd()">✕</button>
-    </div>
-    <div id="re-warn"></div>
-    <div id="re-body"></div>
-    <div id="re-form">
-      <label>Name<input type="text" id="rlf-name" placeholder="e.g. nudge-on-loop"></label>
-      <div class="re-sec">When (trigger)</div>
-      <label>On edge
-        <select id="rlf-trigger">
-          <option value="done">done (turn finished)</option>
-          <option value="error">error (API error / frozen)</option>
-          <option value="approval">approval (needs you)</option>
-          <option value="hung">hung (stalled — no progress)</option>
-          <option value="loop">loop (repeating the same tool)</option>
-          <option value="starved">starved (queue has work, no free session)</option>
-        </select>
-      </label>
-      <div class="re-grid">
-        <label>Match project (glob; blank = any)<input type="text" id="rlf-m-project" placeholder="(any)"></label>
-        <label>Match group<input type="text" id="rlf-m-group" placeholder="(any)"></label>
-      </div>
-      <div class="re-grid">
-        <label>Match session key<input type="text" id="rlf-m-key" placeholder="(any)"></label>
-        <label>Match providerId<input type="text" id="rlf-m-provider" placeholder="(any)"></label>
-      </div>
-      <div class="re-sec">Do (processor)</div>
-      <label>Action
-        <select id="rlf-proc" onchange="ruleEdProcSync()">
-          <option value="log">log (audit-only note)</option>
-          <option value="relabel">relabel the tile</option>
-          <option value="nudge">nudge (type a message)</option>
-          <option value="feed">feed (queue a task)</option>
-          <option value="continue">continue (resume an errored session)</option>
-        </select>
-      </label>
-      <label id="rlf-text-wrap">Text<textarea id="rlf-text" placeholder="The message / task / note."></textarea></label>
-      <label id="rlf-label-wrap" style="display:none;">New label<input type="text" id="rlf-label" placeholder="e.g. ⚠ review me"></label>
-      <div class="re-grid">
-        <label class="re-check"><input type="checkbox" id="rlf-once" checked> once (fire at most once per session)</label>
-        <label class="re-check"><input type="checkbox" id="rlf-enabled" checked> enabled</label>
-      </div>
-      <div class="re-grid">
-        <button class="r-btn" style="border-color:#3b6;color:#bdf;" onclick="ruleEdSave()">Save rule</button>
-        <button class="r-btn" onclick="ruleEdCancel()">Cancel</button>
-        <span class="n-dim" style="align-self:center;">nudge/feed/continue are delivery-gated (skip if no window matches); all safe + opt-in.</span>
-      </div>
-    </div>
-    <div id="r-foot" style="border-top:1px solid #2c2f3a;"><span class="n-dim" id="re-info"></span></div>
   </div>
 
   <script>
@@ -17703,110 +16043,6 @@ local HTML = [[
     // Enter sends; Shift+Enter inserts a newline (mirrors the Claude chat input).
     function onNudgeKey(e){ if(e.key === "Enter" && !e.shiftKey){ e.preventDefault(); sendNudge(); } }
 
-    // ---- Saved task templates (roadmap #5c; L3) ----------------------------
-    // Records carry a composed `body`, an effective `vars` list, and a version.
-    // A template with vars (or built-ins like {{today}}) is RENDERED by cc-core
-    // before insert: collect values in an inline form, round-trip to Lua, drop the
-    // rendered text into the input (never auto-sent). cc-core owns the render — no
-    // JS render twin to drift.
-    var TEMPLATES = [];
-    var tplOpen = false;
-    var tplVarForm = null;   // {name, vars:[{name,required,label,default}], values:{}}
-    function toggleTemplates(){
-      tplOpen = !tplOpen;
-      if(tplOpen){ tplVarForm = null; send("template-list"); }
-      renderTemplates();
-    }
-    function ccTemplates(list){ TEMPLATES = list || []; renderTemplates(); }
-    function tplFind(name){ for(var i=0;i<TEMPLATES.length;i++){ if(TEMPLATES[i].name===name) return TEMPLATES[i]; } return null; }
-    function tplQuote(s){ return JSON.stringify(s).replace(/"/g,"&quot;").replace(/</g,"&lt;"); }
-    function renderTemplates(){
-      var box = document.getElementById("tpl-menu"); if(!box) return;
-      box.classList.toggle("show", tplOpen);
-      if(!tplOpen){ box.innerHTML = ""; return; }
-      if(tplVarForm){ box.innerHTML = renderVarForm(); tplVarCheck(); return; }
-      var html = '<div class="tpl-row tpl-save" onclick="templateSaveCurrent()">＋ Save current input as template…</div>';
-      html += '<div class="tpl-row tpl-save" onclick="templateImport()">⤓ Import from prompts folder…</div>';
-      html += '<div class="tpl-row tpl-save" onclick="tplOpen=false;renderTemplates();openTplEditor()">📝 Manage templates… (author / versions)</div>';
-      html += TEMPLATES.map(function(t){
-        var nm = tplQuote(t.name);
-        var badge = (t.vars && t.vars.length) ? '<span class="tpl-badge" title="has variables">{{ }}</span>' : '';
-        var ver = (t.version && t.version > 1) ? '<span class="tpl-ver">v' + esc(t.version) + '</span>' : '';
-        return '<div class="tpl-row" onclick="templateInsert(' + nm + ')">'
-          + '<span class="tpl-name">' + esc(t.name) + badge + ver + '</span>'
-          + '<span class="tpl-text">' + esc(t.body || "") + '</span>'
-          + '<button onclick="event.stopPropagation();templateDelete(' + nm + ')" title="Delete">✕</button>'
-          + '</div>';
-      }).join("");
-      box.innerHTML = html;
-    }
-    function renderVarForm(){
-      var f = tplVarForm;
-      var rows = f.vars.map(function(v){
-        var lab = esc(v.label || v.name) + (v.required ? ' <span class="tpl-req">*</span>' : '');
-        return '<label class="tpl-var"><span>' + lab + '</span>'
-          + '<input type="text" value="' + esc(f.values[v.name] || "") + '" oninput="tplVarInput(' + tplQuote(v.name) + ', this.value)"></label>';
-      }).join("");
-      return '<div class="tpl-form"><div class="tpl-form-head">Fill variables for “' + esc(f.name) + '”</div>'
-        + rows
-        + '<div class="tpl-form-foot"><button onclick="tplVarCancel()">Cancel</button>'
-        + '<button id="tpl-var-go" onclick="tplVarGo()">Insert</button></div></div>';
-    }
-    function templateInsert(name){
-      var t = tplFind(name); if(!t) return;
-      var vars = (t.vars && t.vars.length) ? t.vars : [];
-      if(vars.length){   // collect values, then render
-        tplVarForm = { name: name, vars: vars, values: {} };
-        vars.forEach(function(v){ if(v.default) tplVarForm.values[v.name] = v.default; });
-        renderTemplates(); return;
-      }
-      if(/\{\{/.test(t.body || "")){   // built-ins only (date/now/prev_output)
-        send("template-render", name, JSON.stringify({ vars: {}, key: selectedKey || "" }));
-        tplOpen = false; renderTemplates(); return;
-      }
-      var el = document.getElementById("nudge");
-      el.value = t.body || ""; autoGrow(el); el.focus();
-      tplOpen = false; renderTemplates();
-    }
-    function tplVarInput(name, val){ if(tplVarForm){ tplVarForm.values[name] = val; tplVarCheck(); } }
-    function tplVarCheck(){
-      if(!tplVarForm) return;
-      var ok = true;
-      tplVarForm.vars.forEach(function(v){
-        if(v.required && !((tplVarForm.values[v.name] || "").trim())) ok = false;
-      });
-      var btn = document.getElementById("tpl-var-go"); if(btn) btn.disabled = !ok;
-    }
-    function tplVarCancel(){ tplVarForm = null; renderTemplates(); }
-    function tplVarGo(){
-      if(!tplVarForm) return;
-      send("template-render", tplVarForm.name, JSON.stringify({ vars: tplVarForm.values, key: selectedKey || "" }));
-      tplVarForm = null; tplOpen = false; renderTemplates();
-    }
-    // cc-core hands back the rendered body; it lands in whichever input started the
-    // flow (the nudge box, or the New-Session modal's task field). Never auto-sent.
-    var tplRenderTarget = "nudge";
-    function ccTemplateRendered(o){
-      var id = (tplRenderTarget === "n-task") ? "n-task" : "nudge";
-      tplRenderTarget = "nudge";   // reset to the default sink
-      var el = document.getElementById(id); if(!el) return;
-      el.value = (o && o.text) || "";
-      if(id === "nudge"){ autoGrow(el); } else { renderModalTpls(); }
-      el.focus();
-    }
-    function templateSaveCurrent(){
-      var t = (document.getElementById("nudge").value || "").trim();
-      if(!t){ alert("Type the task text into the input first, then save it as a template."); return; }
-      var name = prompt("Template name?");
-      if(name === null) return;
-      send("template-save", name, t);  // Lua validates + replies with the fresh list
-    }
-    function templateDelete(name){
-      if(confirm('Delete template "' + name + '"?')){ send("template-delete", name); }
-    }
-    // L3 definition source: import *.prompt / *.md files from the local prompts
-    // folder (config templates.sourceDir, default ~/.claude/cc-prompts).
-    function templateImport(){ send("template-import"); }
     // Capture a pasted image as a data URL; plain text keeps default paste.
     (function(){
       var el = document.getElementById("nudge");
@@ -18308,8 +16544,7 @@ local HTML = [[
     function wlFileBadges(it, isDone){
       var h = wlAuditChip(it) + wlBranchChip(it);
       h += wlLiveRunChip(it);
-      // 📘 a playbook's line names its own file (2026-10-03); the name is from disk, so esc()
-      var where = (it && it.src === "playbook" && it.srcName) ? String(it.srcName) : "TODO.md";
+      var where = "TODO.md";   // (a playbook's line named its own file, until playbooks went 2026-11-19)
       if(it && it.fileDone) h += '<span class="wl-fdone' + (isDone ? "" : " need")
         + '" title="' + esc("Automation marked this done in " + where + " — tick the box once YOU have verified it") + '">✓ auto</span>';
       if(it && it.fileMissing) h += '<span class="wl-fmiss" title="' + esc("This line is no longer in " + where) + '">⚠</span>';
@@ -18426,7 +16661,6 @@ local HTML = [[
         tb.style.display = (curProj && (curProj.hasTodo || curProj.todoOn)) ? "" : "none";
         tb.textContent = (curProj && curProj.todoOn) ? "↻ Sync TODO.md" : "⇪ Import TODO.md";
       }
-      wlRenderPlaybooks(curProj);
       wlRenderRun(curProj);
       // Mark all: offered on every tab INCLUDING master, and only while there is something
       // left to mark -- a button that would do nothing shouldn't be there to be clicked.
@@ -18490,7 +16724,7 @@ local HTML = [[
         });
       }
       document.getElementById("wl-active").innerHTML = active.length
-        ? wlActiveRows(active, wlCurPlaybooks())
+        ? active.map(function(it){ return wlItemRow(it, false); }).join("")
         : '<div class="wl-empty">' + wlLaneEmpty(false) + '</div>';
       document.getElementById("wl-done").innerHTML = worklistDoneOpen
         ? done.map(function(it){ return wlItemRow(it, true); }).join("") : "";
@@ -18626,74 +16860,8 @@ local HTML = [[
       if(wlTodoFlashTimer) clearTimeout(wlTodoFlashTimer);
       wlTodoFlashTimer = setTimeout(function(){ el.textContent = ""; }, 6000);
     };
-    // ---- 📘 Playbooks: a picked markdown checklist as a source (2026-10-03) ----
-    // Lua picks the file with a NATIVE chooser, so Add names only the tab and Remove only a source's
-    // id; no path ever leaves this page. A playbook's lines render after the tab's other open rows,
-    // under a header with the file's name: one group per file, in the order its lines first appear.
-    // A removed playbook's items stay (to be verified), still grouped, its header saying so.
+    // A project's own tab (not generic, master or the archive). Run selected starts only on one.
     function wlIsProjectTab(scope){ return !!scope && scope !== "generic" && scope !== "master" && scope !== "archive"; }
-    function wlCurPlaybooks(){
-      var projs = (worklistData && Array.isArray(worklistData.projects)) ? worklistData.projects : [];
-      for(var i = 0; i < projs.length; i++){
-        if(projs[i].key === worklistScope) return Array.isArray(projs[i].playbooks) ? projs[i].playbooks : [];
-      }
-      return [];
-    }
-    function wlRenderPlaybooks(curProj){
-      var add = document.getElementById("wl-pbadd");
-      if(add) add.style.display = (curProj && wlIsProjectTab(worklistScope)) ? "" : "none";
-      var row = document.getElementById("wl-pbrow"); if(!row) return;
-      var pbs = (curProj && wlIsProjectTab(worklistScope)) ? wlCurPlaybooks() : [];
-      row.style.display = pbs.length ? "" : "none";
-      row.innerHTML = pbs.map(function(pb){
-        return '<span class="wl-pb">📘 <span class="wl-pbname" title="' + esc(String(pb.path || "")) + '">'
-          + esc(String(pb.name || "")) + '</span><button class="wl-pbdel" data-pbdel="' + esc(String(pb.id || ""))
-          + '" title="Remove playbook: stop importing it (its items stay to be verified)">✕</button></span>';
-      }).join("");
-    }
-    function wlActiveRows(active, playbooks){
-      var plain = [], groups = [], byFile = {}, live = {};
-      (playbooks || []).forEach(function(pb){ if(pb && pb.path) live[String(pb.path)] = true; });
-      active.forEach(function(it){
-        if(it && it.src === "playbook" && it.srcFile){
-          var f = String(it.srcFile), g = byFile[f];
-          if(!g){ g = { file: f, name: String(it.srcName || f), items: [] }; byFile[f] = g; groups.push(g); }
-          g.items.push(it);
-        } else {
-          plain.push(it);
-        }
-      });
-      var h = plain.map(function(it){ return wlItemRow(it, false); }).join("");
-      groups.forEach(function(g){
-        h += '<div class="wl-mgroup wl-pbgroup" title="' + esc(g.file) + '">📘 ' + esc(g.name)
-          + (live[g.file] ? "" : " · removed") + '</div>'
-          + g.items.map(function(it){ return wlItemRow(it, false); }).join("");
-      });
-      return h;
-    }
-    function playbookAdd(){ if(wlIsProjectTab(worklistScope)) send("worklist-playbook-add", worklistScope); }
-    function playbookRemove(id){
-      var name = "";
-      wlCurPlaybooks().forEach(function(pb){ if(String(pb.id) === String(id)) name = String(pb.name || ""); });
-      if(!confirm("Remove playbook " + name + "? It stops importing; its items stay in the list to be verified.")) return;
-      send("worklist-playbook-remove", worklistScope, id);
-    }
-    window.ccPlaybookResult = function(r){
-      r = r || {};
-      var el = document.getElementById("wl-todoflash"); if(!el) return;
-      var name = String(r.name || ""), msg;
-      if(r.error) msg = String(r.error);
-      else if(r.removed !== undefined) msg = "Playbook " + String(r.removed || "") + " removed — its items stay to be verified";
-      else if(r.unreadable) msg = "Couldn't read playbook " + name;
-      else {
-        msg = (r.added|0) + " new, " + (r.updated|0) + " updated";
-        if(r.missing|0) msg += ", " + (r.missing|0) + " missing";
-        msg = "Playbook " + name + (r.auto ? " synced — " : " added — ") + msg;
-      }
-      el.textContent = msg;
-      if(wlTodoFlashTimer) clearTimeout(wlTodoFlashTimer);
-      wlTodoFlashTimer = setTimeout(function(){ el.textContent = ""; }, 6000);
-    };
     // ---- ▶ Run selected: the checklist runner (2026-10-03) ----
     // ▶ Run… on a project tab starts picking open items -- nothing preselected, a TODO.md line
     // included; Run selected (N) sends the tab and the picked ids in the TAB's order, and Lua works
@@ -19019,8 +17187,6 @@ local HTML = [[
       if(sb && sb.getAttribute){ var s = sb.getAttribute("data-scope"); if(s !== null) worklistPick(s); }
       var db = (t.classList && t.classList.contains("wl-del")) ? t : (t.closest ? t.closest(".wl-del") : null);
       if(db && db.getAttribute){ var did = db.getAttribute("data-del"); if(did){ worklistRemove(did); return; } }
-      var pd = (t.classList && t.classList.contains("wl-pbdel")) ? t : (t.closest ? t.closest(".wl-pbdel") : null);
-      if(pd && pd.getAttribute){ var pid = pd.getAttribute("data-pbdel"); if(pid){ playbookRemove(pid); return; } }
       // Click a row (but not its checkbox / ✕) -> open the item modal.
       if(!t.closest) return;
       if(t.classList && (t.classList.contains("wl-cb") || t.classList.contains("wl-del") || t.classList.contains("wl-rpick"))) return;
@@ -19674,7 +17840,7 @@ local HTML = [[
       if(s("Headless approvals")||s("Questions")||s("Approval gate")||s("Policies")||s("Always ask")) return "approvals";
       if(s("Escalation")||s("Fleet idle")||s("Graceful drain")||s("Respawn")||s("Auto-Continue")||s("Dry run")) return "automation";
       if(s("Risk score")||s("Same-folder")||s("Insights")||s("Observability")||s("Hooks")||s("Audit log")) return "observability";
-      if(s("Editor window pop")||s("Spawn")||s("Claude Code Remote Control")||s("SSH status bridge")||s("Providers")) return "spawn";
+      if(s("Editor window pop")||s("Spawn")||s("Claude Code Remote Control")||s("SSH status bridge")) return "spawn";
       return "general"; }
     function tagSettingsTabs(){
       var body=document.getElementById("s-body"); if(!body) return; var cur="general";
@@ -19756,8 +17922,6 @@ local HTML = [[
       ck("s-rc-spawn",    cv(cfg,"remoteControl.onSpawn",true));
       ck("s-rc-sweep",    cv(cfg,"remoteControl.sweepOnStartup",true));
       ck("s-p-rep",  cv(cfg,"policies.approveRepeats",false));
-      ck("s-ap-en",  cv(cfg,"policies.autopilot.enabled",false));
-      val("s-ap-min", cv(cfg,"policies.autopilot.minutes",15));
       ck("s-pat-en", cv(cfg,"policies.patterns.enabled",false));
       val("s-pat-allow", (cv(cfg,"policies.patterns.autoAllow",[])||[]).join("\n"));
       val("s-pat-deny",  (cv(cfg,"policies.patterns.autoDeny",[])||[]).join("\n"));
@@ -19769,137 +17933,11 @@ local HTML = [[
       val("s-ledger-types", (cv(cfg,"ledger.captureTypes",[])||[]).join(" "));
       // Headless = gate armed AND every auto-policy off.
       ck("s-headless", gateOn && !cv(cfg,"policies.approveRepeats",false)
-        && !cv(cfg,"policies.autopilot.enabled",false) && !cv(cfg,"policies.patterns.enabled",false));
-      // Providers: editable list + default picker.
-      PROVIDERS = (cv(cfg,"providers",[])||[]).map(function(p){ return p||{}; });
-      renderProviders();
-      refreshProviderDefault(cv(cfg,"spawn.provider",""));
+        && !cv(cfg,"policies.patterns.enabled",false));
       populateAppearance(cfg);   // Appearance tab + live-preview baseline
       tagSettingsTabs();         // bucket sections into tabs + build the tab bar
       settingsTab("general");    // land on General; Appearance is one tab over
       document.getElementById("settings").classList.add("show");
-    }
-    // ---- Providers tab (multi-model) ----------------------------------------
-    var PROVIDERS = [];
-    function slugify(s){ return (s||"").toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,""); }
-    function renderProviders(){
-      var box = document.getElementById("s-providers"); box.innerHTML = "";
-      PROVIDERS.forEach(function(p, i){
-        var kind = (p.kind === "gateway") ? "gateway" : "anthropic";
-        var d = document.createElement("div"); d.className = "prov"; d.setAttribute("data-i", i);
-        d.innerHTML =
-          '<div class="prov-head">'
-          + '<input class="s-txt p-label" placeholder="Label (e.g. Claude Opus 4.8)" value="'+esc(p.label)+'">'
-          + '<select class="p-kind" onchange="onKindChange('+i+')">'
-          + '<option value="anthropic"'+(kind==="anthropic"?" selected":"")+'>Claude</option>'
-          + '<option value="gateway"'+(kind==="gateway"?" selected":"")+'>Gateway</option>'
-          + '</select>'
-          + '<button class="prov-del" onclick="removeProvider('+i+')">Remove</button>'
-          + '</div>'
-          + '<div class="s-lbl">Model id</div>'
-          + '<input class="s-txt p-model" placeholder="claude-opus-4-8 / gemini-2.5-pro / ollama/llama3" value="'+esc(p.model)+'">'
-          + '<div class="prov-gw" style="display:'+(kind==="gateway"?"block":"none")+'">'
-          + '<div class="s-lbl">Base URL (Anthropic-compatible endpoint, e.g. http://localhost:4000)</div>'
-          + '<input class="s-txt p-baseurl" placeholder="http://localhost:4000" value="'+esc(p.baseUrl)+'">'
-          + '<div class="s-lbl">Auth-token env var NAME (not the key) — e.g. MY_LITELLM_KEY</div>'
-          + '<input class="s-txt p-authenv" placeholder="MY_LITELLM_KEY" value="'+esc(p.authTokenEnv)+'">'
-          + '<div class="s-lbl">Small/fast model (optional)</div>'
-          + '<input class="s-txt p-smallfast" placeholder="gemini-2.5-flash" value="'+esc(p.smallFastModel)+'">'
-          + '<div class="s-lbl">Custom headers (optional, sent as ANTHROPIC_CUSTOM_HEADERS)</div>'
-          + '<input class="s-txt p-headers" placeholder="X-Header: value" value="'+esc(p.headers)+'">'
-          + '</div>';
-        box.appendChild(d);
-      });
-      if(!PROVIDERS.length){ box.innerHTML = '<div class="s-help" style="margin-left:0;">No providers yet — add one to launch sessions against a model.</div>'; }
-    }
-    function onKindChange(i){
-      var card = document.querySelector('.prov[data-i="'+i+'"]'); if(!card) return;
-      var gw = card.querySelector(".prov-gw");
-      gw.style.display = (card.querySelector(".p-kind").value === "gateway") ? "block" : "none";
-    }
-    function addProvider(){
-      collectProviders(); // keep current edits
-      PROVIDERS.push({ kind:"anthropic", label:"", model:"" });
-      renderProviders(); refreshProviderDefault(document.getElementById("s-spawn-provider").value);
-    }
-    function removeProvider(i){
-      collectProviders(); PROVIDERS.splice(i,1);
-      renderProviders(); refreshProviderDefault(document.getElementById("s-spawn-provider").value);
-    }
-    // Read the DOM rows back into PROVIDERS, 1:1 with the cards (blank rows kept so
-    // data-i indices stay valid during editing; blanks are dropped only at persist).
-    // Each row MERGES onto its stored entry (via data-i): fields the card doesn't
-    // render (id, ssh, contextLimit, anything future) must survive a Save, and a
-    // stored id is kept as-is — regenerating it from the label would silently break
-    // the spawn.provider default and any hand-edited id. Slugs are only minted for
-    // entries that don't have an id yet (freshly added rows).
-    function collectProviders(){
-      var out = [];
-      document.querySelectorAll("#s-providers .prov").forEach(function(card){
-        function v(sel){ var el=card.querySelector(sel); return el? (el.value||"").trim() : ""; }
-        var i = parseInt(card.getAttribute("data-i"), 10);
-        var prev = (!isNaN(i) && PROVIDERS[i]) ? PROVIDERS[i] : {};
-        var p = {}; for(var k in prev){ p[k] = prev[k]; }
-        var label = v(".p-label"), model = v(".p-model");
-        p.label = label; p.kind = card.querySelector(".p-kind").value; p.model = model;
-        if(!p.id) p.id = slugify(label) || slugify(model);
-        if(p.kind === "gateway"){
-          p.baseUrl = v(".p-baseurl");
-          // R1-11: authTokenEnv is an env-var NAME interpolated into the spawn shell
-          // ("$NAME"); constrain to a POSIX identifier so a crafted name can't inject.
-          // A bad name is dropped (with an inline warning) -> token simply not sent.
-          var ate = v(".p-authenv");
-          if(ate && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(ate)){
-            var ael = card.querySelector(".p-authenv");
-            if(ael){ ael.value = ""; ael.placeholder = "invalid env-var name — must be A-Z, 0-9, _"; }
-            ate = "";
-          }
-          p.authTokenEnv = ate;
-          p.smallFastModel = v(".p-smallfast"); p.headers = v(".p-headers");
-        } else {
-          // Kind switched (gateway -> claude): drop the gateway-only fields the
-          // merge inherited from the stored entry. A stale baseUrl poisons
-          // respawn matching (providerByModel reads it as a gateway signature),
-          // silently relaunching the session as bare `claude` on the wrong model.
-          delete p.baseUrl; delete p.authTokenEnv;
-          delete p.smallFastModel; delete p.headers;
-        }
-        out.push(p);
-      });
-      PROVIDERS = out;
-      return out;
-    }
-    function nonBlankProviders(){ return collectProviders().filter(function(p){ return p.label || p.model; }); }
-    // Populate the default-provider select from the (non-blank) providers. `want`
-    // is the value to select: showSettings passes the SAVED spawn.provider ("" =
-    // bare claude) and the add/remove callers pass the live DOM value explicitly.
-    // No sel.value fallback: the saved "" sentinel is falsy, so falling back to
-    // the stale DOM would resurrect a CANCELLED pick on the next open -- and any
-    // Save (incl. the auto-persisting Headless toggle) would silently persist it.
-    function refreshProviderDefault(want){
-      var list = nonBlankProviders();
-      var sel = document.getElementById("s-spawn-provider");
-      want = want || "";
-      sel.innerHTML = '<option value="">(none — bare claude)</option>';
-      list.forEach(function(p){
-        if(!p.id) return;
-        var o = document.createElement("option");
-        o.value = p.id; o.textContent = (p.label||p.id) + " — " + (p.model||"?");
-        if(p.id === want) o.selected = true;
-        sel.appendChild(o);
-      });
-    }
-    // Fill an arbitrary <select> from a providers array (modal + per-tile switch).
-    function fillProviderSelect(selId, list, want){
-      var sel = document.getElementById(selId); if(!sel) return;
-      sel.innerHTML = '<option value="">(none — bare claude)</option>';
-      (list||[]).forEach(function(p){
-        if(!p || !p.id) return;
-        var o = document.createElement("option");
-        o.value = p.id; o.textContent = (p.label||p.id) + " — " + (p.model||"?");
-        if(p.id === (want||"")) o.selected = true;
-        sel.appendChild(o);
-      });
     }
     function lines(id){
       return (document.getElementById(id).value||"").split("\n")
@@ -19931,16 +17969,15 @@ local HTML = [[
         focus: { popOnComplete: ck("s-pop-complete"), popOnApproval: ck("s-pop-approval") },
         spawn: { editor: txt("s-spawn-editor"), live: ck("s-spawn-live"),
                  vscodeFlavor: txt("s-spawn-vsflavor"),
-                 kittyRemote: ck("s-kitty-remote"), kittyAutoRemote: ck("s-kitty-auto"),
-                 provider: txt("s-spawn-provider") },
+                 kittyRemote: ck("s-kitty-remote"), kittyAutoRemote: ck("s-kitty-auto") },
+        // 2026-11-19: no providers / spawn.provider -- their editor went; a hand-kept list and default
+        // ride through a Save (a top-level key the form doesn't send, and SETTINGS_KEEP_SUBKEYS.spawn).
         remoteControl: { onSpawn: ck("s-rc-spawn"), sweepOnStartup: ck("s-rc-sweep") },
-        providers: nonBlankProviders(),
         gate: { tools: txt("s-gate-tools") },
         ledger: { enabled: ck("s-ledger-en"), retentionDays: num("s-ledger-days",30),
                   maxTotalMB: num("s-ledger-mb",0), captureTypes: toks("s-ledger-types") },
         policies: {
           approveRepeats: ck("s-p-rep"),
-          autopilot: { enabled: ck("s-ap-en"), minutes: num("s-ap-min",15) },
           patterns: { enabled: ck("s-pat-en"), autoAllow: lines("s-pat-allow"), autoDeny: lines("s-pat-deny") },
           alwaysAsk: { patterns: lines("s-aa-extra") }
         },
@@ -20053,101 +18090,6 @@ local HTML = [[
     function openNew(){ send("open-new"); }
     function closeNew(){ document.getElementById("newsession").classList.remove("show"); }
 
-    // ---- DR7: A/B fork-to-compare ----------------------------------------------
-    var AB_PROVIDERS = [], AB_DATA = { cohorts:[] };
-    // A/B is now a PER-PROJECT action (the tile right-click menu), not a global header
-    // button. openAb(repo) opens the modal pre-scoped to that project's folder; the repo
-    // field stays editable so you can still retarget or run A/B on any repo.
-    var AB_PREFILL = null;
-    function openAb(repo){ AB_PREFILL = (typeof repo === "string" && repo) ? repo : null; send("open-ab"); }
-    function closeAb(){ document.getElementById("abmodal").classList.remove("show"); }
-    // ccAb(data[, meta]): data = active cohorts (+ledger flag); meta (only on open) =
-    // providers + recent repos. On open we seed the form + show the modal; later pushes
-    // (after launch/keep) just refresh the active list.
-    window.ccAb = function(data, meta){
-      AB_DATA = data || { cohorts:[] };
-      if(meta){
-        AB_PROVIDERS = meta.providers || [];
-        var dl = document.getElementById("ab-recent");
-        if(dl){ dl.innerHTML = (meta.recent||[]).map(function(r){ return '<option value="'+esc(r)+'">'; }).join(""); }
-        if(!document.getElementById("ab-variants").children.length){
-          addAbVariant("A","opus","",""); addAbVariant("B","sonnet","","");
-        }
-        // Pre-fill the repo from the project the menu was opened on (still editable).
-        if(AB_PREFILL){ var rp = document.getElementById("ab-repo"); if(rp){ rp.value = AB_PREFILL; } }
-        AB_PREFILL = null;
-        document.getElementById("abmodal").classList.add("show");
-      }
-      renderAbActive();
-    };
-    function abProviderOptions(sel){
-      var o = '<option value="">native (no provider)</option>';
-      AB_PROVIDERS.forEach(function(p){ var id=(p&&p.id)||""; if(id) o += '<option value="'+esc(id)+'"'+(id===sel?' selected':'')+'>'+esc(id)+'</option>'; });
-      return o;
-    }
-    function addAbVariant(label, model, provider, prompt){
-      var box = document.getElementById("ab-variants");
-      if(box.children.length >= 4) return;   // cap at 4 variants
-      var row = document.createElement("div");
-      row.className = "ab-vrow";
-      row.innerHTML = '<input class="ab-vlabel" placeholder="label" value="'+esc(label||"")+'">'
-        + '<input class="ab-vmodel" placeholder="model (opt)" value="'+esc(model||"")+'">'
-        + '<select class="ab-vprov">'+abProviderOptions(provider||"")+'</select>'
-        + '<input class="ab-vprompt" placeholder="prompt override (optional)" value="'+esc(prompt||"")+'">'
-        + '<button class="ab-vx" title="remove" onclick="this.parentNode.remove()">✕</button>';
-      box.appendChild(row);
-    }
-    function launchAb(){
-      var repo = document.getElementById("ab-repo").value.trim();
-      var task = document.getElementById("ab-task").value;
-      var mode = document.getElementById("ab-mode").value;
-      var variants = [];
-      var rows = document.querySelectorAll("#ab-variants .ab-vrow");
-      for(var i=0;i<rows.length;i++){
-        var r = rows[i];
-        var label = r.querySelector(".ab-vlabel").value.trim();
-        if(!label) continue;
-        variants.push({ label: label,
-          model: r.querySelector(".ab-vmodel").value.trim(),
-          provider: r.querySelector(".ab-vprov").value,
-          prompt: r.querySelector(".ab-vprompt").value.trim() });
-      }
-      if(!repo){ alert("Pick a git repo folder for the A/B run."); return; }
-      if(variants.length < 2){ alert("A/B needs at least 2 labelled variants."); return; }
-      send("ab-launch", null, JSON.stringify({ repoRoot: repo, task: task, mode: mode, variants: variants }));
-    }
-    function keepAb(cohort, winner){ send("ab-keep", null, JSON.stringify({ cohort: cohort, winner: winner })); }
-    function judgeAb(cohort){ send("ab-judge", null, JSON.stringify({ cohort: cohort })); }
-    // Read keys back RAW from esc()'d data- attributes (esc is HTML-entity escaping —
-    // wrong for a JS-string context, so never interpolate a label into an inline handler).
-    function keepAbBtn(el){ keepAb(el.getAttribute("data-cohort"), el.getAttribute("data-label")); }
-    function judgeAbBtn(el){ judgeAb(el.getAttribute("data-cohort")); }
-    function renderAbActive(){
-      var box = document.getElementById("ab-active"); if(!box) return;
-      var cs = (AB_DATA && AB_DATA.cohorts) || [];
-      if(!cs.length){ box.innerHTML = '<div class="ab-sep" style="border-top:none;margin-top:0;">No active A/B runs</div>'; return; }
-      var html = '<div class="ab-sep" style="border-top:none;margin-top:0;">Active A/B runs</div>';
-      cs.forEach(function(c){
-        html += '<div class="ab-cohort">';
-        html += '<div class="ab-ctitle"><b>'+esc(c.cohort)+'</b><span class="ab-task" title="'+esc(c.task||"")+'">'+esc(c.task||"")+'</span></div>';
-        (c.variants||[]).forEach(function(v){
-          var isWin = c.winner && v.label === c.winner;
-          var score = v.hadData ? (v.score+"/100") : (AB_DATA.ledgerOn ? "—" : "(ledger off)");
-          html += '<div class="ab-vr'+(isWin?' win':'')+'">'
-            + '<span class="ab-vn">'+esc(v.label)+(isWin?' <span class="ab-win-tag">★ lead</span>':'')+'</span>'
-            + '<span class="ab-vm">'+esc(v.model||v.provider||"native")+'</span>'
-            + '<span class="ab-vs">'+esc(score)+'</span>'
-            + '<span class="ab-va">'+(v.live?esc(v.status||"")+(v.activity?(" · "+esc(v.activity)):""):'<i>not live</i>')+'</span>'
-            + '<button class="ab-keep" data-cohort="'+esc(c.cohort)+'" data-label="'+esc(v.label)+'" onclick="keepAbBtn(this)">Keep this</button>'
-            + '</div>';
-        });
-        html += '<div class="ab-cacts">'
-          + '<button data-cohort="'+esc(c.cohort)+'" onclick="judgeAbBtn(this)" title="Paste a side-by-side judge prompt into the first variant for a qualitative verdict">⚖ Judge</button>'
-          + '</div>';
-        html += '</div>';
-      });
-      box.innerHTML = html;
-    }
     function setMode(m){
       newMode = m;
       document.getElementById("n-mode-existing").classList.toggle("active", m === "existing");
@@ -20156,27 +18098,18 @@ local HTML = [[
     }
     // Lua pushes config + recent dirs + the initial folder listing.
     var PRESETS = [];            // saved spawn presets (roadmap #4a)
-    var LAST_BY_PROJECT = {};    // folder -> {editor, permMode, provider} recall
-    var AGENTS = [];             // saved agent profiles (L1)
-    var MCPS = [];               // saved MCP servers (L1)
-    var SKILLS = [];             // ~/.claude/skills cards (L1, read-only)
-    function showNew(cfg, recent, browse, presetState, agentState, templates){
+    var LAST_BY_PROJECT = {};    // folder -> {editor, permMode} recall
+    function showNew(cfg, recent, browse, presetState){
       cfg = cfg || {};
       setMode("existing");
       document.getElementById("n-path").value = "";
       document.getElementById("n-name").value = "";
       document.getElementById("n-task").value = "";
-      mTplForm = null; ccModalTemplates(templates);
       document.getElementById("n-editor").value = cv(cfg, "spawn.editor", "terminal");
-      fillProviderSelect("n-provider", cv(cfg,"providers",[])||[], cv(cfg,"spawn.provider",""));
       presetState = presetState || {};
       PRESETS = presetState.presets || [];
       LAST_BY_PROJECT = presetState.lastByProject || {};
       renderPresets();
-      agentState = agentState || {};
-      AGENTS = agentState.agents || []; MCPS = agentState.mcp || [];
-      renderAgents();
-      ccSkills(agentState.skills || []);
       hideSuggest();
       renderRecent(recent || []);
       ccBrowse(browse || { path:"", parent:"", dirs:[] });
@@ -20191,7 +18124,7 @@ local HTML = [[
         var b = document.createElement("button");
         b.className = "n-chip";
         b.title = p.folder + (p.editor ? " · " + p.editor : "") + (p.permMode ? " · " + p.permMode : "")
-                + (p.provider ? " · " + p.provider : "") + "\nClick to spawn · ✕ deletes";
+                + "\nClick to spawn · ✕ deletes";
         b.textContent = "▶ " + p.name;
         var x = document.createElement("span");
         x.className = "chip-x"; x.textContent = "✕";
@@ -20209,7 +18142,7 @@ local HTML = [[
     function presetSpawn(p){
       var task = (document.getElementById("n-task").value || "").trim();
       var payload = { a:"spawn", v:"", text:task, img:"", mode:"existing", dir:p.folder,
-                      editor:p.editor || "", permMode:p.permMode || "", provider:p.provider || "" };
+                      editor:p.editor || "", permMode:p.permMode || "" };
       try { window.webkit.messageHandlers.cc.postMessage(JSON.stringify(payload)); } catch(e){ console.log("spawn send error", e); }
       closeNew();
     }
@@ -20220,47 +18153,7 @@ local HTML = [[
       if(name === null || !(name = name.trim())) return;
       send("preset-save", "", JSON.stringify({ name: name, folder: path,
         editor: document.getElementById("n-editor").value,
-        permMode: document.getElementById("n-permmode").value,
-        provider: document.getElementById("n-provider").value }));
-    }
-    // ---- L1 Agent Profiles --------------------------------------------------
-    function ccAgents(list){ AGENTS = list || []; renderAgents(); }
-    function ccMcp(list){ MCPS = list || []; }
-    function renderAgents(){
-      var box = document.getElementById("n-agents"); if(!box) return; box.innerHTML = "";
-      var shown = (AGENTS||[]).filter(function(p){ return !p.hidden && !p.archived && !p.deleted; });
-      if(!shown.length){ box.innerHTML = '<span class="n-dim">No saved agents — set up a spawn below, then "Save as agent"</span>'; return; }
-      shown.forEach(function(p){
-        var b = document.createElement("button"); b.className = "n-chip";
-        var bits = [p.role||"", p.provider?("· "+p.provider):"",
-                    (p.skills&&p.skills.length)?("· "+p.skills.length+" skills"):"",
-                    (p.mcpServers&&p.mcpServers.length)?("· "+p.mcpServers.length+" mcp"):""].filter(Boolean).join(" ");
-        b.title = (p.folder||"(no saved folder — pick one first)") + (bits?("\n"+bits):"")
-                + "\nClick to spawn from this agent · ✕ deletes";
-        b.textContent = (p.favorite?"★ ":"") + "✦ " + p.name;
-        var x = document.createElement("span"); x.className = "chip-x"; x.textContent = "✕";
-        x.onclick = function(ev){ ev.stopPropagation();
-          if(confirm('Delete agent "'+p.name+'"?')){ send("agent-delete", p.name); } };
-        b.appendChild(x);
-        b.onclick = function(){ agentSpawn(p); };
-        box.appendChild(b);
-      });
-    }
-    // One-click spawn from a saved agent: carries the profile name so Lua resolves
-    // its persona/skills/MCP/knowledge into launch flags. Folder = the profile's
-    // saved folder, else whatever's in the path box.
-    function agentSpawn(p){
-      var folder = p.folder || (document.getElementById("n-path").value||"").trim();
-      if(!folder || folder.charAt(0) !== "/"){
-        alert('Agent "'+p.name+'" has no saved folder — pick a project folder first, then click it again.'); return;
-      }
-      var task = (document.getElementById("n-task").value||"").trim();
-      var payload = { a:"spawn", v:"", text:task, img:"", mode:"existing", dir:folder,
-        editor:p.editor||document.getElementById("n-editor").value||"",
-        permMode:p.permMode||"", provider:p.provider||"", agent:p.name };
-      try { window.webkit.messageHandlers.cc.postMessage(JSON.stringify(payload)); }
-      catch(e){ console.log("spawn-agent send error", e); }
-      closeNew();
+        permMode: document.getElementById("n-permmode").value }));
     }
     // 🔍 Audit (find-only), build program unit 38: a built-in preset. The message names the preset
     // and the folder only -- Lua (core.auditSpawnPlan) builds every flag, the mode and the files.
@@ -20269,98 +18162,10 @@ local HTML = [[
       if(!folder || folder.charAt(0) !== "/"){ alert("Pick an absolute project folder first, then click 🔍 Audit again."); return; }
       var task = (document.getElementById("n-task").value || "").trim();
       var payload = { a:"spawn", v:"", text:task, img:"", mode:"existing", dir:folder,
-        editor:document.getElementById("n-editor").value || "",
-        provider:document.getElementById("n-provider").value || "", preset:"audit" };
+        editor:document.getElementById("n-editor").value || "", preset:"audit" };
       try { window.webkit.messageHandlers.cc.postMessage(JSON.stringify(payload)); }
       catch(e){ console.log("audit spawn send error", e); }
       closeNew();
-    }
-    function saveAgent(){
-      var name = prompt("Agent name?"); if(name === null || !(name = name.trim())) return;
-      var role = prompt("Role (optional, e.g. \"a senior code reviewer\"):"); role = role ? role.trim() : "";
-      var path = (document.getElementById("n-path").value||"").trim();
-      var rec = { name:name, editor:document.getElementById("n-editor").value,
-        permMode:document.getElementById("n-permmode").value,
-        provider:document.getElementById("n-provider").value,
-        seedPrompt:(document.getElementById("n-task").value||"").trim(), role:role };
-      if(path && path.charAt(0) === "/") rec.folder = path;
-      send("agent-save", "", JSON.stringify(rec));
-      alert('Saved agent "'+name+'". Attach skills / MCP / knowledge and edit every field in the ✦ Agents editor (☰ menu → Agents).');
-    }
-    // ---- L3 template picker in the New-Session modal (render-before-spawn) ---
-    // Picking a template SEEDS the Initial-task field. A template with vars opens
-    // an inline form (required vars gate "Use"); cc-core renders it and the result
-    // lands in #n-task -- so the spawn task is fully resolved BEFORE spawn. Shares
-    // the template-render round-trip with the nudge menu (cc-core owns the render).
-    var MTEMPLATES = [];
-    var mTplForm = null;   // {name, vars:[{name,required,label,default}], values:{}}
-    function ccModalTemplates(list){ MTEMPLATES = Array.isArray(list) ? list : []; renderModalTpls(); }
-    function mTplFind(name){ for(var i=0;i<MTEMPLATES.length;i++){ if(MTEMPLATES[i].name===name) return MTEMPLATES[i]; } return null; }
-    function renderModalTpls(){
-      var box = document.getElementById("n-templates"); if(!box) return;
-      if(mTplForm){ box.innerHTML = renderMTplForm(); mTplCheck(); return; }
-      if(!MTEMPLATES.length){ box.innerHTML = '<span class="n-dim">No templates yet — save one from the input’s “Tpl ▾” menu</span>'; return; }
-      box.innerHTML = MTEMPLATES.map(function(t){
-        var badge = (t.vars && t.vars.length) ? '<span class="tpl-badge" title="has variables">{{ }}</span>' : '';
-        return '<button class="n-chip" title="Seed the task from this template" onclick="modalTplPick(' + tplQuote(t.name) + ')">'
-          + '◆ ' + esc(t.name) + badge + '</button>';
-      }).join("");
-    }
-    function renderMTplForm(){
-      var f = mTplForm;
-      var rows = f.vars.map(function(v){
-        var lab = esc(v.label || v.name) + (v.required ? ' <span class="tpl-req">*</span>' : '');
-        return '<label class="tpl-var"><span>' + lab + '</span>'
-          + '<input type="text" value="' + esc(f.values[v.name] || "") + '" oninput="mTplInput(' + tplQuote(v.name) + ', this.value)"></label>';
-      }).join("");
-      return '<div class="tpl-form"><div class="tpl-form-head">Fill variables for “' + esc(f.name) + '” → seeds the task</div>'
-        + rows
-        + '<div class="tpl-form-foot"><button onclick="mTplCancel()">Cancel</button>'
-        + '<button id="m-tpl-go" onclick="mTplGo()">Use</button></div></div>';
-    }
-    function modalTplPick(name){
-      var t = mTplFind(name); if(!t) return;
-      var vars = (t.vars && t.vars.length) ? t.vars : [];
-      if(vars.length){
-        mTplForm = { name: name, vars: vars, values: {} };
-        vars.forEach(function(v){ if(v.default) mTplForm.values[v.name] = v.default; });
-        renderModalTpls(); return;
-      }
-      if(/\{\{/.test(t.body || "")){   // built-ins only (date/now/prev_output)
-        tplRenderTarget = "n-task";
-        send("template-render", name, JSON.stringify({ vars: {}, key: selectedKey || "" }));
-        return;
-      }
-      var el = document.getElementById("n-task"); el.value = t.body || ""; el.focus();
-    }
-    function mTplInput(name, val){ if(mTplForm){ mTplForm.values[name] = val; mTplCheck(); } }
-    function mTplCheck(){
-      if(!mTplForm) return;
-      var ok = true;
-      mTplForm.vars.forEach(function(v){ if(v.required && !((mTplForm.values[v.name]||"").trim())) ok = false; });
-      var btn = document.getElementById("m-tpl-go"); if(btn) btn.disabled = !ok;
-    }
-    function mTplCancel(){ mTplForm = null; renderModalTpls(); }
-    function mTplGo(){
-      if(!mTplForm) return;
-      tplRenderTarget = "n-task";
-      send("template-render", mTplForm.name, JSON.stringify({ vars: mTplForm.values, key: selectedKey || "" }));
-      mTplForm = null; renderModalTpls();
-    }
-    // ---- L1 Skills card (read-only) -----------------------------------------
-    function ccSkills(list){ SKILLS = list || [];
-      var c = document.getElementById("n-skills-count"); if(c) c.textContent = SKILLS.length; renderSkills(); }
-    function toggleSkills(){ var b = document.getElementById("n-skills"), t = document.getElementById("n-skills-tog");
-      if(!b) return; var sh = (b.style.display === "none"); b.style.display = sh ? "flex" : "none"; if(t) t.textContent = sh ? "hide" : "show"; }
-    function renderSkills(){
-      var box = document.getElementById("n-skills"); if(!box) return; box.innerHTML = "";
-      if(!SKILLS.length){ box.innerHTML = '<span class="n-dim">No skills in ~/.claude/skills</span>'; return; }
-      SKILLS.forEach(function(s){
-        var d = document.createElement("span"); d.className = "n-chip"; d.style.cursor = "default";
-        d.title = (s.description||"") + (s.path?("\n"+s.path):"") + (s.shape?("\n["+s.shape+"]"):"");
-        d.textContent = (s.command || ("/"+s.name)) + (s.display_title?(" — "+s.display_title):"");
-        box.appendChild(d);
-      });
     }
     // Per-project recall: picking a known folder pre-fills its last-used options.
     function applyLastUsed(dir){
@@ -20369,7 +18174,6 @@ local HTML = [[
       if(!spec) return;
       if(spec.editor) document.getElementById("n-editor").value = spec.editor;
       if(spec.permMode != null) document.getElementById("n-permmode").value = spec.permMode;
-      if(spec.provider != null) document.getElementById("n-provider").value = spec.provider;
     }
 
     // ---- Fuzzy folder search (roadmap #4b) ----------------------------------
@@ -20487,8 +18291,7 @@ local HTML = [[
       var task = (document.getElementById("n-task").value || "").trim();
       var editor = document.getElementById("n-editor").value;
       var payload = { a:"spawn", v:"", text:task, img:"", mode:newMode, editor:editor,
-                      permMode: document.getElementById("n-permmode").value,
-                      provider: document.getElementById("n-provider").value };
+                      permMode: document.getElementById("n-permmode").value };
       if(newMode === "new"){ payload.parent = path; payload.name = name; } else { payload.dir = path; }
       try { window.webkit.messageHandlers.cc.postMessage(JSON.stringify(payload)); } catch(e){ console.log("spawn send error", e); }
       closeNew();
@@ -20509,7 +18312,6 @@ local HTML = [[
       if(key !== selectedKey){
         var dnSel = document.getElementById("deny-note"); if(dnSel) dnSel.value = "";   // a reason is for ONE session's request
         requestDecisions(key);  // gate decision log loads per selection, not per tick
-        tplOpen = false; renderTemplates();
         CHANGES = { key:null, data:null }; CH_DIFFS = {}; CH_OPEN = {};  // git Changes: per-session
         STORIES = { key:null, data:null, blocks:null, hash:null, dirty:false, editing:null, flash:null };  // per-session
         resetScoreReadout();   // DR4: clear the run-score readout on selection change
@@ -20922,43 +18724,6 @@ local HTML = [[
       sel.title = "Effective gated tools for this session: "
         + ((it.gate_tools_effective && it.gate_tools_effective !== "") ? it.gate_tools_effective : "(none)")
         + " — only enforced while headless approvals are armed.";
-    }
-    // L2: per-session policy bundle. "" = Default (no bundle); a name attaches it.
-    function onPolicyChange(){
-      if(!selectedKey) return;
-      send("set-policy", selectedKey, document.getElementById("d-policy").value);
-    }
-    // Populate the Policy dropdown from the configured bundle names + reflect the
-    // session's current attachment (override file -> the live resolved bundle).
-    function syncPolicySelect(it){
-      var sel = document.getElementById("d-policy"); if(!sel || !it) return;
-      var names = PANEL_BUNDLES || [];
-      var cur = (it.policy_override != null && String(it.policy_override).trim() !== "")
-                ? String(it.policy_override).trim() : "";
-      sel.innerHTML = '<option value="">Default</option>'
-        + names.map(function(n){ return '<option value="'+esc(n)+'">'+esc(n)+'</option>'; }).join("");
-      sel.value = cur;
-      var eff = it.policy_bundle ? ("bundle: " + it.policy_bundle) : "fleet policy";
-      sel.title = "Effective policy for this session: " + eff
-        + " — named bundles live in policies.bundles; only enforced while headless approvals are armed.";
-    }
-    // DR6: per-session model auto-routing toggle. Off by default, never fleet-wide.
-    // Disabled for remote tiles + non-Anthropic (gateway) sessions, where /model tier
-    // switching doesn't apply.
-    function onAutoModelChange(){
-      if(!selectedKey) return;
-      send("set-automodel", selectedKey, document.getElementById("d-automodel").checked ? "1" : "");
-    }
-    function syncAutoModel(it){
-      var cb = document.getElementById("d-automodel"); if(!cb || !it) return;
-      // R1-31: auto-routing's effect (autoModelPreface) bails for kitty/terminal (their
-      // /model is an interactive picker), so the gate MUST exclude them too -- else the
-      // checkbox is a dead control that persists a setting the delivery path ignores.
-      var ok = !it.remote && !!it.anthropic && it.editor !== 'kitty' && it.editor !== 'terminal';
-      cb.checked = ok && !!it.auto_model;
-      cb.disabled = !ok;
-      var lbl = document.getElementById("d-automodel-lbl");
-      if(lbl) lbl.style.opacity = ok ? "1" : "0.45";
     }
     // A pending AskUserQuestion on the detail panel. While cc-ask.sh holds it for Shepherd
     // (it.askHeld, 2026-09-11) the buttons ANSWER it: one click for a single-choice question,
@@ -21581,13 +19346,8 @@ local HTML = [[
       renderAsk(it);
       renderMeta(it);
       syncGateSelect(it);
-      syncPolicySelect(it);
-      syncAutoModel(it);
       renderDecisions();
       renderDetailUsage(it);
-      var ba = document.getElementById("b-auto");
-      ba.textContent = it.autopilot ? "Autopilot: ON" : "Autopilot";
-      ba.style.color = it.autopilot ? "#8fd4a3" : "#e8e9ee";
       // Remote (bridge) tiles are headless-only: grey every keystroke-shaped
       // control. Approve/Deny stay live only while the remote gate is waiting
       // (they route over ssh as decision files).
@@ -21614,8 +19374,8 @@ local HTML = [[
         }
       }
       // b-verify, b-coach: a remote session has no checkout here; they type nothing, so a shared window keeps them
-      ["b-jump","b-stop","b-auto","b-clear","b-compact","b-improve","b-nudge",
-       "effort","mode","d-model","d-gate","d-policy","nudge","b-verify","b-coach"].forEach(function(id){
+      ["b-jump","b-stop","b-clear","b-compact","b-improve","b-nudge",
+       "effort","mode","d-model","d-gate","nudge","b-verify","b-coach"].forEach(function(id){
         var el = document.getElementById(id); if(!el) return;
         var why = remote ? REMOTE_T : ((shared && SHARED_IDS.indexOf(id) >= 0) ? SHARED_T : "");
         lockCtl(el, why);
@@ -22493,876 +20253,6 @@ local HTML = [[
       mkRender();
     };
 
-    // ---- L7 routine board (⏰): edit cc-schedules.json without hand-editing ----
-    var ROUTINES = [];          // last board rows from ccSchedules()
-    var SCHED_ON = false;       // schedules.enabled (engine master switch)
-    var SPAWN_LIVE = false;     // spawn.live (else spawn routines dry-run)
-    var rfWeekdays = [];        // selected weekday indices (0=Sun..6=Sat) in the form
-    var rfEditing = null;       // name being edited, or null for a brand-new routine
-    var WD_LABELS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
-
-    function openRoutines(){ send("open-routines"); routineFormHide();
-      document.getElementById("routines").classList.add("show"); }
-    function closeRoutines(){ document.getElementById("routines").classList.remove("show"); }
-    // Server reply: ([rows], schedules.enabled, spawn.live)
-    function ccSchedules(list, schedOn, live){
-      ROUTINES = list || []; SCHED_ON = !!schedOn; SPAWN_LIVE = !!live; renderRoutines();
-    }
-    function pad2(n){ return (n < 10 ? "0" : "") + n; }
-    function fmtNextRun(ts){
-      if(!ts) return "—";
-      var d = new Date(ts * 1000), now = new Date();
-      var hm = pad2(d.getHours()) + ":" + pad2(d.getMinutes());
-      if(d.toDateString() === now.toDateString()) return "today " + hm;
-      return (d.getMonth()+1) + "/" + d.getDate() + " " + hm;
-    }
-    function mkRBtn(label, fn, cls){
-      var b = document.createElement("button"); b.className = "r-btn" + (cls ? " "+cls : "");
-      b.textContent = label; b.onclick = fn; return b;
-    }
-    function renderRoutines(){
-      var warn = document.getElementById("r-warn"); var notes = [];
-      // 2026-09-30: this pointed at ⚙ Settings, which has no control for it: a file-only switch
-      if(!SCHED_ON) notes.push("Scheduling is OFF — routines won't auto-fire. Turn it on with schedules.enabled in ~/.claude/cc-config.json (it has no ⚙ switch). “Run” still works.");
-      if(!SPAWN_LIVE) notes.push("spawn.live is OFF — spawn routines are DRY-RUN (no real session).");
-      warn.textContent = notes.join("   "); warn.classList.toggle("show", notes.length > 0);
-      var body = document.getElementById("r-body"); body.innerHTML = "";
-      if(!ROUTINES.length){
-        var e = document.createElement("div"); e.className = "r-empty";
-        e.textContent = "No routines yet. “+ Add routine” schedules a session spawn, a shift-report digest, or a check that main is still green.";
-        body.appendChild(e); document.getElementById("r-info").textContent = ""; return;
-      }
-      ROUTINES.forEach(function(r){
-        var row = document.createElement("div"); row.className = "r-row";
-        var dot = document.createElement("div"); dot.className = "r-dot" + (r.enabled ? " on" : "");
-        dot.title = r.enabled ? "enabled" : "paused"; row.appendChild(dot);
-        var main = document.createElement("div"); main.className = "r-main";
-        var nm = document.createElement("div"); nm.className = "r-name"; nm.textContent = r.name || "(unnamed)";
-        main.appendChild(nm);
-        var sub = document.createElement("div"); sub.className = "r-sub";
-        var bAct = document.createElement("span"); bAct.className = "r-badge" + (r.action==="digest" ? " digest" : "");
-        bAct.textContent = (r.action === "digest") ? "digest" : (r.action === "gate") ? "main green" : "spawn"; sub.appendChild(bAct);
-        var bSch = document.createElement("span"); bSch.className = "r-badge";
-        bSch.textContent = (r.kind === "oneShot") ? "once" : (r.human || r.cron || ""); sub.appendChild(bSch);
-        var tail = document.createElement("span"); var bits = [];
-        if(r.action !== "digest" && r.folder) bits.push(r.folder.replace(/^.*\//, ""));
-        if(r.provider) bits.push(r.provider);
-        tail.textContent = bits.join(" · "); sub.appendChild(tail);
-        main.appendChild(sub); row.appendChild(main);
-        var next = document.createElement("div"); next.className = "r-next";
-        next.textContent = r.enabled ? ("next " + fmtNextRun(r.nextRunAt)) : "paused";
-        row.appendChild(next);
-        var acts = document.createElement("div"); acts.className = "r-acts";
-        acts.appendChild(mkRBtn("Run", function(){ routineRunNow(r.name); }, ""));
-        acts.appendChild(mkRBtn(r.enabled ? "Pause" : "Resume", function(){ routineToggle(r.name, !r.enabled); }, ""));
-        acts.appendChild(mkRBtn("Edit", function(){ routineEdit(r); }, ""));
-        acts.appendChild(mkRBtn("Delete", function(){ routineDelete(r.name); }, "danger"));
-        row.appendChild(acts); body.appendChild(row);
-      });
-      document.getElementById("r-info").textContent = ROUTINES.length + " routine" + (ROUTINES.length===1?"":"s");
-    }
-    // --- Add/Edit form ---
-    function gv(id){ var el = document.getElementById(id); return el ? el.value : ""; }
-    function sv(id, val){ var el = document.getElementById(id); if(el) el.value = (val==null?"":val); }
-    function show(id, on){ var el = document.getElementById(id); if(el) el.style.display = on ? "" : "none"; }
-    function buildWeekdayBtns(){
-      var wrap = document.getElementById("rf-wd-wrap"); wrap.innerHTML = "";
-      WD_LABELS.forEach(function(lbl, i){
-        var b = document.createElement("button"); b.type = "button"; b.textContent = lbl;
-        b.onclick = function(){ toggleWeekday(i, b); };
-        b.className = (rfWeekdays.indexOf(i) >= 0) ? "on" : "";
-        wrap.appendChild(b);
-      });
-    }
-    function toggleWeekday(i, btn){
-      var at = rfWeekdays.indexOf(i);
-      if(at >= 0) rfWeekdays.splice(at, 1); else rfWeekdays.push(i);
-      btn.className = (rfWeekdays.indexOf(i) >= 0) ? "on" : "";
-      routineFormSync();
-    }
-    // HAND-MIRRORED twin of core.cronBuild (cc-core.lua) — keep in sync.
-    function cronBuildJS(spec){
-      spec = spec || {};
-      function clamp(v, lo, hi, dflt){ v = parseInt(v,10); if(isNaN(v)) return dflt;
-        return v < lo ? lo : (v > hi ? hi : v); }
-      var freq = spec.freq || "day";
-      var mi = clamp(spec.minute, 0, 59, 0), hr = clamp(spec.hour, 0, 23, 9);
-      if(freq === "minute"){ return "*/" + clamp(spec.every, 1, 59, 5) + " * * * *"; }
-      if(freq === "hour"){ return mi + " * * * *"; }
-      if(freq === "week"){
-        var seen = {}, days = [];
-        (spec.weekdays || []).forEach(function(d){ d = parseInt(d,10);
-          if(!isNaN(d) && d>=0 && d<=6 && !seen[d]){ seen[d] = 1; days.push(d); } });
-        days.sort(function(a,b){ return a-b; });
-        return mi + " " + hr + " * * " + (days.length ? days.join(",") : "*");
-      }
-      if(freq === "month"){ return mi + " " + hr + " " + clamp(spec.dom, 1, 31, 1) + " * *"; }
-      return mi + " " + hr + " * * *";
-    }
-    // Visibility + preview ONLY — never rebuilds the raw cron (so opening the
-    // form to edit, or flipping action/kind, can't clobber a hand-written cron
-    // that decomposeCron couldn't fully reverse). Called on form open + by the
-    // action/kind selects.
-    function routineFormVis(){
-      var action = gv("rf-action"), kind = gv("rf-kind"), freq = gv("rf-freq");
-      var isDigest = (action === "digest"), isOnce = (kind === "oneShot");
-      var isGate = (action === "gate");   // 2026-10-03: the repo's folder and branch, nothing to spawn
-      show("rf-spawn-fields", !isDigest); show("rf-spawn-fields2", !isDigest && !isGate);
-      show("rf-editor-wrap", !isGate); show("rf-branch-wrap", isGate);
-      show("rf-prompt-wrap", !isDigest && !isGate); show("rf-digest-wrap", isDigest);
-      show("rf-cron-wrap", !isOnce); show("rf-at-wrap", isOnce);
-      // cron sub-fields by freq
-      show("rf-every-wrap", freq === "minute");
-      show("rf-hm-wrap", freq !== "minute");
-      show("rf-dom-wrap", freq === "month");
-      show("rf-wd-wrap", freq === "week");
-      routinePreview();
-    }
-    // A cron PICKER changed -> rebuild the raw cron from the pickers (the raw
-    // field is the source of truth on save; pickers write into it). Called only
-    // by the cron freq/every/hour/min/dom selects + weekday buttons.
-    function routineFormSync(){
-      routineFormVis();
-      if(gv("rf-kind") !== "oneShot"){
-        sv("rf-cron-raw", cronBuildJS({ freq: gv("rf-freq"), every: gv("rf-every"), minute: gv("rf-min"),
-                                        hour: gv("rf-hour"), dom: gv("rf-dom"), weekdays: rfWeekdays }));
-        routinePreview();
-      }
-    }
-    function routinePreview(){
-      var kind = gv("rf-kind"), p = document.getElementById("r-preview");
-      if(kind === "oneShot"){
-        var ep = localToEpoch(gv("rf-at"));
-        p.textContent = ep ? ("Fires once at " + new Date(ep*1000).toLocaleString()) : "Enter a date/time (YYYY-MM-DD HH:MM)";
-      } else {
-        p.textContent = "Cron: " + (gv("rf-cron-raw") || "(empty)");
-      }
-    }
-    function localToEpoch(s){
-      s = (s || "").trim(); if(!s) return null;
-      var d = new Date(s.replace(" ", "T"));
-      var t = d.getTime(); return isNaN(t) ? null : Math.floor(t / 1000);
-    }
-    function epochToLocal(ep){
-      var d = new Date(ep * 1000);
-      return d.getFullYear() + "-" + pad2(d.getMonth()+1) + "-" + pad2(d.getDate()) +
-             " " + pad2(d.getHours()) + ":" + pad2(d.getMinutes());
-    }
-    function routineFormShow(){
-      document.getElementById("r-body").style.display = "none";
-      document.getElementById("r-form").classList.add("show");
-      buildWeekdayBtns(); routineFormVis();  // visibility only — preserves rf-cron-raw
-    }
-    function routineFormHide(){
-      document.getElementById("r-form").classList.remove("show");
-      document.getElementById("r-body").style.display = "";
-    }
-    function routineFormReset(){
-      rfWeekdays = []; sv("rf-name",""); sv("rf-action","spawn"); sv("rf-kind","cron");
-      sv("rf-freq","day"); sv("rf-every","5"); sv("rf-hour","9"); sv("rf-min","0"); sv("rf-dom","1");
-      sv("rf-cron-raw","0 9 * * *"); sv("rf-at","");
-      sv("rf-folder",""); sv("rf-editor",""); sv("rf-provider",""); sv("rf-permmode","");
-      sv("rf-prompt",""); sv("rf-digesthours","24"); sv("rf-pushtopic",""); sv("rf-branch","");
-    }
-    function routineNew(){ rfEditing = null; routineFormReset(); routineFormShow(); }
-    function routineCancel(){ routineFormHide(); }
-    function routineEdit(r){
-      rfEditing = r.name; routineFormReset();
-      sv("rf-name", r.name); sv("rf-action", r.action || "spawn"); sv("rf-kind", r.kind || "cron");
-      sv("rf-folder", r.folder || ""); sv("rf-editor", r.editor || "");
-      sv("rf-provider", r.provider || ""); sv("rf-permmode", r.permMode || "");
-      sv("rf-prompt", r.prompt || ""); if(r.digestHours) sv("rf-digesthours", r.digestHours);
-      sv("rf-pushtopic", r.pushTopic || ""); sv("rf-branch", r.branch || "");
-      // raw cron is the source of truth on save; pickers are best-effort decompose
-      if(r.kind === "cron" && r.cron){ sv("rf-cron-raw", r.cron); decomposeCron(r.cron); }
-      if(r.kind === "oneShot" && r.at) sv("rf-at", epochToLocal(r.at));
-      routineFormShow();
-    }
-    // Best-effort: set the pickers from a cron so editing common shapes feels right.
-    // Unknown shapes leave the pickers at defaults; the raw field still has the truth.
-    function decomposeCron(cron){
-      var f = (cron || "").trim().split(/\s+/); if(f.length !== 5) return;
-      var mi = f[0], hr = f[1], dom = f[2], dow = f[4];
-      var ev = mi.match(/^\*\/(\d+)$/);
-      if(ev && hr==="*" && dom==="*" && dow==="*"){ sv("rf-freq","minute"); sv("rf-every", ev[1]); return; }
-      if(hr==="*" && dom==="*" && dow==="*" && /^\d+$/.test(mi)){ sv("rf-freq","hour"); sv("rf-min", mi); return; }
-      if(/^\d+$/.test(mi) && /^\d+$/.test(hr)){
-        sv("rf-min", mi); sv("rf-hour", hr);
-        if(dom==="*" && dow!=="*"){ sv("rf-freq","week");
-          rfWeekdays = dow.split(",").map(function(x){ return parseInt(x,10); }).filter(function(x){ return !isNaN(x) && x>=0 && x<=6; }); return; }
-        if(dom!=="*" && /^\d+$/.test(dom) && dow==="*"){ sv("rf-freq","month"); sv("rf-dom", dom); return; }
-        if(dom==="*" && dow==="*"){ sv("rf-freq","day"); return; }
-      }
-    }
-    function routineSave(){
-      var name = gv("rf-name").trim();
-      if(!name){ alert("Routine needs a name."); return; }
-      var action = gv("rf-action"), kind = gv("rf-kind");
-      var rec = { name: name, kind: kind, action: action, enabled: false };
-      // Carry forward the prior record's fields the form has NO input for, so an
-      // edit (esp. a rename, which prepends a fresh record) can't silently drop
-      // them: enabled (don't re-pause), lastFiredAt (else a renamed cron re-fires
-      // the same minute), and model/templateRef/agentRef/tags. pushTopic has its
-      // own input below. We copy ONLY these known keys -- never the whole board
-      // row, which also carries human/nextRunAt annotations validateSchedule rejects.
-      var prev = rfEditing ? ROUTINES.filter(function(r){ return r.name === rfEditing; })[0] : null;
-      if(prev){
-        rec.enabled = !!prev.enabled;
-        if(prev.lastFiredAt != null) rec.lastFiredAt = prev.lastFiredAt;
-        ["model","templateRef","agentRef","tags"].forEach(function(k){ if(prev[k] != null) rec[k] = prev[k]; });
-      }
-      if(kind === "oneShot"){
-        var ep = localToEpoch(gv("rf-at"));
-        if(!ep){ alert("Enter a valid date/time (YYYY-MM-DD HH:MM)."); return; }
-        rec.at = ep;
-      } else { rec.cron = gv("rf-cron-raw").trim(); }
-      if(action === "digest"){
-        rec.digestHours = parseInt(gv("rf-digesthours"),10) || 24;
-        var pt = gv("rf-pushtopic").trim();
-        if(pt) rec.pushTopic = pt; else delete rec.pushTopic;  // a cleared field clears it
-      } else if(action === "gate"){
-        // 2026-10-03: check main is green -- the repo's folder and (optionally) its main branch
-        delete rec.pushTopic;
-        var gf = gv("rf-folder").trim();
-        if(!gf){ alert("A main-green check needs the repo's folder."); return; }
-        rec.folder = gf;
-        var br = gv("rf-branch").trim();
-        if(br) rec.branch = br;
-      } else {
-        delete rec.pushTopic;  // spawn routines don't push
-        var folder = gv("rf-folder").trim();
-        if(!folder){ alert("A spawn routine needs a folder."); return; }
-        rec.folder = folder;
-        if(gv("rf-editor")) rec.editor = gv("rf-editor");
-        if(gv("rf-provider").trim()) rec.provider = gv("rf-provider").trim();
-        if(gv("rf-permmode")) rec.permMode = gv("rf-permmode");
-        if(gv("rf-prompt").trim()) rec.prompt = gv("rf-prompt");
-      }
-      // Name collision (new routine OR rename) silently overwrites a same-name
-      // record (schedulePush is name-keyed) -- confirm before clobbering another.
-      if(ROUTINES.some(function(r){ return r.name === name && r.name !== rfEditing; })){
-        if(!confirm("A routine named “" + name + "” already exists — overwrite it?")) return;
-      }
-      // a rename: drop the old record first (push is keyed by name)
-      if(rfEditing && rfEditing !== name) send("schedule-delete", rfEditing);
-      send("schedule-save", name, JSON.stringify(rec));
-      rfEditing = null; routineFormHide();
-    }
-    function routineDelete(name){
-      if(!confirm("Delete routine “" + name + "”?")) return;
-      send("schedule-delete", name);
-    }
-    function routineToggle(name, on){ send("schedule-toggle", name, on ? "true" : "false"); }
-    function routineRunNow(name){
-      var msg = SPAWN_LIVE ? ("Run “" + name + "” now?")
-                           : ("Run “" + name + "” now?\n(spawn.live is OFF — a spawn routine will DRY-RUN.)");
-      if(!confirm(msg)) return;
-      send("schedule-run-now", name);
-    }
-
-    // ---- L3 Templates editor (📝): structured authoring + version/revert -------
-    var TPL_EDIT = [];        // editor records from ccTplEditor()
-    var teEditing = null;     // name being edited, or null for a new template
-    var teVersionsFor = null; // template whose version history is showing, or null
-    var BUILTIN_VARS = { date:1, today:1, now:1, prev_output:1 };
-
-    function openTplEditor(){ send("template-editor-list"); tplEditFormHide(); tplVersionsHide();
-      document.getElementById("tpleditor").classList.add("show"); }
-    function closeTplEditor(){ document.getElementById("tpleditor").classList.remove("show"); }
-    function ccTplEditor(list){ TPL_EDIT = list || []; renderTplEditor(); }
-    function renderTplEditor(){
-      var body = document.getElementById("te-body"); body.innerHTML = "";
-      if(!TPL_EDIT.length){
-        var e = document.createElement("div"); e.className = "te-empty";
-        e.textContent = "No templates yet. “+ New template” authors one (or import from the prompts folder via the Tpl menu).";
-        body.appendChild(e); document.getElementById("te-info").textContent = ""; return;
-      }
-      TPL_EDIT.forEach(function(t){
-        var row = document.createElement("div"); row.className = "te-row";
-        var main = document.createElement("div"); main.className = "te-main";
-        var nm = document.createElement("div"); nm.className = "te-name"; nm.textContent = t.name;
-        main.appendChild(nm);
-        var sub = document.createElement("div"); sub.className = "te-sub";
-        if(t.version > 1){ var bv = document.createElement("span"); bv.className = "te-badge"; bv.textContent = "v"+t.version; sub.appendChild(bv); }
-        if(t.vars && t.vars.length){ var bx = document.createElement("span"); bx.className = "te-badge var";
-          bx.textContent = t.vars.length + " var" + (t.vars.length===1?"":"s"); sub.appendChild(bx); }
-        var prev = document.createElement("span"); prev.textContent = (t.body || "").replace(/\s+/g," ").slice(0,90);
-        sub.appendChild(prev); main.appendChild(sub); row.appendChild(main);
-        var acts = document.createElement("div"); acts.className = "te-acts";
-        acts.appendChild(mkRBtn("Edit", function(){ tplEditOpen(t); }, ""));
-        var vlabel = (t.versionCount > 0) ? ("Versions ("+(t.versionCount+1)+")") : "Versions";
-        acts.appendChild(mkRBtn(vlabel, function(){ tplVersionsOpen(t.name); }, ""));
-        acts.appendChild(mkRBtn("Delete", function(){ tplEditDelete(t.name); }, "danger"));
-        row.appendChild(acts); body.appendChild(row);
-      });
-      document.getElementById("te-info").textContent = TPL_EDIT.length + " template" + (TPL_EDIT.length===1?"":"s");
-    }
-    // --- author form ---
-    function tplEditShow(){ document.getElementById("te-body").style.display="none";
-      tplVersionsHide(); document.getElementById("te-form").classList.add("show");
-      tplEditModeSync(); }
-    function tplEditFormHide(){ document.getElementById("te-form").classList.remove("show");
-      document.getElementById("te-body").style.display=""; }
-    function tplEditReset(){ sv("te-name",""); sv("te-mode","structured"); sv("te-desc",""); sv("te-exp",""); sv("te-text",""); }
-    function tplEditNew(){ teEditing = null; tplEditReset(); tplEditShow(); }
-    function tplEditCancel(){ tplEditFormHide(); }
-    function tplEditOpen(t){
-      teEditing = t.name; tplEditReset(); sv("te-name", t.name);
-      if((t.description || "").trim()){ sv("te-mode","structured"); sv("te-desc", t.description||""); sv("te-exp", t.expected_output||""); }
-      else { sv("te-mode","text"); sv("te-text", t.text || t.body || ""); }
-      tplEditShow();
-    }
-    function tplEditModeSync(){
-      var structured = (gv("te-mode") === "structured");
-      show("te-desc-wrap", structured); show("te-exp-wrap", structured); show("te-text-wrap", !structured);
-      tplEditVarsSync();
-    }
-    // Display-only var detection — a convenience readout. cc-core (templateVars/
-    // effectiveVars) is the authoritative parser on save; this just mirrors its
-    // {{name}} / {{name?}} grammar (built-ins excluded) for the editor.
-    function detectVars(text){
-      var seen = {}, out = [], re = /\{\{\s*([\w.\-]+)\s*(\??)\s*\}\}/g, m;
-      while((m = re.exec(text)) !== null){
-        var name = m[1]; if(BUILTIN_VARS[name]) continue;
-        if(seen[name] === undefined){ seen[name] = (m[2] === "?"); out.push(name); }
-        else if(m[2] !== "?"){ seen[name] = false; }
-      }
-      return out.map(function(n){ return seen[n] ? (n + "?") : n; });
-    }
-    function tplEditVarsSync(){
-      var body = (gv("te-mode") === "structured") ? (gv("te-desc") + "\n" + gv("te-exp")) : gv("te-text");
-      var found = detectVars(body);
-      document.getElementById("te-vars").textContent = found.length ? found.join(", ") : "none";
-    }
-    function tplEditSave(){
-      var name = gv("te-name").trim();
-      if(!name){ alert("Template needs a name."); return; }
-      var rec = { name: name };
-      if(gv("te-mode") === "structured"){
-        rec.description = gv("te-desc"); rec.expected_output = gv("te-exp"); rec.text = "";
-        if(!rec.description.trim()){ alert("Add a description (or switch to Raw text)."); return; }
-      } else {
-        rec.text = gv("te-text"); rec.description = ""; rec.expected_output = "";
-        if(!rec.text.trim()){ alert("Add the template text."); return; }
-      }
-      if(TPL_EDIT.some(function(t){ return t.name === name && t.name !== teEditing; })){
-        if(!confirm('A template named "' + name + '" already exists — overwrite it?')) return;
-      }
-      // pass oldName so the server renames (preserving version history) before the
-      // versioned save -- no client-side delete+re-add (which would drop history).
-      if(teEditing && teEditing !== name) rec.oldName = teEditing;
-      send("template-editor-save", name, JSON.stringify(rec));
-      teEditing = null; tplEditFormHide();
-    }
-    function tplEditDelete(name){
-      if(confirm('Delete template "' + name + '"? (its version history is also removed)')) send("template-editor-delete", name);
-    }
-    // --- version history / revert ---
-    function tplVersionsOpen(name){ teVersionsFor = name; send("template-versions", name);
-      document.getElementById("te-body").style.display="none";
-      document.getElementById("te-form").classList.remove("show");
-      document.getElementById("te-versions").classList.add("show"); }
-    function tplVersionsHide(){ document.getElementById("te-versions").classList.remove("show"); teVersionsFor = null; }
-    function tplVersionsBack(){ tplVersionsHide(); document.getElementById("te-body").style.display=""; }
-    function ccTplVersions(name, versions){
-      if(teVersionsFor !== name) return;  // a stale reply (user moved on)
-      document.getElementById("te-ver-info").textContent = 'Version history — “' + name + '”';
-      var box = document.getElementById("te-ver-list"); box.innerHTML = "";
-      versions = versions || [];
-      if(!versions.length){ box.innerHTML = '<div class="te-empty">No version history.</div>'; return; }
-      versions.forEach(function(v){
-        var row = document.createElement("div"); row.className = "te-ver-row" + (v.current ? " cur" : "");
-        var meta = document.createElement("div"); meta.className = "te-ver-meta";
-        meta.textContent = "v" + v.version + (v.current ? " · current" : "") + (v.ts ? (" · " + fmtNextRun(v.ts)) : "");
-        row.appendChild(meta);
-        var bodyd = document.createElement("div"); bodyd.className = "te-ver-body";
-        var hasDesc = v.description && v.description.trim();
-        bodyd.textContent = hasDesc ? (v.description + (v.expected_output ? ("\n\nExpected output:\n"+v.expected_output) : "")) : (v.text || "");
-        row.appendChild(bodyd);
-        if(!v.current){ row.appendChild(mkRBtn("Revert to this",
-          (function(ver){ return function(){ tplRevert(name, ver); }; })(v.version), "")); }
-        box.appendChild(row);
-      });
-    }
-    function tplRevert(name, version){
-      if(!confirm("Revert “" + name + "” to v" + version + "?\n(non-destructive — the current body is snapshotted first)")) return;
-      send("template-revert", name, String(version));  // reply refreshes the list
-      send("template-versions", name);                 // refresh this versions view
-    }
-
-    // ---- L1 Agents registry editor (✦): full-field authoring + attach + MCP ----
-    var AGENTS_ED = [], AE_MCP = [], AE_SKILLS = [], AE_PROVIDERS = [], AE_BUNDLES = [];
-    var aeEditing = null;        // agent name being edited, or null for new
-    var afSkills = {}, afMcp = {};  // attach selection sets (name/id -> true)
-
-    function openAgentEd(){ send("open-agents-editor"); agentEdFormHide(); mcpEdBack();
-      document.getElementById("agented").classList.add("show"); }
-    function closeAgentEd(){ document.getElementById("agented").classList.remove("show"); }
-    function ccAgentEd(b){
-      b = b || {};
-      AGENTS_ED = b.agents || []; AE_MCP = b.mcp || []; AE_SKILLS = b.skills || [];
-      AE_PROVIDERS = b.providers || []; AE_BUNDLES = b.bundles || [];
-      renderAgentEd();
-      if(document.getElementById("ae-mcp").classList.contains("show")) renderMcpList();
-    }
-    function aeSorted(){
-      var list = (AGENTS_ED||[]).slice(), key = gv("ae-sort");
-      list.sort(function(a,b){
-        if(key==="favorite"){ var fa=a.favorite?1:0, fb=b.favorite?1:0; if(fa!==fb) return fb-fa; }
-        else if(key==="lastUsed"){ var la=a.lastSpawnedAt||0, lb=b.lastSpawnedAt||0; if(la!==lb) return lb-la; }
-        var an=(a.name||"").toLowerCase(), bn=(b.name||"").toLowerCase();
-        return an < bn ? -1 : (an > bn ? 1 : 0);
-      });
-      return list;
-    }
-    function renderAgentEd(){
-      var body = document.getElementById("ae-body"); body.innerHTML = "";
-      var showArch = document.getElementById("ae-show-arch").checked;
-      var list = aeSorted().filter(function(p){ return !p.deleted && (showArch || (!p.archived && !p.hidden)); });
-      if(!list.length){ var e=document.createElement("div"); e.className="ae-empty";
-        e.textContent = "No agents yet. “+ New agent” authors one (or use “Save as agent” in the New-session modal).";
-        body.appendChild(e); document.getElementById("ae-info").textContent=""; return; }
-      list.forEach(function(p){
-        var row = document.createElement("div"); row.className = "ae-row" + (p.archived?" arch":"");
-        var star = document.createElement("button"); star.className = "ae-star" + (p.favorite?" on":"");
-        star.textContent = p.favorite ? "★" : "☆"; star.title = "favorite";
-        star.onclick = function(){ agentEdFlag(p.name, "favorite", !p.favorite); };
-        row.appendChild(star);
-        var main = document.createElement("div"); main.className = "ae-main";
-        var nm = document.createElement("div"); nm.className = "ae-name"; nm.textContent = p.name; main.appendChild(nm);
-        var sub = document.createElement("div"); sub.className = "ae-sub";
-        if(p.category){ var bc=document.createElement("span"); bc.className="ae-badge cat"; bc.textContent=p.category; sub.appendChild(bc); }
-        var counts = [];
-        if(p.skills&&p.skills.length) counts.push(p.skills.length+" skills");
-        if(p.mcpServers&&p.mcpServers.length) counts.push(p.mcpServers.length+" mcp");
-        if(p.knowledge&&p.knowledge.length) counts.push(p.knowledge.length+" kb");
-        if(counts.length){ var bk=document.createElement("span"); bk.className="ae-badge sk"; bk.textContent=counts.join(" · "); sub.appendChild(bk); }
-        if(p.archived){ var bx=document.createElement("span"); bx.className="ae-badge"; bx.textContent="archived"; sub.appendChild(bx); }
-        var rl=document.createElement("span");
-        rl.textContent=[p.role||"", p.provider?("· "+p.provider):"", p.folder?("· "+p.folder.replace(/^.*\//,"")):""].filter(Boolean).join(" ");
-        sub.appendChild(rl); main.appendChild(sub); row.appendChild(main);
-        var acts = document.createElement("div"); acts.className = "ae-acts";
-        acts.appendChild(mkRBtn("Spawn", function(){ agentEdSpawn(p); }, ""));
-        acts.appendChild(mkRBtn("Edit", function(){ agentEdOpen(p); }, ""));
-        acts.appendChild(mkRBtn("Fork", function(){ send("agent-ed-fork", p.name); }, ""));
-        acts.appendChild(mkRBtn(p.archived?"Unarchive":"Archive", function(){ agentEdFlag(p.name,"archived",!p.archived); }, ""));
-        acts.appendChild(mkRBtn("Delete", function(){ agentEdDelete(p.name); }, "danger"));
-        row.appendChild(acts); body.appendChild(row);
-      });
-      document.getElementById("ae-info").textContent = list.length + " agent" + (list.length===1?"":"s");
-    }
-    function agentEdFlag(name, flag, value){ send("agent-ed-flag", name, JSON.stringify({ flag: flag, value: value })); }
-    function agentEdDelete(name){ if(confirm('Delete agent "'+name+'"? (removes the saved profile)')) send("agent-ed-delete", name); }
-    function agentEdSpawn(p){
-      if(!p.folder || p.folder.charAt(0) !== "/"){ alert('Agent "'+p.name+'" has no saved folder — Edit it and set one first.'); return; }
-      var payload = { a:"spawn", v:"", text:"", img:"", mode:"existing", dir:p.folder,
-        editor:"", permMode:p.permMode||"", provider:p.provider||"", agent:p.name };
-      try { window.webkit.messageHandlers.cc.postMessage(JSON.stringify(payload)); } catch(e){ console.log("spawn-agent err", e); }
-      closeAgentEd();
-    }
-    // --- option lists + selects ---
-    function setSelect(id, val){
-      var el = document.getElementById(id); if(!el) return;
-      var has = false; for(var i=0;i<el.options.length;i++){ if(el.options[i].value===val){ has=true; break; } }
-      if(!has && val){ var o=document.createElement("option"); o.value=val; o.textContent=val+" (missing)"; el.appendChild(o); }
-      el.value = val;
-    }
-    function populateAeSelects(){
-      var ps = document.getElementById("af-provider"); ps.innerHTML = "";
-      var none = document.createElement("option"); none.value=""; none.textContent="(none — bare claude)"; ps.appendChild(none);
-      AE_PROVIDERS.forEach(function(pr){ var id=(pr&&pr.id)?pr.id:pr; if(!id) return;
-        var o=document.createElement("option"); o.value=id; o.textContent=id; ps.appendChild(o); });
-      var bs = document.getElementById("af-bundle"); bs.innerHTML = "";
-      var bn = document.createElement("option"); bn.value=""; bn.textContent="(none)"; bs.appendChild(bn);
-      AE_BUNDLES.forEach(function(b){ var o=document.createElement("option"); o.value=b; o.textContent=b; bs.appendChild(o); });
-    }
-    // --- attach chips (skills + MCP): render the UNION of available + selected so a
-    //     selection for a now-missing skill/server isn't silently dropped on save ---
-    function skillByName(n){ for(var i=0;i<AE_SKILLS.length;i++){ if(AE_SKILLS[i].name===n) return AE_SKILLS[i]; } return null; }
-    function renderSkillChips(){
-      var box = document.getElementById("af-skills"); box.innerHTML = "";
-      var names = AE_SKILLS.map(function(s){ return s.name; });
-      Object.keys(afSkills).forEach(function(n){ if(names.indexOf(n)<0) names.push(n); });
-      if(!names.length){ box.innerHTML = '<span class="n-dim">No skills in ~/.claude/skills</span>'; updateAttachCounts(); return; }
-      names.forEach(function(n){
-        var s = skillByName(n);
-        var c = document.createElement("button"); c.type="button";
-        c.className = "ae-chip" + (afSkills[n]?" on":"");
-        c.textContent = n + (s?"":" (missing)"); c.title = s ? (s.description||"") : "not found in ~/.claude/skills";
-        c.onclick = function(){ if(afSkills[n]) delete afSkills[n]; else afSkills[n]=true;
-          c.className = "ae-chip"+(afSkills[n]?" on":""); updateAttachCounts(); };
-        box.appendChild(c);
-      });
-      updateAttachCounts();
-    }
-    function renderMcpChips(){
-      var box = document.getElementById("af-mcp"); box.innerHTML = "";
-      var ids = AE_MCP.map(function(m){ return m.id; });
-      Object.keys(afMcp).forEach(function(n){ if(ids.indexOf(n)<0) ids.push(n); });
-      if(!ids.length){ box.innerHTML = '<span class="n-dim">No MCP servers — add some via “⚙ MCP servers”</span>'; updateAttachCounts(); return; }
-      ids.forEach(function(n){
-        var known = AE_MCP.some(function(m){ return m.id===n; });
-        var c = document.createElement("button"); c.type="button";
-        c.className = "ae-chip" + (afMcp[n]?" on":"");
-        c.textContent = n + (known?"":" (missing)");
-        c.onclick = function(){ if(afMcp[n]) delete afMcp[n]; else afMcp[n]=true;
-          c.className = "ae-chip"+(afMcp[n]?" on":""); updateAttachCounts(); };
-        box.appendChild(c);
-      });
-      updateAttachCounts();
-    }
-    function updateAttachCounts(){
-      document.getElementById("af-skills-n").textContent = Object.keys(afSkills).length ? (Object.keys(afSkills).length+" selected") : "";
-      document.getElementById("af-mcp-n").textContent = Object.keys(afMcp).length ? (Object.keys(afMcp).length+" selected") : "";
-    }
-    // --- list fields (knowledge / plugins / globs): editable input rows ---
-    function aeListAdd(kind, val){
-      var box = document.getElementById("af-"+kind); if(!box) return;
-      var row = document.createElement("div"); row.className = "ae-list-row";
-      var inp = document.createElement("input"); inp.type="text"; inp.value = val||"";
-      inp.placeholder = (kind==="knowledge") ? "/path/to/dir" : (kind==="plugins") ? "/path/to/plugin-dir" : "src/**/*.ts";
-      var x = document.createElement("button"); x.className="r-btn danger"; x.textContent="✕";
-      x.onclick = function(){ box.removeChild(row); };
-      row.appendChild(inp); row.appendChild(x); box.appendChild(row);
-    }
-    function aeListClear(kind){ var box=document.getElementById("af-"+kind); if(box) box.innerHTML=""; }
-    function aeListRead(kind){
-      var box=document.getElementById("af-"+kind), out=[];
-      if(box) box.querySelectorAll("input").forEach(function(inp){ var v=inp.value.trim(); if(v) out.push(v); });
-      return out;
-    }
-    // --- agent form ---
-    function agentEdShow(){
-      document.getElementById("ae-body").style.display="none";
-      document.getElementById("ae-mcp").classList.remove("show");
-      populateAeSelects();
-      document.getElementById("ae-form").classList.add("show");
-    }
-    function agentEdFormHide(){ document.getElementById("ae-form").classList.remove("show"); document.getElementById("ae-body").style.display=""; }
-    function agentEdReset(){
-      ["af-name","af-category","af-folder","af-model","af-role","af-goal","af-backstory","af-seed"].forEach(function(id){ sv(id,""); });
-      setSelect("af-provider",""); setSelect("af-permmode",""); setSelect("af-bundle","");
-      afSkills={}; afMcp={}; aeListClear("knowledge"); aeListClear("plugins"); aeListClear("globs");
-    }
-    function agentEdNew(){ aeEditing=null; agentEdShow(); agentEdReset(); renderSkillChips(); renderMcpChips(); }
-    function agentEdCancel(){ agentEdFormHide(); }
-    function agentEdOpen(p){
-      aeEditing = p.name; agentEdShow(); agentEdReset();
-      sv("af-name",p.name); sv("af-category",p.category||""); sv("af-folder",p.folder||""); sv("af-model",p.model||"");
-      setSelect("af-provider",p.provider||""); setSelect("af-permmode",p.permMode||""); setSelect("af-bundle",p.policyBundle||"");
-      sv("af-role",p.role||""); sv("af-goal",p.goal||""); sv("af-backstory",p.backstory||""); sv("af-seed",p.seedPrompt||"");
-      (p.skills||[]).forEach(function(s){ afSkills[s]=true; });
-      (p.mcpServers||[]).forEach(function(m){ afMcp[m]=true; });
-      (p.knowledge||[]).forEach(function(k){ aeListAdd("knowledge",k); });
-      (p.plugins||[]).forEach(function(k){ aeListAdd("plugins",k); });
-      (p.folderGlobs||[]).forEach(function(k){ aeListAdd("globs",k); });
-      renderSkillChips(); renderMcpChips();
-    }
-    function agentEdSave(){
-      var name = gv("af-name").trim();
-      if(!name){ alert("Agent needs a name."); return; }
-      var folder = gv("af-folder").trim();
-      if(folder && folder.charAt(0) !== "/"){ alert("Folder must be an absolute path (or blank)."); return; }
-      var rec = { name: name };
-      if(gv("af-category").trim()) rec.category = gv("af-category").trim();
-      if(folder) rec.folder = folder;
-      if(gv("af-provider")) rec.provider = gv("af-provider");
-      if(gv("af-model").trim()) rec.model = gv("af-model").trim();
-      if(gv("af-permmode")) rec.permMode = gv("af-permmode");
-      if(gv("af-role").trim()) rec.role = gv("af-role").trim();
-      if(gv("af-goal").trim()) rec.goal = gv("af-goal").trim();
-      if(gv("af-backstory").trim()) rec.backstory = gv("af-backstory");
-      if(gv("af-seed").trim()) rec.seedPrompt = gv("af-seed");
-      var sk = Object.keys(afSkills); if(sk.length) rec.skills = sk;
-      var mc = Object.keys(afMcp); if(mc.length) rec.mcpServers = mc;
-      var kn = aeListRead("knowledge"); if(kn.length) rec.knowledge = kn;
-      var pl = aeListRead("plugins"); if(pl.length) rec.plugins = pl;
-      var gl = aeListRead("globs"); if(gl.length) rec.folderGlobs = gl;
-      if(gv("af-bundle")) rec.policyBundle = gv("af-bundle");
-      if(AGENTS_ED.some(function(p){ return p.name === name && p.name !== aeEditing; })){
-        if(!confirm('An agent named "'+name+'" already exists — overwrite it?')) return;
-      }
-      if(aeEditing && aeEditing !== name) rec.oldName = aeEditing;  // server renames + carries hidden fields
-      send("agent-ed-save", "", JSON.stringify(rec));
-      aeEditing = null; agentEdFormHide();
-    }
-    // --- MCP registry surface ---
-    function mcpEdOpen(){ document.getElementById("ae-body").style.display="none";
-      document.getElementById("ae-form").classList.remove("show");
-      document.getElementById("ae-mcp").classList.add("show"); mcpEdReset(); renderMcpList(); }
-    function mcpEdBack(){ document.getElementById("ae-mcp").classList.remove("show"); document.getElementById("ae-body").style.display=""; }
-    function renderMcpList(){
-      var box = document.getElementById("ae-mcp-list"); box.innerHTML = "";
-      if(!AE_MCP.length){ box.innerHTML = '<span class="n-dim">No MCP servers yet.</span>'; return; }
-      AE_MCP.forEach(function(m){
-        var row = document.createElement("div"); row.className = "ae-list-row";
-        var info = document.createElement("span"); info.style.flex="1";
-        info.textContent = m.id + " · " + m.transport + " · " + (m.command || m.url || "");
-        row.appendChild(info);
-        row.appendChild(mkRBtn("Edit", function(){ mcpEdEdit(m); }, ""));
-        row.appendChild(mkRBtn("Delete", function(){ if(confirm('Delete MCP server "'+m.id+'"?')) send("mcp-ed-delete", m.id); }, "danger"));
-        box.appendChild(row);
-      });
-    }
-    function mcpFormSync(){ var t = gv("mf-transport");
-      show("mf-cmd-wrap", t==="stdio"); show("mf-args-wrap", t==="stdio"); show("mf-url-wrap", t!=="stdio"); }
-    function mcpEdReset(){ sv("mf-id",""); sv("mf-label",""); sv("mf-transport","stdio"); sv("mf-command","");
-      sv("mf-args",""); sv("mf-url",""); sv("mf-tools",""); sv("mf-tokenenv",""); mcpFormSync(); }
-    function mcpEdEdit(m){ sv("mf-id",m.id); sv("mf-label",m.label||""); sv("mf-transport",m.transport||"stdio");
-      sv("mf-command",m.command||""); sv("mf-args",(m.args||[]).join(" ")); sv("mf-url",m.url||"");
-      sv("mf-tools",(m.allowedTools||[]).join(" ")); sv("mf-tokenenv",m.authTokenEnv||""); mcpFormSync(); }
-    function mcpEdSave(){
-      var id = gv("mf-id").trim(); if(!id){ alert("MCP server needs an id."); return; }
-      var rec = { id:id, transport:gv("mf-transport") };
-      if(gv("mf-label").trim()) rec.label = gv("mf-label").trim();
-      if(gv("mf-command").trim()) rec.command = gv("mf-command").trim();
-      var args = gv("mf-args").trim(); if(args) rec.args = args.split(/\s+/);
-      if(gv("mf-url").trim()) rec.url = gv("mf-url").trim();
-      var tools = gv("mf-tools").trim(); if(tools) rec.allowedTools = tools.split(/\s+/);
-      if(gv("mf-tokenenv").trim()) rec.authTokenEnv = gv("mf-tokenenv").trim();
-      // Pre-validate the transport requirement (mirrors core.validateMcp) BEFORE
-      // the optimistic mcpEdReset() below -- else a server-side reject would wipe
-      // the form and lose the typed id/label/token (the agent form pre-checks too).
-      if(rec.transport === "stdio" && !rec.command){ alert("stdio transport needs a command."); return; }
-      if(rec.transport !== "stdio" && !rec.url){ alert(rec.transport + " transport needs a url."); return; }
-      send("mcp-ed-save", "", JSON.stringify(rec));
-      mcpEdReset();
-    }
-
-    // ---- L2 policy bundle / attachment editor (🛡) ----------------------------
-    var PE_BUNDLES = {}, PE_ATTS = [], PE_STARTERS = {}, PE_ARMED = false;
-    var peBundleEditing = null;   // bundle name being edited, or null for new
-    var peAttEditing = null;      // 0-based attachment index being edited, or null
-
-    function openPolicyEd(){ send("open-policy-editor"); peBundleHide(); peAttHide();
-      document.getElementById("policyed").classList.add("show"); }
-    function closePolicyEd(){ document.getElementById("policyed").classList.remove("show"); }
-    function ccPolicyEd(o){
-      o = o || {};
-      PE_BUNDLES = o.bundles && !Array.isArray(o.bundles) ? o.bundles : {};
-      PE_ATTS = Array.isArray(o.attachments) ? o.attachments : [];
-      PE_STARTERS = o.starters && !Array.isArray(o.starters) ? o.starters : {};
-      PE_ARMED = !!o.armed;
-      renderPolicyEd();
-    }
-    function bundleNames(){ return Object.keys(PE_BUNDLES).sort(); }
-    function renderPolicyEd(){
-      var warn = document.getElementById("pe-warn");
-      if(!PE_ARMED){ warn.textContent = "Headless approvals are NOT armed — bundles are only ENFORCED while the gate is armed (⚙ Settings). They still resolve + show here."; warn.classList.add("show"); }
-      else warn.classList.remove("show");
-      // bundles
-      var bb = document.getElementById("pe-bundles"); bb.innerHTML = "";
-      var names = bundleNames();
-      if(!names.length){ var e=document.createElement("div"); e.className="pe-empty"; e.textContent="No bundles yet. “+ New bundle”, or copy a starter above."; bb.appendChild(e); }
-      names.forEach(function(name){
-        var b = PE_BUNDLES[name] || {};
-        var row = document.createElement("div"); row.className = "pe-row";
-        var main = document.createElement("div"); main.className = "pe-main";
-        var nm = document.createElement("div"); nm.className = "pe-name"; nm.textContent = name; main.appendChild(nm);
-        var sub = document.createElement("div"); sub.className = "pe-sub";
-        if(b.autoDeny && b.autoDeny.length){ var bd=document.createElement("span"); bd.className="pe-badge deny"; bd.textContent="deny "+b.autoDeny.length; sub.appendChild(bd); }
-        if(b.autoAllow && b.autoAllow.length){ var ba=document.createElement("span"); ba.className="pe-badge allow"; ba.textContent="allow "+b.autoAllow.length; sub.appendChild(ba); }
-        if(b.gateTools){ var bg=document.createElement("span"); bg.className="pe-badge"; bg.textContent="gate: "+b.gateTools+" (advisory)"; sub.appendChild(bg); }
-        if(b.autopilot){ var bp=document.createElement("span"); bp.className="pe-badge"; bp.textContent="autopilot"; sub.appendChild(bp); }
-        if(b.disableGlobal){ var bx=document.createElement("span"); bx.className="pe-badge"; bx.textContent="disableGlobal"; sub.appendChild(bx); }
-        if(b.lockedPermMode){ var bl=document.createElement("span"); bl.className="pe-badge"; bl.textContent="lock:"+b.lockedPermMode+" (advisory)"; sub.appendChild(bl); }
-        if(b.toolLimits){ var lk=Object.keys(b.toolLimits); if(lk.length){ var bt=document.createElement("span"); bt.className="pe-badge"; bt.textContent="limits "+lk.length+" (advisory)"; sub.appendChild(bt); } }
-        var det=document.createElement("span"); det.textContent = " " + ((b.autoDeny||[]).concat(b.autoAllow||[]).slice(0,4).join(", "));
-        sub.appendChild(det);
-        main.appendChild(sub); row.appendChild(main);
-        var acts = document.createElement("div"); acts.className = "pe-acts";
-        acts.appendChild(mkRBtn("Edit", function(){ peBundleOpen(name); }, ""));
-        acts.appendChild(mkRBtn("Delete", function(){ peBundleDelete(name); }, "danger"));
-        row.appendChild(acts); bb.appendChild(row);
-      });
-      // attachments (ordered)
-      var ab = document.getElementById("pe-atts"); ab.innerHTML = "";
-      if(!PE_ATTS.length){ var e2=document.createElement("div"); e2.className="pe-empty"; e2.textContent="No attachments. Without one, a session uses the fleet policy unless you attach a bundle from its detail panel."; ab.appendChild(e2); }
-      PE_ATTS.forEach(function(at, i){
-        var row = document.createElement("div"); row.className = "pe-row";
-        var main = document.createElement("div"); main.className = "pe-main";
-        var nm = document.createElement("div"); nm.className = "pe-name"; nm.textContent = (i+1) + ". → " + (at.bundle||"(none)"); main.appendChild(nm);
-        var sub = document.createElement("div"); sub.className = "pe-sub";
-        var m = at.match || {}; var parts = [];
-        ["project","group","providerId","key"].forEach(function(k){ if(m[k]) parts.push(k+"="+m[k]); });
-        sub.textContent = parts.length ? parts.join("  ") : "matches ANY session";
-        main.appendChild(sub); row.appendChild(main);
-        var acts = document.createElement("div"); acts.className = "pe-acts";
-        acts.appendChild(mkRBtn("▲", function(){ peAttMove(i,-1); }, ""));
-        acts.appendChild(mkRBtn("▼", function(){ peAttMove(i, 1); }, ""));
-        acts.appendChild(mkRBtn("Edit", function(){ peAttOpen(i); }, ""));
-        acts.appendChild(mkRBtn("Delete", function(){ if(confirm("Delete attachment #"+(i+1)+"?")) send("policy-att-delete", String(i+1)); }, "danger"));
-        row.appendChild(acts); ab.appendChild(row);
-      });
-      document.getElementById("pe-info").textContent = names.length + " bundle" + (names.length===1?"":"s") + " · " + PE_ATTS.length + " attachment" + (PE_ATTS.length===1?"":"s");
-    }
-    // --- bundle form ---
-    function peBundleShow(){ document.getElementById("pe-bform").classList.add("show"); }
-    function peBundleHide(){ document.getElementById("pe-bform").classList.remove("show"); }
-    function peBundleReset(){ sv("bf-name",""); sv("bf-deny",""); sv("bf-allow",""); sv("bf-gate","");
-      sv("bf-lockmode",""); sv("bf-limits",""); document.getElementById("bf-autopilot").checked=false; document.getElementById("bf-disable").checked=false; }
-    function peBundleNew(){ peBundleEditing=null; peBundleReset(); peAttHide(); peBundleShow(); }
-    function peBundleCancel(){ peBundleHide(); }
-    function peBundleOpen(name){
-      peBundleEditing=name; peBundleReset(); peAttHide();
-      var b = PE_BUNDLES[name] || {};
-      sv("bf-name",name); sv("bf-deny",(b.autoDeny||[]).join("\n")); sv("bf-allow",(b.autoAllow||[]).join("\n"));
-      sv("bf-gate", b.gateTools||""); setSelect("bf-lockmode", b.lockedPermMode||"");
-      sv("bf-limits", b.toolLimits ? Object.keys(b.toolLimits).map(function(k){ return k+"="+b.toolLimits[k]; }).join(" ") : "");
-      document.getElementById("bf-autopilot").checked = !!b.autopilot;
-      document.getElementById("bf-disable").checked = !!b.disableGlobal;
-      peBundleShow();
-    }
-    function peStarter(name){
-      var s = PE_STARTERS[name]; if(!s){ alert("starter not available"); return; }
-      peBundleEditing=null; peBundleReset();
-      sv("bf-name", name); sv("bf-deny",(s.autoDeny||[]).join("\n")); sv("bf-allow",(s.autoAllow||[]).join("\n"));
-      peAttHide(); peBundleShow();
-    }
-    function parseLimits(str){
-      var m = {}; (str||"").trim().split(/\s+/).forEach(function(t){ if(!t) return;
-        var kv = t.split("="); if(kv.length===2 && kv[0].trim() && kv[1].trim() && !isNaN(Number(kv[1]))) m[kv[0].trim()] = Number(kv[1]); });
-      return m;
-    }
-    function splitLines(str){ return (str||"").split("\n").map(function(s){ return s.trim(); }).filter(Boolean); }
-    function peBundleSave(){
-      var name = gv("bf-name").trim(); if(!name){ alert("Bundle needs a name."); return; }
-      if(Object.keys(PE_BUNDLES).some(function(n){ return n===name && n!==peBundleEditing; })){
-        if(!confirm('A bundle named "'+name+'" already exists — overwrite it?')) return;
-      }
-      var rec = { name: name,
-        autoDeny: splitLines(gv("bf-deny")), autoAllow: splitLines(gv("bf-allow")),
-        gateTools: gv("bf-gate").trim(), lockedPermMode: gv("bf-lockmode"),
-        toolLimits: parseLimits(gv("bf-limits")),
-        autopilot: document.getElementById("bf-autopilot").checked,
-        disableGlobal: document.getElementById("bf-disable").checked };
-      if(peBundleEditing && peBundleEditing !== name) rec.oldName = peBundleEditing;
-      send("policy-bundle-save", "", JSON.stringify(rec));
-      peBundleEditing=null; peBundleHide();
-    }
-    function peBundleDelete(name){
-      var used = PE_ATTS.filter(function(a){ return a.bundle===name; }).length;
-      var msg = 'Delete bundle "'+name+'"?' + (used ? ("\n"+used+" attachment(s) reference it and will then point at a missing bundle.") : "");
-      if(confirm(msg)) send("policy-bundle-delete", name);
-    }
-    // --- attachment form ---
-    function peAttShow(){ populateAttBundleSelect(); document.getElementById("pe-aform").classList.add("show"); }
-    function peAttHide(){ document.getElementById("pe-aform").classList.remove("show"); }
-    function populateAttBundleSelect(){
-      var sel = document.getElementById("af2-bundle"); sel.innerHTML = "";
-      var names = bundleNames();
-      if(!names.length){ var o=document.createElement("option"); o.value=""; o.textContent="(no bundles — create one first)"; sel.appendChild(o); return; }
-      names.forEach(function(n){ var o=document.createElement("option"); o.value=n; o.textContent=n; sel.appendChild(o); });
-    }
-    function peAttReset(){ sv("af2-project",""); sv("af2-group",""); sv("af2-provider",""); sv("af2-key",""); }
-    function peAttNew(){ peAttEditing=null; peAttReset(); peBundleHide(); peAttShow(); }
-    function peAttCancel(){ peAttHide(); }
-    function peAttOpen(i){
-      peAttEditing=i; peAttReset(); peBundleHide();
-      var at = PE_ATTS[i] || {}; var m = at.match || {};
-      sv("af2-project", m.project||""); sv("af2-group", m.group||""); sv("af2-provider", m.providerId||""); sv("af2-key", m.key||"");
-      peAttShow(); setSelect("af2-bundle", at.bundle||"");
-    }
-    function peAttSave(){
-      var bundle = gv("af2-bundle").trim();
-      if(!bundle){ alert("Pick a bundle (create one first if the list is empty)."); return; }
-      var rec = { bundle: bundle, match: {
-        project: gv("af2-project").trim(), group: gv("af2-group").trim(),
-        providerId: gv("af2-provider").trim(), key: gv("af2-key").trim() } };
-      if(peAttEditing != null){ rec.index = peAttEditing + 1; send("policy-att-save", "", JSON.stringify(rec)); }
-      else send("policy-att-add", "", JSON.stringify(rec));
-      peAttEditing=null; peAttHide();
-    }
-    function peAttMove(i, dir){ send("policy-att-move", "", JSON.stringify({ index: i+1, dir: dir })); }
-
-    // ---- L6 automation rules editor (⚙️) -------------------------------------
-    var RULES_ED = [], RULES_ON = false, rleEditing = null;
-    function openRuleEd(){ send("open-rules-editor"); ruleEdHide();
-      document.getElementById("ruleed").classList.add("show"); }
-    function closeRuleEd(){ document.getElementById("ruleed").classList.remove("show"); }
-    function ccRuleEd(list, on){ RULES_ED = list || []; RULES_ON = !!on; renderRuleEd(); }
-    function renderRuleEd(){
-      var warn = document.getElementById("re-warn");
-      if(!RULES_ON){ warn.textContent = "The rule engine is OFF (rules.enabled in cc-config.json) — rules won't fire until you turn it on. They're listed/editable here regardless."; warn.classList.add("show"); }
-      else warn.classList.remove("show");
-      var body = document.getElementById("re-body"); body.innerHTML = "";
-      if(!RULES_ED.length){ var e=document.createElement("div"); e.className="re-empty";
-        e.textContent = "No rules yet. “+ New rule” reacts to a session edge (done/error/hung/loop/…) with a safe action (log/relabel/nudge/feed/continue).";
-        body.appendChild(e); document.getElementById("re-info").textContent=""; return; }
-      RULES_ED.forEach(function(r){
-        var tr = r.trigger||{}, pr = r.processor||{};
-        var row = document.createElement("div"); row.className = "re-row";
-        var dot = document.createElement("div"); dot.className = "re-dot" + (r.enabled?" on":""); dot.title = r.enabled?"enabled":"disabled";
-        dot.style.cursor="pointer"; dot.onclick = function(){ send("rule-ed-toggle", r.name, r.enabled?"false":"true"); };
-        row.appendChild(dot);
-        var main = document.createElement("div"); main.className = "re-main";
-        var nm = document.createElement("div"); nm.className = "re-name"; nm.textContent = r.name; main.appendChild(nm);
-        var sub = document.createElement("div"); sub.className = "re-sub";
-        var bt=document.createElement("span"); bt.className="re-badge trig"; bt.textContent="on "+(tr.kind||"?"); sub.appendChild(bt);
-        var bp=document.createElement("span"); bp.className="re-badge proc"; bp.textContent="do "+(pr.kind||"?"); sub.appendChild(bp);
-        if(r.once){ var bo=document.createElement("span"); bo.className="re-badge"; bo.textContent="once"; sub.appendChild(bo); }
-        var det = document.createElement("span");
-        var m = tr.match||{}; var parts=[];
-        ["project","group","sessionKey","provider"].forEach(function(k){ if(m[k]) parts.push(k+"="+m[k]); });
-        det.textContent = (pr.text? ('“'+String(pr.text).slice(0,40)+'” ') : (pr.label? ('→ '+pr.label+' ') : "")) + (parts.length? ("· "+parts.join(" ")) : "· any session");
-        sub.appendChild(det); main.appendChild(sub); row.appendChild(main);
-        var acts = document.createElement("div"); acts.className = "re-acts";
-        acts.appendChild(mkRBtn("Edit", function(){ ruleEdOpen(r); }, ""));
-        acts.appendChild(mkRBtn(r.enabled?"Disable":"Enable", function(){ send("rule-ed-toggle", r.name, r.enabled?"false":"true"); }, ""));
-        acts.appendChild(mkRBtn("Delete", function(){ if(confirm('Delete rule "'+r.name+'"?')) send("rule-ed-delete", r.name); }, "danger"));
-        row.appendChild(acts); body.appendChild(row);
-      });
-      document.getElementById("re-info").textContent = RULES_ED.length + " rule" + (RULES_ED.length===1?"":"s");
-    }
-    function ruleEdProcSync(){
-      var k = gv("rlf-proc");
-      show("rlf-text-wrap", k==="log" || k==="nudge" || k==="feed");
-      show("rlf-label-wrap", k==="relabel");
-    }
-    function ruleEdShow(){ document.getElementById("re-body").style.display="none";
-      document.getElementById("re-form").classList.add("show"); ruleEdProcSync(); }
-    function ruleEdHide(){ document.getElementById("re-form").classList.remove("show");
-      document.getElementById("re-body").style.display=""; }
-    function ruleEdReset(){
-      sv("rlf-name",""); sv("rlf-trigger","done"); sv("rlf-proc","log");
-      sv("rlf-m-project",""); sv("rlf-m-group",""); sv("rlf-m-key",""); sv("rlf-m-provider","");
-      sv("rlf-text",""); sv("rlf-label","");
-      document.getElementById("rlf-once").checked = true; document.getElementById("rlf-enabled").checked = true;
-    }
-    function ruleEdNew(){ rleEditing=null; ruleEdReset(); ruleEdShow(); }
-    function ruleEdCancel(){ ruleEdHide(); }
-    function ruleEdOpen(r){
-      rleEditing = r.name; ruleEdReset();
-      var tr=r.trigger||{}, pr=r.processor||{}, m=tr.match||{};
-      sv("rlf-name", r.name); setSelect("rlf-trigger", tr.kind||"done"); setSelect("rlf-proc", pr.kind||"log");
-      sv("rlf-m-project", m.project||""); sv("rlf-m-group", m.group||""); sv("rlf-m-key", m.sessionKey||""); sv("rlf-m-provider", m.provider||"");
-      sv("rlf-text", pr.text||""); sv("rlf-label", pr.label||"");
-      document.getElementById("rlf-once").checked = !!r.once;
-      document.getElementById("rlf-enabled").checked = r.enabled !== false;
-      ruleEdShow();
-    }
-    function ruleEdSave(){
-      var name = gv("rlf-name").trim(); if(!name){ alert("Rule needs a name."); return; }
-      var proc = gv("rlf-proc"), text = gv("rlf-text"), label = gv("rlf-label").trim();
-      // pre-validate (mirror core.validateRule) so a reject doesn't strand the form
-      if((proc==="nudge" || proc==="feed") && !text.trim()){ alert(proc+" needs text."); return; }
-      if(proc==="relabel" && !label){ alert("relabel needs a new label."); return; }
-      var match = {};
-      var mp=gv("rlf-m-project").trim(), mg=gv("rlf-m-group").trim(), mk=gv("rlf-m-key").trim(), mv=gv("rlf-m-provider").trim();
-      if(mp) match.project=mp; if(mg) match.group=mg; if(mk) match.sessionKey=mk; if(mv) match.provider=mv;
-      var trigger = { kind: gv("rlf-trigger") };
-      if(Object.keys(match).length) trigger.match = match;
-      var processor = { kind: proc };
-      if(proc==="relabel") processor.label = label; else if(proc!=="continue") processor.text = text;
-      var rec = { name: name, enabled: document.getElementById("rlf-enabled").checked,
-        once: document.getElementById("rlf-once").checked, trigger: trigger, processor: processor };
-      if(RULES_ED.some(function(x){ return x.name===name && x.name!==rleEditing; })){
-        if(!confirm('A rule named "'+name+'" already exists — overwrite it?')) return;
-      }
-      if(rleEditing && rleEditing !== name) rec.oldName = rleEditing;
-      send("rule-ed-save", "", JSON.stringify(rec));
-      rleEditing=null; ruleEdHide();
-    }
     function fmtDur(s){
       s = Math.max(0, Math.round(s||0));
       if(s < 60) return s+"s";
@@ -23945,12 +20835,7 @@ local HTML = [[
       else if(which === "fsearch") openFleetSearch();
       else if(which === "insights") openInsights();
       else if(which === "audit") openAudit();
-      else if(which === "routines") openRoutines();
-      else if(which === "templates") openTplEditor();
-      else if(which === "agents") openAgentEd();
       else if(which === "mcpskills") openMcpSkills();
-      else if(which === "policies") openPolicyEd();
-      else if(which === "rules") openRuleEd();
       else if(which === "trace") openTrace("");
       else if(which === "cost") openCost();
       else if(which === "doctor") openDoctor();
@@ -24012,50 +20897,6 @@ local HTML = [[
       var ov = document.getElementById("mcpskills");
       if(ov && ov.classList.contains("show")) closeMcpSkills();
     });
-    // Esc in the routine board: close the form first, then the overlay.
-    document.addEventListener("keydown", function(e){
-      if(e.key !== "Escape") return;
-      var ov = document.getElementById("routines");
-      if(!ov || !ov.classList.contains("show")) return;
-      if(document.getElementById("r-form").classList.contains("show")){ routineFormHide(); }
-      else { closeRoutines(); }
-    });
-    // Esc in the templates editor: close the form/versions view first, then the overlay.
-    document.addEventListener("keydown", function(e){
-      if(e.key !== "Escape") return;
-      var ov = document.getElementById("tpleditor");
-      if(!ov || !ov.classList.contains("show")) return;
-      if(document.getElementById("te-form").classList.contains("show")){ tplEditFormHide(); }
-      else if(document.getElementById("te-versions").classList.contains("show")){ tplVersionsBack(); }
-      else { closeTplEditor(); }
-    });
-    // Esc in the agents editor: close the form/MCP surface first, then the overlay.
-    document.addEventListener("keydown", function(e){
-      if(e.key !== "Escape") return;
-      var ov = document.getElementById("agented");
-      if(!ov || !ov.classList.contains("show")) return;
-      if(document.getElementById("ae-form").classList.contains("show")){ agentEdFormHide(); }
-      else if(document.getElementById("ae-mcp").classList.contains("show")){ mcpEdBack(); }
-      else { closeAgentEd(); }
-    });
-    // Esc in the policy editor: close an open form first, then the overlay.
-    document.addEventListener("keydown", function(e){
-      if(e.key !== "Escape") return;
-      var ov = document.getElementById("policyed");
-      if(!ov || !ov.classList.contains("show")) return;
-      if(document.getElementById("pe-bform").classList.contains("show")){ peBundleHide(); }
-      else if(document.getElementById("pe-aform").classList.contains("show")){ peAttHide(); }
-      else { closePolicyEd(); }
-    });
-    // Esc in the rules editor: close the form first, then the overlay.
-    document.addEventListener("keydown", function(e){
-      if(e.key !== "Escape") return;
-      var ov = document.getElementById("ruleed");
-      if(!ov || !ov.classList.contains("show")) return;
-      if(document.getElementById("re-form").classList.contains("show")){ ruleEdHide(); }
-      else { closeRuleEd(); }
-    });
-
     // ---- Toasts (2026-09-11): Shepherd's messages, inside its own panel --------
     // FX.alert calls this instead of hs.alert's centre-screen overlay, which covered every
     // window. Up to 3 stacked at the bottom; each fades after a few seconds; click to dismiss.
@@ -24752,13 +21593,11 @@ local HTML = [[
     document.addEventListener("visibilitychange", clampStrayScroll);
 
     var PANEL_PROVIDERS = [];
-    var PANEL_BUNDLES = [];   // L2 policy-bundle names (detail-panel Policy dropdown)
     var lastSelectedStatus = null;
     var lastSelectedHasStories = null;   // tracks the selected tile's user-stories-file presence (gated tab)
-    window.ccUpdate = function(items, providers, bundles){
+    window.ccUpdate = function(items, providers){
       lastItems = items || [];
       if(providers !== undefined) PANEL_PROVIDERS = providers || [];
-      if(bundles !== undefined) PANEL_BUNDLES = bundles || [];
       renderGrid();
       renderDetail();
       clampStrayScroll();
@@ -24828,7 +21667,6 @@ local HTML = [[
       if(headsUp(it) && it.needsYouWhy){ meta = (meta ? meta + " · " : "") + it.needsYouWhy; }
       if(it.remote){ meta = (meta ? meta + " · " : "") + "⇄ " + (it.remote.host || "remote")
                             + (it.bridgeStale ? " (bridge offline)" : ""); }
-      if(it.autopilot){ meta = (meta ? meta + " · " : "") + "🛫 autopilot"; }
       if(it.draining){ meta = (meta ? meta + " · " : "") + "⛔ draining"; }
       if(it.collide){ meta = (meta ? meta + " · " : "") + "⚠ shared dir"; }
       // 2026-09-29: the overlap radar (FX.annotateRadar) -- another worktree of this repo touches the
@@ -25744,85 +22582,6 @@ function ledgerSnapshot(consume)  -- assigns the forward-declared local (same as
   return ledgerCache.events, true
 end
 
--- L6: run the OPT-IN event-callback rules for an edge on a tile. Sequential -- every
--- matching rule (cc-core orders them) runs; a `once` rule fires at most once per
--- (rule, tile) via ruleFired. Processors map onto existing SAFE effects: log -> a
--- ledger note, relabel -> setLabel, nudge -> the delivery-gated nudge path. Each fire
--- ledgers a by:"rule" event. ruleSet is loaded once per refresh (off unless rules.enabled).
-local function runRules(ruleSet, it, edgeKind)
-  if not ruleSet or #ruleSet == 0 then return end
-  for _, r in ipairs(core.rulesForEdge(ruleSet, edgeKind, it)) do
-    local mark = r.name .. "\1" .. tostring(it.key)
-    if not (r.once and ruleFired[mark]) then
-      if r.once then ruleFired[mark] = true end
-      local p = r.processor or {}
-      -- 2026-09-29: a log or relabel acts here, through FX.automationAct (a dry run records
-      -- would_rule and changes nothing); a nudge or continue goes through FX.typeWhenReady's door.
-      -- (2026-11-19: the feed processor, which queued a task, went with the task queue.)
-      local ruleSays = tostring(r.name) .. " on " .. tostring(edgeKind) .. ": " .. tostring(p.kind)
-      if p.kind == "log" or (p.kind == "relabel" and p.label and p.label ~= "") then
-        FX.automationAct("rule", it, { summary = ruleSays .. ((p.kind == "relabel") and (" -> " .. tostring(p.label))
-          or ""), by = "rule" }, function()
-          if p.kind == "log" then
-            ledgerFor(it, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
-                            processor = "log", note = p.text })
-          else
-            local lkey = it.projectKey or it.cwd
-            if lkey then
-              labels = core.setLabel(labels, lkey, p.label, it.name); FX.saveLabels(labels); it.label = p.label
-            end
-            ledgerFor(it, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
-                            processor = "relabel", to = p.label })
-            if not lkey then return false, "no project to label" end
-          end
-        end)
-      elseif p.kind == "nudge" and p.text and p.text ~= "" then
-        -- R2-08: never nudge a session sitting at its approval prompt. handleAction's
-        -- nudge PASTES text AND submits, so broadcasting into a y/n approval prompt
-        -- answers/corrupts the pending decision. This mirrors core.BULK_RULES.nudge,
-        -- which deliberately excludes status 'approval' for exactly this reason. A
-        -- 'feed' processor is the safe choice for an approval-edge rule.
-        if it.status == "approval" then
-          ledgerFor(it, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
-                          processor = "nudge_skipped", reason = "approval",
-                          text = tostring(p.text):sub(1, 200) })
-        else
-        local target = it
-        -- 2026-09-28: typed only once the session can take it (FX.typeWhenReady): a nudge
-        -- rule on a working edge (hung/loop) is refused -- ledgered once -- not typed mid-turn.
-        FX.typeWhenReady(target, "rule-nudge", function()
-          -- The tick-time R2-08 check above can be seconds stale by the time this
-          -- slot fires (shared injection tail): re-check the LIVE status so a
-          -- delayed rule nudge can't answer an approval prompt that appeared
-          -- meanwhile (FX.nudgeSafeNow).
-          if not FX.nudgeSafeNow(target) then
-            ledgerFor(target, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
-                                processor = "nudge_skipped", reason = "approval",
-                                text = tostring(p.text):sub(1, 200) })
-            return false, "approval"
-          end
-          local acted = core.handleAction(FX, target, "nudge", core.shepherdSays(p.text))
-          ledgerFor(target, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
-                              processor = (acted == "nudge") and "nudge" or "nudge_skipped",
-                              text = tostring(p.text):sub(1, 200) })
-          if acted ~= "nudge" then return false, "not delivered" end
-        end, { summary = ruleSays .. " '" .. tostring(p.text):sub(1, 120) .. "'",
-               onRefused = function(why)
-          ledgerFor(target, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
-                              processor = "nudge_skipped", reason = why,
-                              text = tostring(p.text):sub(1, 200) })
-        end })
-        end
-      elseif p.kind == "continue" then
-        -- Resume an errored/stuck session by typing "continue" (delivery-gated,
-        -- same path as the manual Continue button + Auto-Continue). 2026-09-28: held, not typed
-        -- on the edge -- the tick's auto-continue step types it once the back-off allows.
-        core.queueRuleContinue(autoContinueState, it, r.name, edgeKind, FX.now())
-      end
-    end
-  end
-end
-
 -- Push current statuses into the webview + deck; run stale-approval escalation;
 -- keep the heartbeat fresh.
 -- R3-24: refresh() is a thin re-entrancy guard around refreshBody(). A dispatchSerialized
@@ -25846,7 +22605,6 @@ function FX._refreshBody()
   -- Cohort tag (.group): feeds the filter chips, group-scoped bulk actions, and L2
   -- attachment matching — all later in the tick.
   core.applyGroups(list, groups)
-  core.stampProviders(list, cfg)   -- 2026-09-30: it.providerId, before any rule matches a provider
   local autoTitleOn = core.config(cfg, "autoTitle.enabled", false) == true  -- L5 derived tile titles
   local loopOn      = core.config(cfg, "escalation.loop.enabled", false) == true  -- L5 loop watchdog
   local loopRepeats = tonumber(core.config(cfg, "escalation.loop.repeats", 3)) or 3
@@ -25856,9 +22614,6 @@ function FX._refreshBody()
                    or autoApprovedBannerOn
   local summaryOn   = core.config(cfg, "summary.enabled", false) == true  -- L5 post-run self-summary
   local prOn        = core.config(cfg, "prStatus.enabled", false) == true  -- L5 PR/MR tile badge
-  local rulesOn     = core.config(cfg, "rules.enabled", false) == true  -- L6 event-callback rules
-  local ruleSet     = rulesOn and core.ruleList(FX.readRules()) or nil  -- loaded once per refresh
-  local schedulesOn = core.config(cfg, "schedules.enabled", false) == true  -- L7 scheduled routines
   local escEnabled = core.config(cfg, "escalation.enabled", false) == true
   local escMin     = tonumber(core.config(cfg, "escalation.minutes", 5)) or 5
   local escSound   = core.config(cfg, "escalation.sound", false) == true
@@ -25869,7 +22624,6 @@ function FX._refreshBody()
   -- 2026-09-18: a transcript does not grow until a tool RETURNS, so a long Bash read as a stall.
   -- A tool in flight explains the silence until the TOOL has itself run this long.
   local hungToolMin = tonumber(core.config(cfg, "escalation.hung.toolMinutes", 30)) or 30
-  local apEnabled  = core.config(cfg, "policies.autopilot.enabled", false) == true
   local drainOn    = core.config(cfg, "drain.enabled", false) == true
   local autoRespawnOn  = core.config(cfg, "respawn.auto.enabled", false) == true
   local autoRespawnMax = tonumber(core.config(cfg, "respawn.auto.maxRetries", 3)) or 3
@@ -26103,7 +22857,6 @@ function FX._refreshBody()
       if not loopAlerted[it.key] then
         loopAlerted[it.key] = true
         if ledgerOn then ledgerFor(it, { type = "loop", repeats = loopRepeats }) end
-        runRules(ruleSet, it, "loop")  -- L6 loop trigger (rising edge, once per episode)
       end
     else
       loopAlerted[it.key] = nil
@@ -26161,13 +22914,6 @@ function FX._refreshBody()
       end
     end
 
-    -- L6 event-callback rules on a FRESH status edge (done/error/approval). pv==nil
-    -- (post-reload) is no edge. Off unless rules.enabled (ruleSet is nil otherwise).
-    if ruleSet and pv ~= nil and it.status ~= pv.status
-       and (it.status == "done" or it.status == "error" or it.status == "approval") then
-      runRules(ruleSet, it, it.status)
-    end
-
     -- Watchdog (Feature 8): track transcript progress so a stalled `working` session
     -- (no new output) can be flagged. trackProgress seeds on first sight, rebases the
     -- stall timer on any size change (growth OR a rotation/truncation shrink), and
@@ -26177,8 +22923,6 @@ function FX._refreshBody()
       if sz then watchdog[it.key] = core.applyProgress(watchdog[it.key], sz, now) end
     end
 
-    -- Autopilot badge (active only while the feature is enabled in config).
-    it.autopilot = apEnabled and FX.autopilotActive(it.key) or false
 
     -- Per-session gated-tools override (Feature D): surface the current scope +
     -- resolved effective list so the detail panel can reflect/edit it.
@@ -26186,13 +22930,6 @@ function FX._refreshBody()
     it.gate_tools_override = ovr
     it.gate_tools_effective = core.resolveGateTools(ovr, nil, core.config(cfg, "gate.tools", nil))
 
-    -- DR6: per-session model auto-routing state for the detail toggle. it.anthropic
-    -- gates the checkbox (the /model tier switch is local native-Anthropic only).
-    it.anthropic = core.isAnthropicSession(it.model, it.base_url)
-    -- R1-31: AND-in the editor check so a stale opt-in file can't make the panel read
-    -- back checked for a kitty/terminal session the effect would never route.
-    it.auto_model = (not it.remote) and it.anthropic and it.editor ~= "kitty" and it.editor ~= "terminal"
-      and FX.autoModelOn(it.key) or false
 
     -- Collision + risk indicators (Features B/E), both off by default.
     it.collide = collEnabled and (collFlags[it.key] or false) or nil
@@ -26281,7 +23018,6 @@ function FX._refreshBody()
         if escSound then FX.playSound() end
         if escPush then FX.push(escTopic, "Claude Shepherd: " .. it.name .. " stalled",
           "No transcript progress for over " .. hungMin .. " min while working") end
-        runRules(ruleSet, it, "hung")  -- L6 hung trigger (rising edge, once per stall)
       end
     end
     -- Reset watchdog state when a session isn't actively working, OR while it's
@@ -26374,8 +23110,8 @@ function FX._refreshBody()
     -- doesn't masquerade as "left the error state" and wipe the accumulated grace clock.
     -- When no tail was wanted, status is authoritative -> known.
     -- A session in a shared window (core.keystrokeBlocked) never fires: "continue" is typed.
-    -- 2026-09-28: turns that change nothing back it off (autoContinue.backoff.*), and a rule's
-    -- continue held by core.queueRuleContinue comes back here as cstep.rule once it's due.
+    -- 2026-09-28: turns that change nothing back it off (autoContinue.backoff.*). (A rule's held
+    -- continue came back here too, until automation rules were removed on 2026-11-19.)
     -- 2026-11-16: never while Claude Code is still retrying by itself (it.error_retrying), nor into
     -- a turn an expired Monitor's notice opened (it.idleWake, FX.idleWakeFor): no work to resume.
     it.idleWake = autoContinueOn and FX.idleWakeFor(it, tail) or nil
@@ -26384,23 +23120,8 @@ function FX._refreshBody()
         minSeconds = autoContinueDelay, maxAttempts = autoContinueMax,
         backoffStart = tonumber(core.config(cfg, "autoContinue.backoff.startSeconds", 120)),
         backoffMax = tonumber(core.config(cfg, "autoContinue.backoff.maxSeconds", 1800)),
-        rulesOn = ruleSet ~= nil,
         statusKnown = (not wantTail) or (tail ~= nil) })
     it.backoffSeconds = cstep.backoff   -- the card's "backing off · 4m"
-    if cstep.rule then
-      local target, rname, redge = it, cstep.rule.name, cstep.rule.edge
-      print("[cc-continue] 🚀 rule '" .. tostring(rname) .. "' continues " .. tostring(it.name))
-      FX.typeWhenReady(target, "rule-continue", function()
-        local acted = core.handleAction(FX, target, "continue", core.shepherdSays("continue"))
-        ledgerFor(target, { type = "rule", rule = rname, kind = redge, by = "rule",
-                            processor = (acted == "continue") and "continue" or "continue_skipped" })
-        if acted ~= "continue" then return false, "not delivered" end
-      end, { summary = tostring(rname) .. " on " .. tostring(redge) .. ": continue",
-             onRefused = function(why)
-        ledgerFor(target, { type = "rule", rule = rname, kind = redge, by = "rule",
-                            processor = "continue_skipped", reason = why })
-      end })
-    end
     if cstep.fire then
       print("[cc-continue] auto-continue " .. tostring(it.name)
         .. " (attempt " .. tostring((cstep.attempts or 0) + 1) .. "/" .. autoContinueMax .. ")")
@@ -26471,7 +23192,6 @@ function FX._refreshBody()
   -- tile leaves the error state); an errored tile that's pruned/closed before recovering
   -- leaks its entry forever -- reap it like the siblings above.
   core.reapUnbacked(autoContinueState.since, newPrev)
-  core.reapUnbacked(autoContinueState.rule, newPrev)       -- a held rule continue (2026-09-28)
   core.reapUnbacked(autoContinueState.turnSeen, newPrev)   -- ...and the turn it last judged
   core.reapUnbacked(FX._turnLabel, newPrev)
   core.reapUnbacked(FX._bgJobs, newPrev)
@@ -26520,57 +23240,7 @@ function FX._refreshBody()
       end
     end
   end
-  -- ruleFired keys are "ruleName\1tileKey"; reap when the tile vanishes (L6 once-state)
-  for k in pairs(ruleFired) do local tk = k:match("\1(.*)$"); if tk and not newPrev[tk] then ruleFired[k] = nil end end
 
-  -- L7 scheduled routines (off unless schedules.enabled): fire each due routine
-  -- through the NORMAL spawn fx (which itself respects spawn.live's dry-run). cc-core
-  -- gates by minute + lastFiredAt so a routine fires at most once per matching minute;
-  -- one-shots self-delete after firing; backpressure defers when the fleet is at cap.
-  if schedulesOn then
-    local sstate = FX.readSchedules()
-    local due = core.dueSchedules(core.scheduleList(sstate), os.time())
-    if #due > 0 then
-      local cap = tonumber(core.config(cfg, "schedules.maxConcurrent", 0)) or 0
-      local liveCount = #list
-      for _, r in ipairs(due) do
-        if r.action == "digest" then
-          -- L7 periodic digest: push a fleet shift report over a window (the first
-          -- concrete consumer of the scheduling primitive). No spawn -> no backpressure.
-          print("[cc-sched] firing digest routine '" .. tostring(r.name) .. "'")
-          local hours = tonumber(r.digestHours) or 24
-          local report = core.fleetStandup(ledgerSnapshot(), { sinceTs = os.time() - hours * 3600 })
-          local topic = (r.pushTopic and r.pushTopic ~= "") and r.pushTopic or escTopic
-          if topic and topic ~= "" then
-            FX.push(topic, "Claude Shepherd: shift report (" .. hours .. "h)",
-              core.standupMarkdown(report, { windowLabel = hours .. "h" }):sub(1, 800))
-          end
-          if ledgerOn then ledgerFor({ name = r.name },
-            { type = "schedule_fire", routine = r.name, kind = r.kind, action = "digest" }) end
-          sstate = core.scheduleMarkFired(sstate, r.name, os.time())
-        -- 2026-10-03 (E1b): a gate routine checks main is still green. It spawns nothing, so no
-        -- backpressure; FX.stepMainGreen starts it once the cards carry their repo
-        elseif r.action == "gate" then
-          print("[cc-sched] firing main-green routine '" .. tostring(r.name) .. "'")
-          table.insert(FX._mainGreen.due, r)
-          if ledgerOn then ledgerFor({ name = r.name, projectKey = r.folder, cwd = r.folder },
-            { type = "schedule_fire", routine = r.name, kind = r.kind, action = "gate" }) end
-          sstate = core.scheduleMarkFired(sstate, r.name, os.time())
-        elseif core.scheduleBackpressure(liveCount, cap) then
-          print("[cc-sched] backpressure (" .. liveCount .. "/" .. cap .. "): deferring '" .. tostring(r.name) .. "'")
-        else
-          print("[cc-sched] firing routine '" .. tostring(r.name) .. "' (" .. tostring(r.kind) .. ")")
-          FX.spawnSession(r.editor or core.config(cfg, "spawn.editor", "terminal"),
-            r.folder, r.prompt, r.permMode, r.provider or "")
-          if ledgerOn then ledgerFor({ name = r.name, projectKey = r.folder, cwd = r.folder },
-            { type = "schedule_fire", routine = r.name, kind = r.kind }) end
-          liveCount = liveCount + 1
-          sstate = core.scheduleMarkFired(sstate, r.name, os.time())
-        end
-      end
-      FX.writeSchedules(sstate)
-    end
-  end
 
   FX.reapWorkingOn(list)   -- 2026-09-29: ended sessions leave the working-on cache
 
@@ -26797,55 +23467,6 @@ function FX._refreshBody()
   -- (.group is applied earlier in the tick — see the comment after refreshList() —
   -- so the routing dispatcher can match @role: against a member's group.)
 
-  -- L2: resolve each session's effective policy bundle (attachments apply
-  -- fleet-wide; a per-session override wins) and CHANGE-GATED-write the per-session
-  -- file the gate reads. Placed AFTER applyGroups so .group is available for
-  -- attachment matching. The RESOLVE+WRITE half is gated to the no-cost case
-  -- (skip when no attachments AND no overrides), but the ORPHAN SWEEP below runs
-  -- UNCONDITIONALLY so removing the last attachment (or a session ending) always
-  -- tears down its resolved file within a tick — the gate enforces that file
-  -- authoritatively, so a stale one would keep auto-allowing/denying silently.
-  do
-    local attList = core.config(cfg, "policies.attachments", nil)
-    local hasAtt = type(attList) == "table" and #attList > 0
-    local hasOvr = false
-    for _, n in ipairs(FX.readDir(POLICY_OVERRIDE_DIR)) do
-      if n ~= "." and n ~= ".." then hasOvr = true; break end
-    end
-    local wrote = {}  -- keys (re)written this tick; everything else on disk is stale
-    if hasAtt or hasOvr then
-      for _, it in ipairs(list) do
-        if it.key and not it.remote then
-          local ovr = FX.policyOverride(it.key)
-          local prov = core.providerByModel(cfg, it.model, it.base_url)
-          local resolved = core.resolvePolicy(cfg,
-            { project = it.projectKey, projectKey = it.projectKey, group = it.group,
-              providerId = prov and prov.id or nil, key = it.key },
-            (ovr and ovr ~= "") and ovr or nil)
-          it.policy_override = ovr
-          it.policy_bundle = resolved.bundle
-          local t = core.policyFileFor(resolved)
-          if t then
-            local enc = core.json.encode(t)
-            if policyCache[it.key] ~= enc then
-              FX.writeResolvedPolicy(it.key, enc); policyCache[it.key] = enc
-            end
-            wrote[it.key] = true
-          end
-        end
-      end
-    end
-    -- Sweep: any resolved-policy file NOT (re)written this tick is stale — its
-    -- attachment was removed, its per-session override was cleared, or the session
-    -- ended. One readDir/tick; in the clean case the dir is empty (no-op). Decoupled
-    -- from hasAtt/hasOvr so a removed attachment can't leave an enforcing orphan.
-    for _, n in ipairs(FX.readDir(POLICY_DIR)) do
-      if n ~= "." and n ~= ".." and not n:find("%.tmp%.", 1, false) and not wrote[n] then
-        FX.clearResolvedPolicy(n); policyCache[n] = nil
-      end
-    end
-  end
-
   -- Push the full session payload to the panel -- but ONLY when it's shown. Encoding the list +
   -- running JS into a hidden webview is wasted work every tick; re-showing repopulates it on the
   -- next tick (<=1s). Gate on our own `panelVisible` flag (reliable, set by hide/show) rather than
@@ -26864,11 +23485,8 @@ function FX._refreshBody()
   -- right after lastRenderList was set, and every auto-sync renamed a relabelled
   -- project's tab back to its folder name.)
   FX.todoAutoSyncTick(list)
-  -- ...and a playbook picked as a My List source re-imports the same way when its file moves
-  -- (2026-10-03); one stat per playbook per tick, nothing at all with none added.
-  pcall(FX.playbookSyncTick)
   -- ...and a checklist run started from My List takes its sessions' reports and moves one step
-  -- (2026-10-03, after the playbook sync so a just-ticked line is already imported); nothing with no run.
+  -- (2026-10-03, after the TODO.md sync so a just-ticked line is already imported); nothing with no run.
   pcall(FX.runTick, list)
   -- ...and once a day, age done work out of the store into the archive (2026-09-21).
   -- core.worklistArchiveIsDue makes every other tick a compare and nothing more.
@@ -26897,11 +23515,7 @@ function FX._refreshBody()
     local payload = (#shownList == 0) and "[]" or hs.json.encode(shownList)
     local provs = core.config(cfg, "providers", nil)  -- reuse the cfg loaded above
     local provJson = (type(provs) == "table") and hs.json.encode(provs) or "[]"
-    local bundleNames = {}
-    for name in pairs(core.policyBundles(cfg)) do bundleNames[#bundleNames + 1] = name end
-    table.sort(bundleNames)
-    local bundleJson = hs.json.encode(bundleNames)
-    wv:evaluateJavaScript("window.ccUpdate(" .. payload .. ", " .. provJson .. ", " .. bundleJson .. ")")
+    wv:evaluateJavaScript("window.ccUpdate(" .. payload .. ", " .. provJson .. ")")
     -- 2026-10-03 (F1): the grey cards ride alone, after the session cards -- never in shownList
     pcall(function() wv:evaluateJavaScript("window.ccHookless(" .. FX.hooklessJson() .. ")") end)
     -- Badge the count so a hidden session is always discoverable. This is the

@@ -1,7 +1,10 @@
--- maingreen.test.lua : BEHAVIORAL fixture for the scheduled main-green check (2026-10-03, mining
--- round 2 unit E1b). A routine with action "gate" runs the repo's merge gate (core.mainGreenGateFor)
--- in its MAIN checkout, in the repo's one gate lane (behind every run that judges a merge), at a time
--- Adam sets. A red run raises ONE banner, a "main is red" flag on every card of that repo (with the
+-- maingreen.test.lua : BEHAVIORAL fixture for the main-green check (2026-10-03, mining round 2 unit
+-- E1b). A check runs the repo's merge gate (core.mainGreenGateFor) in its MAIN checkout, in the repo's
+-- one gate lane (behind every run that judges a merge). 2026-11-19, REQUIREMENT CHANGE: a routine with
+-- action "gate" asked for the check on a schedule (and the board's Run, at once) until routines were
+-- removed; a check is now asked for by putting a { name, folder } request on FX._mainGreen.due, which
+-- the tick takes, so the routine firing, the board's Run and "deleting the routine drops the flag" are
+-- gone from this fixture; everything after the request is the same. A red run raises ONE banner, a "main is red" flag on every card of that repo (with the
 -- failing lines) and a coach-log entry; the next green run clears the flag. A run that couldn't run
 -- or timed out is never red. (2026-11-19: the hands-off hold that could stand it down is gone.)
 -- The verdict is kept in a file, so a reload neither forgets the flag nor banners it again.
@@ -32,22 +35,19 @@ local now = os.time()
 local function write(path, s) local f = io.open(path, "w"); f:write(s); f:close() end
 local function read(path) local f = io.open(path, "r"); if not f then return nil end local s = f:read("*a"); f:close(); return s end
 
-write(T .. "/.claude/cc-config.json", json.encode({
-  schedules = { enabled = true },
+local CFG = {
   merge = { gates = {
     { match = { project = "/r/R" }, command = "GATE-R" },
     { match = { project = "/r/K" }, command = "GATE-K", timeoutSeconds = 7 },
   } },
-}))
+}
+write(T .. "/.claude/cc-config.json", json.encode(CFG))
 write(T .. "/.panel-alive", tostring(now))
-local SCHED = T .. "/schedules.json"
-local function routines(list) write(SCHED, json.encode({ schedules = list })) end
 local function mg(extra)
-  local r = { name = "main-green-R", kind = "cron", cron = "* * * * *", action = "gate", folder = "/r/R", enabled = true }
+  local r = { name = "main-green-R", folder = "/r/R" }
   for k, v in pairs(extra or {}) do r[k] = v end
   return r
 end
-routines({ mg({ enabled = false }) })
 -- a session working in the repo's main checkout: its card is the one that gets the flag
 write(T .. "/status/s1.json", string.format(
   '{"status":"done","session_id":"s1","name":"s1","cwd":"/r/R","since":%d,"updated":%d,"editor":"terminal","session_pid":"901"}',
@@ -55,7 +55,7 @@ write(T .. "/status/s1.json", string.format(
 
 local realGetenv = os.getenv
 local ENV = { CC_STATUS_DIR = T .. "/status", CC_WORKLIST_FILE = T .. "/worklist.json", CC_LABELS_FILE = T .. "/labels.json",
-              CC_SCRATCH_DIR = SCR, SHELL = "/bin/zsh", HOME = T, CC_SCHEDULES_FILE = SCHED,
+              CC_SCRATCH_DIR = SCR, SHELL = "/bin/zsh", HOME = T, SCHED,
               CC_MAIN_GREEN_FILE = T .. "/main-green.json" }
 os.getenv = function(k) if ENV[k] then return ENV[k] end return realGetenv(k) end
 
@@ -178,24 +178,20 @@ end
 local function lastGate(name) local g = tasks(name); return g[#g] end
 local function saved() return json.decode(read(T .. "/main-green.json") or "{}") or {} end
 local function flag() local I = items(); return I.s1 and I.s1.mainRed end
-local function fired(name)
-  for _, s in ipairs((json.decode(read(SCHED) or "{}") or {}).schedules or {}) do
-    if s.name == name then return tonumber(s.lastFiredAt) end
-  end
-end
-local function refire(extra) routines({ mg(extra) }) end
+-- ask for a check, as a routine with action "gate" did when it fired
+local function refire(extra) table.insert(fx._mainGreen.due, mg(extra)) end
 local SHA = string.rep("a", 40)
 local RED = "@@main-sha " .. SHA .. "\n== suite: core ==\nok   - one\nFAIL - main broke this (0.2s)\n-- core.test.lua: 2 run, 1 failed --\n"
 local GREEN = "@@main-sha " .. string.rep("b", 40) .. "\n== suite: core ==\nok   - one\nok   - two\n"
 
--- ---- off until Adam adds a routine; then it runs in the lane, behind a gate that judges a merge ----
+-- ---- nothing runs until a check is asked for; then it runs in the lane, behind a merge's gate ----
 tick()
-check("a paused gate routine runs nothing", #tasks("GATE-R") == 0 and next(fx._mainGreenRuns or {}) == nil)
+check("nothing runs until a check is asked for", #tasks("GATE-R") == 0 and next(fx._mainGreenRuns or {}) == nil)
 local busy = { state = "running", commonDir = "/r/R/.git", at = now, nonce = "busy", task = {}, command = "MERGE-GATE" }
 fx._mergeGates["busy|x"] = busy
 refire()
 tick()
-check("the routine fires once its minute comes, and is marked fired", fired("main-green-R") ~= nil)
+check("the tick takes the request", #fx._mainGreen.due == 0)
 local q = (fx._mainGreenRuns or {})["/r/R/.git"]
 check("...but waits for the repo's gate lane while a merge gate runs  (" .. tostring(q and q.state) .. ")",
       q and q.state == "queued" and #tasks("GATE-R") == 0)
@@ -267,16 +263,16 @@ check("after a reload the flag is read back from disk, with no banner", flag() ~
 local n = #tasks("GATE-R")
 check("no hold: the check asks no hold", fx._hold == nil and core.mainGreenHeld == nil)
 
--- ---- Run on the board: runs the check now, never spawns ----
-quiet(function() panelCb({ body = json.encode({ a = "schedule-run-now", v = "main-green-R" }) }) end)
-check("Run starts the check now", #tasks("GATE-R") == n + 1)
+-- ---- FX.mainGreenFire (what the board's Run called): runs the check now, never spawns ----
+quiet(function() fx.mainGreenFire(mg(), CFG) end)
+check("FX.mainGreenFire starts the check now", #tasks("GATE-R") == n + 1)
 check("...and spawns no session", spawns == 0)
 finishTask(lastGate("GATE-R"), 0, GREEN)
 tick()
 check("...and its green clears the flag", flag() == nil)
 
 -- ---- a timeout is never red ----
-routines({ mg({ name = "main-green-K", folder = "/r/K" }) })
+refire({ name = "main-green-K", folder = "/r/K" })
 tick()
 local k1 = tasks("GATE-K")[1]
 check("the K repo's check runs in its own lane", k1 ~= nil and k1.dir == "/r/K")
@@ -289,38 +285,30 @@ finishTask(k1, 143, "FAIL - something\n")
 tick()
 check("a timed-out check is never red", (saved()["/r/K/.git"] or {}).state ~= "red" and #banners == 2)
 
--- ---- a repo whose gate routine is deleted loses its flag ----
-routines({ mg() })
-tick()
-finishTask(lastGate("GATE-R"), 1, RED)
-tick()
-check("red once more", flag() ~= nil)
-quiet(function() panelCb({ body = json.encode({ a = "schedule-delete", v = "main-green-R" }) }) end)
-tick()
-check("deleting the routine drops the repo's flag", flag() == nil and saved()["/r/R/.git"] == nil)
+-- (2026-11-19: "a repo whose gate routine is deleted loses its flag" went with routines)
 
--- ---- a verdict survives the routine firing again before the tick that judges it (2026-10-15) ----
+-- ---- a verdict survives a new request before the tick that judges it (2026-10-15) ----
 -- 2026-10-15: FX.mainGreenFire dropped a finished run it hadn't judged yet, and FX.stepMainGreen fires
 -- due routines before judging, so a firing in the tick right after a run ended lost its verdict: the
 -- first red block above flaked 6 FAILs whenever a minute boundary fell between its ticks.
-routines({ mg() })
+refire()
 tick()
 local b0 = #banners
 local gA = lastGate("GATE-R")
-check("the routine is back and runs", gA ~= nil and gA.running)
+check("a new request runs", gA ~= nil and gA.running)
 if not gA then finish() end
 finishTask(gA, 1, RED)
 refire()   -- due again in the very tick that would judge gA
 tick()
-check("a red run's verdict survives the routine firing again before it is judged  (" .. (#banners - b0) .. ")",
+check("a red run's verdict survives a new request before it is judged  (" .. (#banners - b0) .. ")",
       #banners == b0 + 1 and flag() ~= nil)
 local gB = lastGate("GATE-R")
 check("...and the new firing still runs", gB ~= nil and gB ~= gA and gB.running)
 if not gB then finish() end
 finishTask(gB, 0, GREEN)
-quiet(function() panelCb({ body = json.encode({ a = "schedule-run-now", v = "main-green-R" }) }) end)   -- Run, before the tick
+quiet(function() fx.mainGreenFire(mg(), CFG) end)   -- a direct fire, before the tick (the board's Run did this)
 tick()
-check("a green verdict survives the board's Run before it is judged", flag() == nil and (saved()["/r/R/.git"] or {}).state == "green")
+check("a green verdict survives a direct FX.mainGreenFire before it is judged", flag() == nil and (saved()["/r/R/.git"] or {}).state == "green")
 finishTask(lastGate("GATE-R"), 0, GREEN)
 tick()
 

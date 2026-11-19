@@ -203,7 +203,7 @@ Two sources feed it:
 
 An optional, append-only JSONL record at `~/.claude/cc-ledger/YYYY-MM-DD.jsonl`, one event per line:
 session start and end, prompts, tool requests, gate **decisions** with who decided (`autoDeny`,
-`autoAllow`, `autopilot`, `approveRepeats`, `bundle:<name>`, `human`, or `timeout-fallback`), mode,
+`autoAllow`, `approveRepeats`, `human`, or `timeout-fallback`), mode,
 model and effort changes, nudges, clears, compacts, spawns, relabels and automatic actions. It is
 **off in code and on in the installer's default settings** (`ledger.enabled`), and it is the data
 source for everything below.
@@ -290,8 +290,8 @@ The detail panel's **Score** button rates the selected session 0–100 from the 
 100 and subtracts 18 per API error, 6 per denied tool, 12 per loop episode and 14 per forced respawn.
 It shows a ⚠ when recent sessions trend down, and a small sparkline of the trend. Those weights are
 the defaults: `"score": { "weights": { "error": 18, "deny": 6, "loop": 12, "respawn": 14 } }` in
-`~/.claude/cc-config.json` (hand-edit only) changes any of them, for the Score button, its trend
-and the A/B compare's scores alike.
+`~/.claude/cc-config.json` (hand-edit only) changes any of them, for the Score button and its
+trend alike.
 
 ### Storage
 

@@ -43,7 +43,7 @@ Instances rows and the Stream Deck show an errored session as **Error** in magen
   length), **did nothing**, **blocked** (it stopped on a denial or an API error) or **needs
   follow-up** (it asked you, put up a plan, or ended on a question). Its Instances row says the
   same, and the ledger records a `turn_outcome` event. What Shepherd sends on its own
-  (auto-continue, a rule's nudge or continue, the self-summary) starts with `[shepherd]`, so those
+  (auto-continue, the self-summary) starts with `[shepherd]`, so those
   turns never read as yours; your own **Continue** click still types a plain `continue`. Task
   notifications and compaction summaries don't count as prompts either. A batch unit, which only
   ever gets its driver's messages, is labelled from the newest of those. When the turn's prompt is
@@ -103,8 +103,7 @@ workflow ([Merging and batches](merging-and-batches.md)).
 - **What folds together.** A session launched at a git worktree top-level joins its repo's card:
   the main checkout and every linked worktree, whatever their folder names (identity comes from
   git, one cached `git rev-parse` per launch folder). Two sessions in one plain folder share a card
-  too. A folder nested inside a repo that isn't its own repo (a scratch folder) keeps its own card,
-  and A/B compare variants keep theirs so the comparison stays visible.
+  too. A folder nested inside a repo that isn't its own repo (a scratch folder) keeps its own card.
 - **Tabs that entered a worktree.** A tab that started in the main checkout and ran `EnterWorktree`
   (into `.claude/worktrees/<slug>`, or a sibling folder) stays on the repo's card but shows the
   worktree **it is working in**: its branch, its folder in Instances (never offered to Open while
@@ -392,17 +391,8 @@ the FLEET row swaps the session tiles for the list (click again to go back).
   [methodology/CLAUDE.md](../methodology/CLAUDE.md). A [find-only audit](providers-and-integrations.md#find-only-audit)'s
   findings file imports with it: each finding carries a **🔍 severity** chip, and an `[x]` in the file
   never marks it done (only a checklist run you start on it can).
-- **📘 Playbooks**: **📘 Add a playbook…** on a project tab opens the Mac's file chooser in the
-  project's folder. Pick any markdown checklist (a release or deploy runbook, kept anywhere) and its
-  `- [ ]` lines import into the tab exactly like `TODO.md`'s: grouped under a **📘 file name** header
-  after the tab's other open items, with **✓ auto** and **▶ live run** chips that follow the file
-  as it changes. Importing never ticks a row. The tab lists its playbooks under the buttons; a
-  playbook's **✕** (**Remove playbook**) stops the import and keeps its items, still grouped and
-  marked **removed**, for you to verify. Adding the same file again picks up where it left off. The
-  project's own `TODO.md` can't be added (it already imports), and the list is kept in
-  `cc-worklist.json`.
-- **▶ Run selected**: **▶ Run…** on a project tab lets you pick open items (`TODO.md` lines, playbook
-  lines, your own). Nothing is preselected. An item that can't run has a greyed box that says why:
+- **▶ Run selected**: **▶ Run…** on a project tab lets you pick open items (`TODO.md` lines or your
+  own). Nothing is preselected. An item that can't run has a greyed box that says why:
   its box is already ticked in its file, its line is gone, or it's only on a branch. **▶ Run selected
   (N)** works through them **one at a time**, in the tab's order. Each item gets a fresh Claude tab in
   the repo's **main checkout** (the sequential exception), opened like a batch unit's tab, with its

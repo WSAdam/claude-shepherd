@@ -131,27 +131,18 @@ delegation, idle/auto-spawn routing targets) are intentionally omitted until the
 - As a **fleet operator**, I want the gate to hold a configurable list of risky tools (Bash/Write/Edit/…) until I decide, so that an agent can't run a dangerous tool without my sign-off.
 - As a **fleet operator**, I want headless approvals to work for both terminal and VS Code-extension sessions, so that my whole fleet is governable regardless of editor.
 - As a **fleet operator**, I want to override the gated-tool list per session (Default/All/None/Custom), so that I can lock down a risky experiment while letting a trusted session run free.
-- As a **fleet operator**, I want an Autopilot button that time-boxes a session to auto-approve all its prompts, so that I can let a trusted run proceed unattended for a bounded window.
 - As a **fleet operator**, I want pattern allow/deny globs where deny always wins, so that I can pre-authorize safe commands and hard-block dangerous ones fleet-wide.
 - As a **fleet operator**, I want the gate to fall back to Claude's native prompt if I don't answer in time, so that a session is never permanently wedged waiting on me.
-
-## Named policy bundles
-
-- As a **fleet operator**, I want reusable named policy bundles (read-only, no-bash, no-network), so that I can apply a consistent guardrail set instead of editing one global list.
-- As a **fleet operator**, I want to attach a bundle to a session via the Policy dropdown, so that I can give one session tighter rules without touching the others.
-- As a **fleet operator**, I want bundles auto-attached by project/group/provider/session glob, so that sensitive projects get locked-down rules without per-session setup.
-- As a **fleet operator**, I want a bundle to optionally replace rather than union the fleet patterns, so that a strict session ignores looser global allowances.
 
 ## Spawning sessions
 
 - As a **fleet operator**, I want a New session modal to launch a session in a chosen folder and editor, so that I can start work from the panel without a terminal.
 - As a **fleet operator**, I want to start a brand-new project that opens reliably past the cold-start/trust prompts and lands its initial task, so that a fresh folder actually starts working.
-- As a **fleet operator**, I want savable presets that spawn a folder+editor+mode+provider bundle in one click, so that I can relaunch a familiar setup instantly.
+- As a **fleet operator**, I want savable presets that spawn a folder+editor+mode bundle in one click, so that I can relaunch a familiar setup instantly.
 - As a **fleet operator**, I want fuzzy folder search over my project roots as I type, so that I can pick a project by a name fragment instead of a full path.
 - As a **fleet operator**, I want a folder browser and recent-folder chips, so that I can find and reopen projects I work in often.
 - As a **fleet operator**, I want to choose the editor (Terminal/Kitty/VS Code/Cursor) and permission mode at spawn, so that each session starts the way that task needs.
 - As a **fleet operator**, I want spawning to be dry-run until I explicitly opt in, so that I can preview the exact launch command before anything actually runs.
-- As a **fleet operator**, I want savable agent profiles (persona + provider/model + skills/MCP/knowledge/plugins) I can spawn from in one click, so that I can hand work to a configured agent reproducibly.
 - As a **fleet operator**, I want Shepherd-spawned local sessions to register Claude Code Remote Control automatically, so that I can drive them from claude.ai or mobile with no extra step.
 
 ## Providers & models
@@ -159,30 +150,13 @@ delegation, idle/auto-spawn routing targets) are intentionally omitted until the
 - As a **fleet operator**, I want named provider profiles that inject env vars + a model id into the launch, so that I can run sessions against different models and backends.
 - As a **fleet operator**, I want gateway providers that set a base URL to an Anthropic-compatible endpoint, so that I can run Gemini/OpenAI/local models through LiteLLM while keeping Shepherd's controls.
 - As a **fleet operator**, I want providers to reference an env-var name for the key rather than store the secret, so that my API keys never live in Shepherd's config or process.
-- As a **fleet operator**, I want a default provider plus per-session selection, so that I can standardize on one model yet override it where a task needs another.
 - As a **fleet operator**, I want the tile to badge the model that's actually running, so that I can confirm at a glance which backend a session is on.
-
-## Task queue & routing
-
-- As a **developer**, I want a per-session task queue I can add to and feed the next item from, so that I can line up work for a session to pick up later.
-- As a **fleet operator**, I want optional autofeed that sends the next queued task when a session finishes, so that a session works through a backlog unattended.
-- As a **fleet operator**, I want feeds to pop a task only once the paste actually reached the window, so that a missed delivery leaves the task queued instead of silently lost.
-- As a **developer**, I want to expand, reorder, and remove queued tasks in place, so that I can manage a backlog without retyping it.
-- As a **developer**, I want to bulk-paste a multi-line list into one queued task per line, so that I can load a backlog in one action.
-- As a **developer**, I want parameterized, versioned task templates with required/optional and built-in variables, so that I can reuse standard prompts and fill them in before they're sent.
-- As a **fleet operator**, I want a project's queue to feed whichever of its sessions is free, so that parallel sessions in one folder drain a shared backlog.
-- As a **fleet operator**, I want queue-line routing syntax (@role / @all / @any / seq), so that I can target tasks to a role, gate on join barriers, or force one-at-a-time processing.
-- As a **reviewer**, I want each routed/queued task timed from feed to completion, so that the shift report can show throughput and average duration.
-- As a **developer**, I want to hold one queued line in place so auto-feed, Feed next and the router skip it until I release it, so that I can park a task that isn't ready without losing its place.
-- As a **fleet operator**, I want ☰ → 📑 Queues to list every session's queue (held lines, the line fed next, a packet line's last check) with Hold/Release, reorder and remove, so that I can see and manage what the whole fleet has lined up without opening each card.
 
 ## Automation & policies
 
 - As a **fleet operator**, I want one settings file (and a ⚙ Settings panel) governing all automatic behavior, with only a few named conveniences on before I opt in and a fresh install's defaults spelled out, so that I always know what can act on my fleet.
 - As a **fleet operator**, I want escalation that nags harder (stronger pulse, optional sound/push) when an approval waits too long, so that a forgotten prompt eventually gets my attention.
 - As a **fleet operator**, I want optional focus-pop of the editor when a session completes or needs approval, so that the right window comes forward at the moment it matters.
-- As a **fleet operator**, I want declarative event-callback rules that react to a done/error/approval edge with a safe effect (log/relabel/nudge), so that I can automate small reactions without writing code.
-- As a **fleet operator**, I want scheduled routines (cron/one-shot) that spawn sessions, push a digest or check that a repo's main is still green, so that recurring work like nightly tests runs on its own.
 - As a **fleet operator**, I want a per-session risk indicator computed from its ledger history, so that I can notice a session accumulating denials and odd behavior.
 - As a **fleet operator**, I want collision warnings when two active sessions share a working directory, so that two agents don't silently clobber each other's edits.
 - As a **fleet operator**, I want a Drain action that finishes the current turn then closes a session, so that I can retire a session without interrupting its work.
@@ -282,7 +256,6 @@ delegation, idle/auto-spawn routing targets) are intentionally omitted until the
 - As a **fleet operator**, I want a TODO line that appears in several worktrees' copies to import once, so that a repo that commits TODO.md doesn't hand me every item again per worktree.
 - As a **fleet operator**, I want a line that exists only on a branch to show that branch until it reaches main, so that I know which unit of work it belongs to.
 - As a **fleet operator**, I want a removed worktree's items to stay in My List instead of being flagged missing, so that finishing and removing a worktree never loses what I still have to verify.
-- As a **fleet operator**, I want 📘 Add a playbook… to import a markdown checklist I keep outside the repo into a project's My List tab, kept in step with the file, so that a release or deploy checklist sits beside everything else I verify.
 - As a **fleet operator**, I want ▶ Run… to work through items I pick one at a time, each in a fresh session in the repo's main checkout with its brief typed in for me to send, and its tab closed once the item is done, so that a list of small jobs gets done while I verify.
 - As a **fleet operator**, I want a run I started to set my checkmark (✓ by run) only on Shepherd's own evidence (the box ticked in its file and a turn that did something, or the item's own session reporting done) and never on import, so that a checkmark still means I, or a run I started, checked it.
 - As a **fleet operator**, I want a run to stop after three items in a row finish nothing, and to pause for a live-run item, a blocked report or a batch in the repo, so that a run never churns through my list unattended.

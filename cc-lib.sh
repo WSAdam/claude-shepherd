@@ -298,23 +298,16 @@ cc_del_field() {
   fi
 }
 
-# Per-session gated-tools override dir (Feature D), mirroring cc-autopilot. Defined
-# here so SessionEnd can clean it up; cc-approve.sh reads the same path on its hot path.
+# Per-session gated-tools override dir (Feature D). Defined here so SessionEnd can
+# clean it up; cc-approve.sh reads the same path on its hot path.
 CC_GATE_TOOLS_DIR="${CC_GATE_TOOLS_DIR:-${HOME}/.claude/cc-gate-tools}"
-# Same deal for the per-key approveRepeats memo + autopilot expiry files written by
-# cc-approve.sh/the panel: hoisted here so cc_remove can stop those orphans too.
+# Same deal for the per-key approveRepeats memo written by cc-approve.sh: hoisted here
+# so cc_remove can stop those orphans too. (2026-11-19: the autopilot expiry --
+# cc-autopilot/ -- and the policy bundle files -- cc-policy/, cc-policy-override/ -- went
+# with autopilot and named policy bundles; nothing reads a leftover one.)
 CC_APPROVED_DIR="${CC_APPROVED_DIR:-${HOME}/.claude/cc-approved}"
-CC_AUTOPILOT_DIR="${CC_AUTOPILOT_DIR:-${HOME}/.claude/cc-autopilot}"
-# L2 per-session policy files: the resolved bundle the gate reads (cc-approve.sh)
-# and the chosen-bundle override the panel writes. Hoisted here (defaults MUST match
-# cc-approve.sh's CC_POLICY_DIR and the dashboard's POLICY_DIR/POLICY_OVERRIDE_DIR)
-# so cc_remove reaps them on SessionEnd like the siblings above.
-CC_POLICY_DIR="${CC_POLICY_DIR:-${HOME}/.claude/cc-policy}"
-CC_POLICY_OVERRIDE_DIR="${CC_POLICY_OVERRIDE_DIR:-${HOME}/.claude/cc-policy-override}"
-# DR6 per-session model auto-routing opt-in (presence = on). Hoisted here so cc_remove
-# reaps it on SessionEnd like the siblings above (default MUST match the dashboard's
-# AUTOMODEL_DIR). A new session gets a new key, so a stale opt-in can't silently carry over.
-CC_AUTOMODEL_DIR="${CC_AUTOMODEL_DIR:-${HOME}/.claude/cc-automodel}"
+# (2026-11-19: model auto-routing's per-session opt-in -- cc-automodel/ -- went with it; nothing
+# reads a leftover one.)
 # Ready-to-merge requests (cc-merge.sh) and Shepherd's answers to them, per session key.
 # Default MUST match cc-merge.sh's and the dashboard's FX.MERGE_DIR.
 CC_MERGE_DIR="${CC_MERGE_DIR:-${HOME}/.claude/cc-merge}"
@@ -635,8 +628,8 @@ cc_lease_prune() {
 }
 
 # Remove a session entirely (used by SessionEnd) plus any stray decision/claim
-# file and the per-session gated-tools override, approveRepeats memo, autopilot
-# expiry, L2 policy files, and the model auto-routing opt-in (a new session gets a
+# file and the per-session gated-tools override, approveRepeats memo, and the model
+# auto-routing opt-in (a new session gets a
 # new key, so this just stops orphans accumulating).
 # The *.parked.* and *.tmp.* globs are the leftovers of an interrupted handover
 # (2026-09-19): cc-merge.sh parks an answer that isn't its own as
@@ -659,8 +652,7 @@ cc_remove() {
   rm -f "$(cc_file "$1")" "$(cc_file "$1")".tmp.* "$(cc_decision_file "$1")" \
     "$(cc_decision_file "$1")".claim.* \
     "$(cc_decision_file "$1")".note "$(cc_decision_file "$1")".note.tmp.* \
-    "$CC_GATE_TOOLS_DIR/$1" "$CC_APPROVED_DIR/$1" "$CC_AUTOPILOT_DIR/$1" \
-    "$CC_POLICY_DIR/$1" "$CC_POLICY_OVERRIDE_DIR/$1" "$CC_AUTOMODEL_DIR/$1" \
+    "$CC_GATE_TOOLS_DIR/$1" "$CC_APPROVED_DIR/$1" \
     "$CC_MERGE_DIR/$1.json" "$CC_MERGE_DIR/$1.decision" "$CC_MERGE_DIR/$1.decision".claim.* \
     "$CC_MERGE_DIR/$1.decision".parked.* "$CC_MERGE_DIR/$1.decision".tmp.* \
     "$CC_MERGE_DIR/$1.checker.json" "$CC_MERGE_DIR/$1.checker.json".tmp.* \
@@ -760,7 +752,7 @@ cc_ledger_append() {
 
 # ---- Always-ask commands (build program unit 5, 2026-09-28) ---------------------------------
 # A fixed list of Bash commands is held for Adam's click whatever the gate flag, gate.tools,
-# autopilot, autoAllow, approveRepeats or a policy bundle says (cc-approve.sh's pre-gate
+# autoAllow or approveRepeats says (cc-approve.sh's pre-gate
 # layer): git push; rm with both -r and -f; git reset --hard, clean -f, branch -D,
 # worktree remove --force, checkout -- .; any tool's publish; gh release create; gh pr merge.
 # The matcher judges PARSED words, never the raw text: `echo "git push"` and a commit message
@@ -832,9 +824,9 @@ _cc_aa_kw() {
 
 # The pure-bash first look (this hook runs for every tool call): 0 when the always-ask layer
 # must read the request. Only a Bash call qualifies, and only when its JSON carries a held
-# word or a config / session policy file may name extra patterns. $1 = the hook's JSON.
+# word or the config may name extra patterns. $1 = the hook's JSON.
 cc_always_ask_candidate() {
-  local re='"tool_name"[[:space:]]*:[[:space:]]*"Bash"' sid
+  local re='"tool_name"[[:space:]]*:[[:space:]]*"Bash"'
   [[ $1 =~ $re ]] || return 1
   re="(^|[^[:alnum:]_]|\\\\[nrt])($CC_AA_WORDS)([^[:alnum:]_]|\$)"   # \n \t: JSON escapes
   [[ $1 =~ $re ]] && return 0
@@ -845,16 +837,10 @@ cc_always_ask_candidate() {
   fi
   [[ $1 =~ $_CC_AA_DOLQ_RE ]] && return 0                             # `git $'p\x75sh'`, `r$"m"`
   cc_always_ask_names_extras "$CC_CONFIG_FILE" && return 0
-  re='"session_id"[[:space:]]*:[[:space:]]*"([^"]*)"'
-  if [[ $1 =~ $re ]] && [ -n "${BASH_REMATCH[1]}" ]; then
-    sid="${BASH_REMATCH[1]}"
-    cc_always_ask_names_extras "$CC_POLICY_DIR/${sid//[^A-Za-z0-9._-]/_}" && return 0
-  fi
   return 1
 }
 
-# 0 when file $1 may carry a non-empty always-ask list (policies.alwaysAsk.patterns, a
-# bundle's alwaysAsk). Settings writes an empty {"patterns": []}; any other shape counts.
+# 0 when file $1 may carry a non-empty always-ask list (policies.alwaysAsk.patterns). Settings writes an empty {"patterns": []}; any other shape counts.
 cc_always_ask_names_extras() {
   local txt="" re
   [ -f "$1" ] || return 1
@@ -1730,55 +1716,6 @@ _cc_handoff_pending() { # $1 key, $2 cwd
     fi
     rm -f "$claim"
     echo "[cc-lib] ⚠️ dropped a stale handoff note ($id): nobody took it within the hour" >&2
-  done
-}
-
-# 2026-10-15: a spawn from an agent profile naming a policy bundle leaves {bundle, policy} beside a
-# respawn's note, under the same id (FX.writePendingPolicy, core.pendingPolicy). The session that
-# starts there takes it once and gets the bundle as if Adam had picked it from its card: the choice
-# (CC_POLICY_OVERRIDE_DIR/<key>, which the panel re-resolves every tick) and the rules the gate reads
-# (CC_POLICY_DIR/<key>) from its first tool call. Shorter-lived than a note: a session starts within
-# a minute of its spawn, so one left longer belongs to a launch that never came -- and a bundle (an
-# autopilot one, say) must not land on a session Adam started there himself. Prints nothing: stdout
-# is the session's context.
-CC_PENDING_POLICY_MAX_AGE=600
-cc_take_pending_policy() { # $1 key, $2 cwd
-  [ -z "${CC_SHEPHERD_INTERNAL:-}" ] || return 0   # Shepherd's own runs take nothing
-  local key="$1" cwd="$2" lin id f claim m now name rules
-  [ -n "$key" ] && cc_have_jq || return 0
-  lin="$(cc_read_field "$key" '.budget_lineage')"
-  set -- "cwd-$(cc_hash "$cwd")"
-  [ -z "$lin" ] || set -- "lineage-$(cc_hash "$lin")" "$@"
-  now="$(cc_now)"
-  for id in "$@"; do
-    f="$CC_NOTES_DIR/pending/$id.policy.json"
-    [ -f "$f" ] || continue
-    claim="$f.claim.$$"
-    mv "$f" "$claim" 2>/dev/null || continue   # another session took it first
-    m="$(cc_mtime "$claim")"
-    case "$m" in ''|*[!0-9]*) m=0 ;; esac
-    if [ $(( now - m )) -gt "$CC_PENDING_POLICY_MAX_AGE" ]; then
-      rm -f "$claim"
-      echo "[cc-lib] ⚠️ dropped a stale policy bundle ($id): no session started within 10 minutes of its spawn" >&2
-      continue
-    fi
-    name="$(jq -r '.bundle // empty | strings' "$claim" 2>/dev/null)"
-    rules="$(jq -c '.policy // empty | objects' "$claim" 2>/dev/null)"
-    rm -f "$claim"
-    if [ -z "$name" ] || [ -z "$rules" ]; then
-      echo "[cc-lib] ❌ dropped an unreadable policy bundle ($id)" >&2
-      return 0
-    fi
-    mkdir -p "$CC_POLICY_OVERRIDE_DIR" "$CC_POLICY_DIR" 2>/dev/null
-    # the choice first, so a tick that sees the rules also sees why they're there (atomic, like the panel)
-    printf '%s' "$name" > "$CC_POLICY_OVERRIDE_DIR/$key.tmp.$$" \
-      && mv -f "$CC_POLICY_OVERRIDE_DIR/$key.tmp.$$" "$CC_POLICY_OVERRIDE_DIR/$key" \
-      && printf '%s' "$rules" > "$CC_POLICY_DIR/$key.tmp.$$" \
-      && mv -f "$CC_POLICY_DIR/$key.tmp.$$" "$CC_POLICY_DIR/$key" \
-      || { rm -f "$CC_POLICY_OVERRIDE_DIR/$key.tmp.$$" "$CC_POLICY_DIR/$key.tmp.$$"
-           echo "[cc-lib] ❌ couldn't apply policy bundle '$name' to $key" >&2; return 0; }
-    echo "[cc-lib] ✅ applied policy bundle '$name' to the session its profile spawned ($key, $id)" >&2
-    return 0
   done
 }
 

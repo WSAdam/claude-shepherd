@@ -131,7 +131,7 @@ through your login shell, once per request per commit (a new commit in the workt
 - After the merge the **same suite runs once in the main checkout**, but only for a request whose
   own pre-merge gate ran in this Shepherd session. Turning `merge.gates` on never gates merges that
   already happened. If main is red, the unit's tab stays open and the card says so.
-- `match` works like `policies.attachments` (project / group / key globs, first entry wins, an
+- `match` takes project / group / key globs (first entry wins, an
   absent field is a wildcard; `project` is the session's project key). With no `gates` listed,
   nothing runs.
 
@@ -236,19 +236,15 @@ at the merge-base** and the review splits the failing lines in two: *already fai
 #### Is main still green? A scheduled check
 
 Gates run when a unit asks to merge. Main can still go red between merges: a hand edit, a
-dependency, a clock. A **⏰ Routines** routine with the action **Check main is green**
-(`"action": "gate"`) runs the repo's merge gate on main at the time you set. It is opt-in per
-repo: nothing runs until you add one. Like every routine, it fires on its schedule only while
-`schedules.enabled` is on (off by default); its **Run** works either way.
-
-```json
-{ "name": "main green", "kind": "cron", "cron": "0 7 * * *", "action": "gate",
-  "folder": "/path/to/repo", "enabled": true }
-```
+dependency, a clock. A main-green check runs the repo's merge gate on main. A **⏰ Routines**
+routine with the action **Check main is green** started one at the time you set; routines were
+removed on 2026-11-19, so nothing in the panel starts a check now. The check itself is kept: a
+`{ name, folder, branch? }` request on the panel's `FX._mainGreen.due` list runs one on the next
+tick, through everything below.
 
 - **What runs:** the `merge.gates` entry a session in the repo's main checkout would get (matched on
   its project key, then its path), or main's own `.worktree-check` with `merge.repoGate` on. No gate
-  means no check, and **Run** says so.
+  means no check, and the console says so.
 - **Where:** in the repo's **main checkout**, through the repo's one gate lane. Like gate blame, it
   waits behind every gate that judges a merge, and one check per repo runs at a time.
 - **On main's commit only:** before the gate starts, the run checks that the main checkout is on
@@ -261,7 +257,7 @@ repo: nothing runs until you add one. Like every routine, it fires on its schedu
 - **Never red by accident:** a run that couldn't run (a busy suite, a dirty checkout, another
   branch) or timed out changes nothing: the flag stays as it was.
 - **Kept:** each repo's last verdict is in `~/.claude/cc-main-green.json`, so a reload keeps the flag
-  without a second banner. Deleting the repo's last gate routine drops its flag.
+  without a second banner.
 
 ### The claim check: a hint, never a gate
 

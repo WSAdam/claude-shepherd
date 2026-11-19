@@ -51,8 +51,8 @@ if (!(escSrc && spawnSrc && chipSrc && branchSrc && badgesSrc)) {
 function harness(pathBox, taskBox) {
   const posted = [], alerts = [];
   let closed = 0;
-  const els = { "n-path": { value: pathBox }, "n-task": { value: taskBox }, "n-editor": { value: "kitty" },
-                "n-provider": { value: "" } };
+  // 2026-11-19: no "n-provider" -- the dialog's provider choice was removed
+  const els = { "n-path": { value: pathBox }, "n-task": { value: taskBox }, "n-editor": { value: "kitty" } };
   const lib = new Function("document", "window", "alert", "closeNew",
     spawnSrc + "\nreturn { auditSpawn };")(
     { getElementById: (id) => els[id] || null },

@@ -601,86 +601,6 @@ function M.modelCommand(id)
   return "/model " .. id
 end
 
--- ---- DR6: per-session model auto-routing (heuristic, OFF by default) --------
--- Pick a model TIER for a task by difficulty, then map the tier to a model id, so a
--- cheap task can run on Haiku and a hard one on Opus. PURE + deterministic (no clock,
--- no network) -- the per-session opt-in, the /model switch, and the delivery gating
--- all live in the dashboard. Heuristic, most-specific first:
---   1) any "hard" keyword  -> hard
---   2) else any "cheap" keyword -> cheap
---   3) else by word count: <= cheapMax -> cheap; >= hardMin -> hard; else standard
--- Keywords beat length (a short "refactor the auth" is still hard). Returns
--- { tier, model, reason } or nil for an empty task. Everything is config-overridable
--- (automodel.models / .cheapMax / .hardMin / .cheapWords / .hardWords) -- but the
--- ENABLE is per-session only, never a fleet default.
-M.AUTOMODEL_DEFAULTS = {
-  models   = { cheap = "haiku", standard = "sonnet", hard = "opus" },
-  cheapMax = 6,    -- <= this many words (and no keyword) -> cheap
-  hardMin  = 40,   -- >= this many words (and no keyword) -> hard
-  cheapWords = { "typo", "rename", "format", "lint", "bump", "comment", "docstring",
-                 "readme", "changelog", "whitespace", "spelling", "gitignore", "tweak" },
-  hardWords  = { "refactor", "architect", "design", "debug", "investigate", "root cause",
-                 "security", "audit", "migrate", "rewrite", "optimize", "concurren",
-                 "race condition", "deadlock", "algorithm", "regression", "complex" },
-}
-local function countWords(s)
-  local n = 0
-  for _ in tostring(s):gmatch("%S+") do n = n + 1 end
-  return n
-end
-local function anyKeyword(haystack, words)
-  if type(words) ~= "table" then return nil end
-  for _, word in ipairs(words) do
-    local w = tostring(word):lower()
-    if w ~= "" and haystack:find(w, 1, true) then return w end
-  end
-  return nil
-end
-function M.suggestModel(task, cfg)
-  task = tostring(task or "")
-  local trimmed = task:gsub("^%s+", ""):gsub("%s+$", "")
-  if trimmed == "" then return nil end
-  local D = M.AUTOMODEL_DEFAULTS
-  -- R1-33: merge the models override PER-TIER over the defaults, not wholesale. M.config
-  -- returns the user's node as-is, so overriding only one tier (e.g. { cheap = "x" })
-  -- would leave standard/hard nil and silently disable routing for them. Per-tier merge
-  -- keeps the un-overridden tiers working.
-  local mv = M.config(cfg, "automodel.models", nil)
-  local models = {
-    cheap    = (type(mv) == "table" and mv.cheap)    or D.models.cheap,
-    standard = (type(mv) == "table" and mv.standard) or D.models.standard,
-    hard     = (type(mv) == "table" and mv.hard)     or D.models.hard,
-  }
-  local cheapMax = tonumber(M.config(cfg, "automodel.cheapMax", D.cheapMax)) or D.cheapMax
-  local hardMin  = tonumber(M.config(cfg, "automodel.hardMin",  D.hardMin))  or D.hardMin
-  -- R2-28: enforce the low<high invariant. The tier test below checks `n <= cheapMax`
-  -- FIRST, so an inverted/overlapping config (cheapMax >= hardMin, via typo/swap)
-  -- would silently classify long tasks in [hardMin, cheapMax] as cheap and route them
-  -- to Haiku. Reject the bad pair back to the safe defaults rather than honor it.
-  if cheapMax >= hardMin then cheapMax, hardMin = D.cheapMax, D.hardMin end
-  local cheapW   = M.config(cfg, "automodel.cheapWords", D.cheapWords) or D.cheapWords
-  local hardW    = M.config(cfg, "automodel.hardWords",  D.hardWords)  or D.hardWords
-  local lc = trimmed:lower()
-  local tier, reason
-  local hk = anyKeyword(lc, hardW)
-  if hk then
-    tier, reason = "hard", "keyword: " .. hk
-  else
-    local ck = anyKeyword(lc, cheapW)
-    if ck then
-      tier, reason = "cheap", "keyword: " .. ck
-    else
-      local n = countWords(trimmed)
-      if n <= cheapMax then tier, reason = "cheap", "short task (" .. n .. " words)"
-      elseif n >= hardMin then tier, reason = "hard", "long task (" .. n .. " words)"
-      else tier, reason = "standard", "default (" .. n .. " words)" end
-    end
-  end
-  local model = models[tier]
-  if type(model) ~= "string" or model == "" then return nil end
-  return { tier = tier, model = model, reason = reason }
-end
-
 -- ---- Panel geometry (Step 1) ----------------------------------------------
 -- Minimum sane panel size; anything smaller is treated as garbage and ignored.
 M.PANEL_MIN_W = 200
@@ -1563,8 +1483,8 @@ end
 
 -- Stamp a session with its stack identity, in place. A session stacks with its repo
 -- ONLY when its launch folder IS a worktree top-level -- a nested folder that isn't its
--- own repo (Scratch-pad inside this repo) keeps its own card, as do A/B fork-to-compare
--- variants (under /.cc-ab/: folding them would hide the comparison) and remote tiles.
+-- own repo (Scratch-pad inside this repo) keeps its own card, as do remote tiles. (A/B
+-- fork-to-compare's /.cc-ab/ variants kept theirs too, until A/B was removed 2026-11-19.)
 -- Everything else stacks by projectKey, so two sessions in one folder still share a card.
 -- `cur` ({ ident, head }, optional) is the worktree the session is working in NOW when
 -- that differs from its launch folder -- a tab that EnterWorktree'd into
@@ -1582,7 +1502,6 @@ function M.applyStackIdentity(it, launchDir, ident, head, labels, cur)
     return it
   end
   local stacked = type(ident) == "table" and launchDir and ident.toplevel == launchDir
-                  and not tostring(launchDir):find("/.cc-ab/", 1, true)
   if not stacked then
     it.stackKey = it.projectKey or it.cwd or it.key
     it.stackName = own
@@ -2545,7 +2464,7 @@ end
 --   merge.gates = [ { match = { project = "<glob>" }, command = "make lint && make test",
 --                     timeoutSeconds = 900 } ]
 -- With no gate configured nothing runs and the flow is exactly as it was. Matching reuses the
--- policy-attachment pattern (M.globEq on project/group/key, first match wins).
+-- glob match (M.globEq on project/group/key, first match wins).
 M.MERGE_GATE_TIMEOUT = 900   -- seconds, when an entry doesn't say
 M.MERGE_GATE_TAIL_LINES = 15 -- of the gate's log that reach the review
 M.MERGE_GATE_TAIL_CHARS = 4000
@@ -10851,7 +10770,7 @@ end
 -- each finished turn's label (FX.stepTurnLabel -> it.turnLabel) feeds a streak per budget key: did
 -- nothing / only planned bump it and keep the budget; made progress / done reset both; Adam's own
 -- prompt (it.turnOrigin == "human", from M.promptOrigin) restarts it. From the second no-progress
--- turn in a row the next continue -- auto-continue's or a rule's -- waits M.backoffSeconds.
+-- turn in a row the next auto-continue waits M.backoffSeconds.
 M.AUTO_CONTINUE_BACKOFF = { startSeconds = 120, maxSeconds = 1800 }
 M.NO_PROGRESS_TURNS = { ["did nothing"] = true, ["only planned"] = true }
 M.PROGRESS_TURNS = { ["made progress"] = true, done = true }
@@ -10872,20 +10791,9 @@ function M.backoffSeconds(streak, startSeconds, maxSeconds)
   return math.min(wait, cap)
 end
 
--- A rule's continue (the L6 `continue` processor) is held here instead of typed on its edge, so
--- the same back-off covers it: stepAutoContinue hands it back as `result.rule` once the wait is
--- over. One per tile -- a second continue rule on the same edge doesn't stack another. Pure but
--- for `state`.
-function M.queueRuleContinue(state, item, ruleName, edgeKind, now)
-  if type(state) ~= "table" or type(item) ~= "table" or item.key == nil then return end
-  state.rule = state.rule or {}
-  if state.rule[item.key] then return end
-  state.rule[item.key] = { name = ruleName, edge = edgeKind, status = item.status, at = tonumber(now) or 0 }
-end
-
 -- Advance auto-continue bookkeeping for one tile per tick; return whether to fire "continue"
 -- now. Mutates `state` = { since = {key->ts}, attempts = {projectKey->count},
--- streak = {budgetKey->no-progress turns}, turnSeen = {key->true}, rule = {key->held rule continue} }:
+-- streak = {budgetKey->no-progress turns}, turnSeen = {key->true} }:
 --   * stamp `since[key]` on the first error sighting (the grace clock starts here);
 --   * a fire restarts that clock (since=now) so retries are spaced ~minSeconds apart rather
 --     than firing maxAttempts times on consecutive ticks while the tile is still "error";
@@ -10897,19 +10805,19 @@ end
 --     M.backoffSeconds instead of minSeconds. A done whose label is still coming
 --     (it.turnLabelPending) waits for it; one with no label at all resets the budget as before.
 --   item : { key, projectKey, cwd, status, error_reason, turnLabel, turnOrigin, turnLabelPending }
---   opts : { enabled, minSeconds, maxAttempts, now, statusKnown, backoffStart, backoffMax, rulesOn }
+--   opts : { enabled, minSeconds, maxAttempts, now, statusKnown, backoffStart, backoffMax }
 -- returns: { fire, elapsed, attempts, budgetKey, streak,
---            backoff = seconds a continue still waits on the back-off (nil when it isn't),
---            rule = { name, edge } when a held rule continue is due now }
+--            backoff = seconds a continue still waits on the back-off (nil when it isn't) }
+-- (2026-11-19: a held rule continue, `rule`, went with automation rules.)
 function M.stepAutoContinue(state, item, opts)
   state = state or {}; state.since = state.since or {}; state.attempts = state.attempts or {}
-  state.streak = state.streak or {}; state.turnSeen = state.turnSeen or {}; state.rule = state.rule or {}
+  state.streak = state.streak or {}; state.turnSeen = state.turnSeen or {}
   opts = opts or {}; item = item or {}
   local key = item.key
   local pk = M.budgetKey(item) or key  -- R2-21: per-window budget (see budgetKey)
   if not key then return { fire = false } end
   -- R3-23: a FAILED-read tick (statusKnown==false) can't say what the session is doing, so it
-  -- judges no turn and drops no held rule continue (see the grace-clock note below).
+  -- judges no turn (see the grace-clock note below).
   if opts.statusKnown ~= false then
     if item.status == "done" then
       if not state.turnSeen[key] and item.turnLabel ~= nil then
@@ -10927,21 +10835,9 @@ function M.stepAutoContinue(state, item, opts)
     else
       state.turnSeen[key] = nil
     end
-    local held = state.rule[key]
-    if held and (opts.rulesOn == false or held.status ~= item.status) then state.rule[key] = nil end
   end
   local wait = M.backoffSeconds(state.streak[pk], opts.backoffStart, opts.backoffMax)
   local out = { fire = false, budgetKey = pk, streak = state.streak[pk] }
-  local held = state.rule[key]
-  if held and not (item.status == "done" and item.turnLabelPending) then
-    local waited = (tonumber(opts.now) or 0) - (tonumber(held.at) or 0)
-    if waited >= wait then
-      state.rule[key] = nil
-      out.rule = { name = held.name, edge = held.edge }
-    else
-      out.backoff = wait - waited
-    end
-  end
   if item.status ~= "error" then
     -- R3-23: distinguish "left the error state" from "couldn't determine status this
     -- tick". The dashboard derives status=='error' from a fresh transcript-tail read;
@@ -11508,12 +11404,15 @@ end
 -- not index-merged. Mutates + returns cfg.
 M.SETTINGS_KEEP_SUBKEYS = {
   -- 2026-09-28: matchWindowSize has no input either; a Save flipped a hand-set false back on.
+  -- 2026-11-19: and provider -- the Default provider select went with the provider choice, so the
+  -- spawn.provider default is hand-kept now and a Save must not drop it.
   spawn = { "kittyBin", "kittySocket", "searchRoots", "searchDepth", "fdBin", "claudeBin",
-            "coldWindowWaitSeconds", "coldActivateSeconds", "matchWindowSize" },
-  -- 2026-09-28: the form rebuilds `policies` from approveRepeats/autopilot/patterns only, so every
-  -- Save and every Headless toggle deleted the bundles and attachments (edited in their own view).
+            "coldWindowWaitSeconds", "coldActivateSeconds", "matchWindowSize", "provider" },
+  -- 2026-09-28: the form rebuilds `policies` from approveRepeats/patterns only, so every Save and
+  -- every Headless toggle deleted the bundles and attachments (edited in their own view). Named
+  -- bundles and autopilot were removed 2026-11-19; a hand-kept block still rides through a Save.
   -- alwaysAsk (2026-09-28): the form sends it, but a Save from a form that doesn't must keep it.
-  policies = { "bundles", "attachments", "alwaysAsk" },
+  policies = { "bundles", "attachments", "autopilot", "alwaysAsk" },
   -- fence (2026-09-28): the form rebuilds `gate` from gate.tools alone; the worktree fence has no input.
   gate = { "fence" },
   escalation = { "hung" },
@@ -11545,7 +11444,6 @@ M.SETTINGS_KEEP_SUBKEYS = {
   -- 2026-10-03: and the evidence runs' block (minItems, cooldownHours, dailyUsd).
   coach = { "enabled", "day", "maxBudgetUsd", "timeoutSeconds", "evidence" },
   automation = { "dryRun" },
-  rules = { "dryRun" },
   respawn = { "dryRun" },
   summary = { "dryRun" },
   tabless = { "dryRun" },
@@ -11878,8 +11776,8 @@ function M.respawnSpec(item, cfg, opts)
     project = project,
     permissionMode = item.permission_mode,
     providerId = profile and profile.id or nil,
-    -- R1-24: a raw per-variant ANTHROPIC_MODEL (DR7 native A/B, no provider profile)
-    -- is recorded on the tile but matches no providers entry, so providerByModel
+    -- R1-24: a raw ANTHROPIC_MODEL (no provider profile; DR7's native A/B launched those until it
+    -- was removed 2026-11-19) is recorded on the tile but matches no providers entry, so providerByModel
     -- returns nil and the relaunch would otherwise run the account DEFAULT model.
     -- Carry the raw model so the relaunch faithfully reuses it. Only for a base-less
     -- (native Anthropic) session with NO matched profile -- a profile match (its
@@ -12868,7 +12766,6 @@ M.AUTOMATION_DRY = "dry run"   -- the `why` FX.automationAct returns when a dry 
 -- The Settings switches, in the order Settings shows them: the config block whose .dryRun holds it.
 M.DRY_RUN_FEATURES = {
   { feature = "autoContinue",  label = "Auto-continue" },
-  { feature = "rules",         label = "Automation rules" },
   { feature = "respawn",       label = "Auto-respawn" },
   { feature = "summary",       label = "Post-run self-summary" },
   { feature = "tabless",       label = "Ending tab-less leftovers" },
@@ -12878,7 +12775,6 @@ M.DRY_RUN_FEATURES = {
 -- Every kind of automatic action, the feature that switches it, and its name in the Trace.
 M.AUTOMATION_KINDS = {
   { kind = "continue",    feature = "autoContinue",  label = "Auto-continue" },
-  { kind = "rule",        feature = "rules",         label = "Rule" },
   { kind = "respawn",     feature = "respawn",       label = "Auto-respawn" },
   { kind = "summary",     feature = "summary",       label = "Self-summary" },
   { kind = "tabless_end", feature = "tabless",       label = "End tab-less leftover" },
@@ -12887,7 +12783,6 @@ M.AUTOMATION_KINDS = {
 }
 -- FX.typeWhenReady's senders -> their kind.
 M.AUTOMATION_TYPISTS = {
-  ["rule-nudge"] = "rule", ["rule-continue"] = "rule",
   ["auto-continue"] = "continue", summary = "summary", mailbox = "mailbox", ["rc-sweep"] = "rc",
 }
 local AUTOMATION_FEATURE_OF = {}
@@ -14167,452 +14062,6 @@ function M.recentSeed(state, activeDirs)
   return { dirs = out }
 end
 
--- ---- Saved task templates (roadmap #5c; L3 enriches) ------------------------
--- Operator data, stored OUTSIDE cc-config.json (a separate cc-templates.json,
--- like labels/recents) so the Settings overlay round-trip can never clobber it.
--- Back-compat record: { name, text }. L3 widens it (all but `name` optional):
---   { name, text?, description?, expected_output?, vars?, version?, versions?,
---     createdAt?, updatedAt? }
--- A STRUCTURED template composes its body from description (+ expected_output);
--- a LEGACY template keeps using `text` (the back-compat fallback). Body vars are
--- {{name}} (required) / {{name?}} (optional) placeholders, plus the built-ins
--- date/today/now/prev_output (auto-filled at render time). The validate ->
--- fail-safe load -> list family mirrors the L1 agent registry (~3877) so a bad
--- record is dropped (with a reason) instead of breaking the whole file.
-M.TEMPLATE_CAP = 50
-M.TEMPLATE_VERSION_CAP = 20
-
--- Built-in interpolation vars: auto-filled at render time, never prompted for.
-M.TEMPLATE_BUILTINS = { date = true, today = true, now = true, prev_output = true }
-function M.isBuiltinVar(name) return M.TEMPLATE_BUILTINS[tostring(name or "")] == true end
-
--- Known record fields. Unknown keys are FLAGGED by validateTemplate (a typo'd key
--- is a dead no-op otherwise) and drop the record at load -- same posture as agents.
-M.TEMPLATE_FIELDS = { name = true, text = true, description = true,
-  expected_output = true, vars = true, version = true, versions = true,
-  createdAt = true, updatedAt = true }
-
-local function tplTrim(s) return tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", "") end
-local function tplStr(x) return type(x) == "string" and x or nil end
-
-local function ttpl(state)
-  if type(state) == "table" and type(state.templates) == "table" then return state.templates end
-  return {}
-end
-
--- Normalize the optional vars schema into a list of {name, required, label?,
--- default?}. Accepts bare strings (name only, required) or objects; drops entries
--- without a usable name, dedupes by name (first wins).
-local function tplVarSchema(v)
-  local out, seen = {}, {}
-  if type(v) ~= "table" then return out end
-  for _, item in ipairs(v) do
-    local name, required, label, default
-    if type(item) == "string" then
-      name, required = tplTrim(item), true
-    elseif type(item) == "table" then
-      name = tplTrim(item.name)
-      required = item.required ~= false
-      label = (type(item.label) == "string" and item.label ~= "") and item.label or nil
-      default = (type(item.default) == "string") and item.default or nil
-    end
-    if name and name ~= "" and not seen[name] then
-      seen[name] = true
-      out[#out + 1] = { name = name, required = required, label = label, default = default }
-    end
-  end
-  return out
-end
-
--- Pre-flight validator (L3): returns { ok, errors[] } collecting ALL problems.
--- A valid record has a non-blank name and at least one of text/description.
-function M.validateTemplate(rec)
-  if type(rec) ~= "table" then return { ok = false, errors = { "not an object" } } end
-  local errs = {}
-  if tplTrim(rec.name) == "" then errs[#errs + 1] = "missing required field: name" end
-  for _, f in ipairs({ "text", "description", "expected_output" }) do
-    if rec[f] ~= nil and type(rec[f]) ~= "string" then errs[#errs + 1] = f .. " must be a string" end
-  end
-  if rec.vars ~= nil and type(rec.vars) ~= "table" then errs[#errs + 1] = "vars must be a list" end
-  if rec.versions ~= nil and type(rec.versions) ~= "table" then errs[#errs + 1] = "versions must be a list" end
-  if rec.version ~= nil and type(rec.version) ~= "number" then errs[#errs + 1] = "version must be a number" end
-  if tplTrim(rec.text) == "" and tplTrim(rec.description) == "" then
-    errs[#errs + 1] = "needs text or description"
-  end
-  for k in pairs(rec) do
-    if not M.TEMPLATE_FIELDS[k] then errs[#errs + 1] = "unknown field: " .. tostring(k) end
-  end
-  return { ok = #errs == 0, errors = errs }
-end
-
--- Normalize a record to the canonical shape (absent fields stay absent, so a
--- legacy {name, text} round-trips byte-identically).
-local function tplNorm(rec)
-  local versions
-  if type(rec.versions) == "table" then
-    versions = {}
-    for _, s in ipairs(rec.versions) do
-      if type(s) == "table" then
-        versions[#versions + 1] = {
-          version = tonumber(s.version), ts = tonumber(s.ts),
-          text = tplStr(s.text), description = tplStr(s.description),
-          expected_output = tplStr(s.expected_output),
-          vars = s.vars ~= nil and tplVarSchema(s.vars) or nil,
-        }
-      end
-    end
-  end
-  return {
-    name = tplTrim(rec.name),
-    text = tplStr(rec.text),
-    description = tplStr(rec.description),
-    expected_output = tplStr(rec.expected_output),
-    vars = rec.vars ~= nil and tplVarSchema(rec.vars) or nil,
-    version = tonumber(rec.version),
-    versions = versions,
-    createdAt = tonumber(rec.createdAt),
-    updatedAt = tonumber(rec.updatedAt),
-  }
-end
-
--- Fail-safe load (mirrors agentLoad): validate each record, keep the valid
--- (normalized), DROP only the bad, and RETURN the dropped names+reasons so the FX
--- glue can surface them once. Duplicates keep the first. Returns {valid, errors}.
-function M.templateLoad(state)
-  local valid, errors, seen = {}, {}, {}
-  for _, rec in ipairs(ttpl(state)) do
-    local v = M.validateTemplate(rec)
-    local nm = (type(rec) == "table") and tplTrim(rec.name) or ""
-    if not v.ok then
-      errors[#errors + 1] = { name = nm ~= "" and nm or "(unnamed)",
-                              reason = table.concat(v.errors, "; ") }
-    elseif seen[nm] then
-      errors[#errors + 1] = { name = nm, reason = "duplicate name (kept first)" }
-    else
-      seen[nm] = true; valid[#valid + 1] = tplNorm(rec)
-    end
-  end
-  return { valid = valid, errors = errors }
-end
-
--- Clean list (common path): all valid, normalized records.
-function M.templateList(state) return M.templateLoad(state).valid end
-
--- The renderable body for a record: STRUCTURED (description, then an "Expected
--- output:" block when set) once a description is present, else the legacy `text`.
--- Returns nil for a nil/contentless record.
-function M.composeTemplate(rec)
-  if type(rec) ~= "table" then return nil end
-  if tplTrim(rec.description) ~= "" then
-    local body = rec.description
-    if tplTrim(rec.expected_output) ~= "" then
-      body = body .. "\n\nExpected output:\n" .. rec.expected_output
-    end
-    return body
-  end
-  if type(rec.text) == "string" and rec.text ~= "" then return rec.text end
-  return nil
-end
-
--- The full normalized record for a name, or nil.
-function M.templateGetRecord(state, name)
-  for _, t in ipairs(M.templateList(state)) do
-    if t.name == name then return t end
-  end
-  return nil
-end
-
--- Renderable body for a named template, or nil. (Back-compat: legacy `text`.)
-function M.templateGet(state, name)
-  return M.composeTemplate(M.templateGetRecord(state, name))
-end
-
--- Structured upsert: validate, replace same-name IN PLACE / prepend, cap. Returns
--- newState, saved, errors. Pure (no clock; versioning/timestamps belong to
--- templatePushVersioned).
-function M.templatePushRecord(state, rec, cap)
-  cap = tonumber(cap) or M.TEMPLATE_CAP
-  local list = M.templateList(state)
-  rec = type(rec) == "table" and rec or {}
-  local v = M.validateTemplate(rec)
-  if not v.ok then return { templates = list }, false, v.errors end
-  local entry = tplNorm(rec)
-  local out, replaced = {}, false
-  for _, t in ipairs(list) do
-    if t.name == entry.name then out[#out + 1] = entry; replaced = true
-    else out[#out + 1] = t end
-  end
-  if not replaced then table.insert(out, 1, entry) end
-  while #out > cap do table.remove(out) end
-  return { templates = out }, true
-end
-
--- Back-compat save: trim name+text, reject blanks, replace in place / prepend,
--- cap. Delegates to templatePushRecord. Returns newState, saved.
-function M.templatePush(state, name, text, cap)
-  local st, saved = M.templatePushRecord(state, { name = tplTrim(name), text = tplTrim(text) }, cap)
-  return st, saved
-end
-
--- Delete by name (no-op copy on miss).
-function M.templateRemove(state, name)
-  local out = {}
-  for _, t in ipairs(M.templateList(state)) do
-    if t.name ~= name then out[#out + 1] = t end
-  end
-  return { templates = out }
-end
-
--- Rename a template, PRESERVING its full record incl. version history (so the
--- editor's rename can't drop it the way delete+re-add would). A same-newName
--- record is dropped (overwrite -- the caller confirms first). No-op if oldName
--- is missing or newName is blank. Returns newState, ok.
-function M.templateRename(state, oldName, newName)
-  local rec = M.templateGetRecord(state, oldName)
-  newName = tplTrim(newName)
-  if not rec or newName == "" or newName == oldName then return state, false end
-  local out = {}
-  for _, t in ipairs(M.templateList(state)) do
-    if t.name == oldName then
-      local c = {}; for k, v in pairs(t) do c[k] = v end
-      c.name = newName
-      out[#out + 1] = c
-    elseif t.name ~= newName then  -- overwrite any same-newName record
-      out[#out + 1] = t
-    end
-  end
-  return { templates = out }, true
-end
-
--- Content signature (what defines an "edit"): the COMPOSED body -- so a change to
--- a field composeTemplate shadows (e.g. `text` when a description is set, or
--- expected_output with no description) is correctly a no-op, since the rendered
--- result is unchanged -- plus the vars schema. Trimmed, so a whitespace-only edit
--- is a no-op too. Used to skip a redundant version bump.
-local function tplContentSig(rec)
-  local parts = { tplTrim(M.composeTemplate(rec) or "") }
-  for _, vv in ipairs(tplVarSchema(rec.vars)) do
-    parts[#parts + 1] = vv.name .. "\1" .. (vv.required and "1" or "0") ..
-      "\1" .. (vv.default or "") .. "\1" .. (vv.label or "")
-  end
-  return table.concat(parts, "\2")
-end
-
--- Versioned upsert (duplicate-on-edit): on a real content change to an EXISTING
--- template, snapshot the previous head into versions[] (capped at versionCap) and
--- bump `version`, instead of overwriting. A new template starts at version 1; an
--- unchanged push is a no-op (no version churn). Timestamps come from opts.now
--- (injected -> pure). opts = {cap, versionCap, now}. Returns newState, saved, errors.
-function M.templatePushVersioned(state, rec, opts)
-  opts = type(opts) == "table" and opts or {}
-  local now = tonumber(opts.now)
-  local vcap = tonumber(opts.versionCap) or M.TEMPLATE_VERSION_CAP
-  rec = type(rec) == "table" and rec or {}
-  local v = M.validateTemplate(rec)
-  if not v.ok then return { templates = M.templateList(state) }, false, v.errors end
-  local entry = tplNorm(rec)
-  local prev = M.templateGetRecord(state, entry.name)
-  if prev and tplContentSig(prev) == tplContentSig(entry) then
-    return { templates = M.templateList(state) }, true  -- unchanged: no churn
-  end
-  if prev then
-    local snap = { version = prev.version or 1, ts = prev.updatedAt or now,
-      text = prev.text, description = prev.description,
-      expected_output = prev.expected_output, vars = prev.vars }
-    local hist = { snap }
-    for _, s in ipairs(prev.versions or {}) do hist[#hist + 1] = s end
-    while #hist > vcap do table.remove(hist) end
-    entry.versions = hist
-    entry.version = (prev.version or 1) + 1
-    entry.createdAt = prev.createdAt or now
-    entry.updatedAt = now
-  else
-    entry.versions = {}
-    entry.version = 1
-    entry.createdAt = now
-    entry.updatedAt = now
-  end
-  return M.templatePushRecord(state, entry, tonumber(opts.cap) or M.TEMPLATE_CAP)
-end
-
--- Version history for the revert view: the current head first (current=true), then
--- prior snapshots, all newest-first. Empty list for an unknown template.
-function M.templateVersions(state, name)
-  local rec = M.templateGetRecord(state, name)
-  if not rec then return {} end
-  local out = { { version = rec.version or 1, ts = rec.updatedAt,
-    text = rec.text, description = rec.description,
-    expected_output = rec.expected_output, current = true } }
-  for _, s in ipairs(rec.versions or {}) do
-    out[#out + 1] = { version = s.version, ts = s.ts, text = s.text,
-      description = s.description, expected_output = s.expected_output, current = false }
-  end
-  return out
-end
-
--- Revert a template to a prior version: NON-DESTRUCTIVE -- snapshots the current
--- head and bumps version forward (via templatePushVersioned) with the chosen
--- version's content. Returns newState, ok. Unknown name/version -> no-op.
-function M.templateRevert(state, name, version, opts)
-  local rec = M.templateGetRecord(state, name)
-  if not rec then return state, false end
-  version = tonumber(version)
-  local target
-  if version == (rec.version or 1) then
-    target = rec
-  else
-    for _, s in ipairs(rec.versions or {}) do
-      if tonumber(s.version) == version then target = s; break end
-    end
-  end
-  if not target then return state, false end
-  local st, saved = M.templatePushVersioned(state,
-    { name = name, text = target.text, description = target.description,
-      expected_output = target.expected_output, vars = target.vars }, opts)
-  return st, saved == true
-end
-
--- Ordered, deduped list of USER-facing placeholders in `text`: {{name}} (required)
--- / {{name?}} (optional). Built-ins (date/today/now/prev_output) are excluded --
--- they auto-fill at render time. A name is required unless EVERY occurrence is
--- marked optional. Returns { {name, required}, ... }.
-function M.templateVars(text)
-  text = type(text) == "string" and text or ""
-  local order, req = {}, {}
-  for name, opt in text:gmatch("{{%s*([%w_%.%-]+)%s*(%??)%s*}}") do
-    if not M.isBuiltinVar(name) then
-      local isReq = (opt ~= "?")
-      if req[name] == nil then order[#order + 1] = name; req[name] = isReq
-      else req[name] = req[name] or isReq end
-    end
-  end
-  local out = {}
-  for _, name in ipairs(order) do out[#out + 1] = { name = name, required = req[name] } end
-  return out
-end
-
--- Interpolate {{name}} / {{name?}} placeholders + the built-ins. `vars` is a
--- name->value map; `opts` carries {now=<epoch>, prevOutput=<string>} for the
--- built-ins. Returns (rendered, missing[]): a missing REQUIRED var (no value at a
--- non-optional occurrence) REFUSES the render -> (nil, {names...}); an optional
--- placeholder blanks out; built-ins resolve from opts (an absent clock -> blank
--- date). With opts.keepMissing=true (the AUTONOMOUS feed path -- no human to
--- prompt), a missing required var is LEFT VERBATIM instead, and the render never
--- refuses: only built-ins + {{prev_output}} + supplied vars resolve, so a queued
--- task with no placeholders is returned unchanged. Pure (clock injected).
-function M.renderTemplate(text, vars, opts)
-  text = type(text) == "string" and text or ""
-  vars = type(vars) == "table" and vars or {}
-  opts = type(opts) == "table" and opts or {}
-  local now = tonumber(opts.now)
-  local keep = opts.keepMissing == true
-  local prevOut = type(opts.prevOutput) == "string" and opts.prevOutput or ""
-  local missing, seenMissing = {}, {}
-  local function dateFmt(fmt) return now and os.date(fmt, now) or "" end
-  local rendered = text:gsub("{{%s*([%w_%.%-]+)%s*(%??)%s*}}", function(name, opt)
-    if name == "date" or name == "today" then return dateFmt("%Y-%m-%d") end
-    if name == "now" then return dateFmt("%Y-%m-%d %H:%M") end
-    if name == "prev_output" then return prevOut end
-    local val = vars[name]
-    if val ~= nil then val = tostring(val) end
-    if val ~= nil and tplTrim(val) ~= "" then return val end
-    if opt == "?" then return "" end
-    if keep then return nil end  -- leave the placeholder verbatim; never refuse
-    if not seenMissing[name] then seenMissing[name] = true; missing[#missing + 1] = name end
-    return ""
-  end)
-  if #missing > 0 then return nil, missing end
-  return rendered, {}
-end
-
--- The effective var list for a record: the declared schema (in order, with its
--- required/label/default metadata) first, then any placeholders parsed from the
--- composed body that the schema didn't declare. Feeds the New-Session var grid.
-function M.effectiveVars(rec)
-  if type(rec) ~= "table" then return {} end
-  local out, seen = {}, {}
-  for _, d in ipairs(tplVarSchema(rec.vars)) do
-    if not seen[d.name] then
-      seen[d.name] = true
-      out[#out + 1] = { name = d.name, required = d.required, label = d.label, default = d.default }
-    end
-  end
-  for _, p in ipairs(M.templateVars(M.composeTemplate(rec) or "")) do
-    if not seen[p.name] then
-      seen[p.name] = true
-      out[#out + 1] = { name = p.name, required = p.required }
-    end
-  end
-  return out
-end
-
--- Fill missing/blank var values from the schema's defaults. Pure; new map.
-function M.fillDefaults(schema, vars)
-  local out = {}
-  if type(vars) == "table" then for k, vv in pairs(vars) do out[k] = vv end end
-  for _, d in ipairs(type(schema) == "table" and schema or {}) do
-    if type(d) == "table" and type(d.name) == "string" and d.default ~= nil then
-      local cur = out[d.name]
-      if cur == nil or tplTrim(cur) == "" then out[d.name] = d.default end
-    end
-  end
-  return out
-end
-
--- Parse a .prompt / .md prompt definition into a template record. Strips an
--- optional leading `---`...`---` frontmatter (reads `name`); the body after it is
--- the prompt text, which may carry {{vars}}. Name falls back to the file stem. No
--- YAML/Jinja -- just frontmatter + body, like parseSkillFrontmatter. Pure (runs on
--- text the FX layer reads); validate the result before storing.
-function M.parsePromptFile(text, stem)
-  text = tostring(text or "")
-  local name = tplTrim(stem)
-  local body = text
-  local fm, rest = text:match("^%s*%-%-%-%s*\n(.-)\n%s*%-%-%-%s*\n?(.*)$")
-  if fm then
-    body = rest
-    for line in (fm .. "\n"):gmatch("(.-)\n") do
-      local k, v = line:match("^%s*([%w_]+)%s*:%s*(.-)%s*$")
-      if k and k:lower() == "name" then
-        v = v:gsub('^"(.*)"$', "%1"):gsub("^'(.*)'$", "%1")
-        if tplTrim(v) ~= "" then name = tplTrim(v) end
-      end
-    end
-  end
-  return { name = name, text = tplTrim(body) }
-end
-
--- Import parsed prompt-definition files into the template store (versioned, so a
--- re-import snapshots the prior body). `files` = { {stem, text}, ... } the FX layer
--- read from the definitions dir. Returns newState, summary{imported, skipped,
--- names[], errors[]}. Pure (clock via opts.now).
-function M.promptImport(state, files, opts)
-  opts = type(opts) == "table" and opts or {}
-  local summary = { imported = 0, skipped = 0, names = {}, errors = {} }
-  local st = state
-  for _, f in ipairs(type(files) == "table" and files or {}) do
-    local rec = M.parsePromptFile(type(f) == "table" and f.text or "",
-                                  type(f) == "table" and f.stem or "")
-    local v = M.validateTemplate(rec)
-    if not v.ok then
-      summary.skipped = summary.skipped + 1
-      summary.errors[#summary.errors + 1] = {
-        name = rec.name ~= "" and rec.name or "(unnamed)",
-        reason = table.concat(v.errors, "; ") }
-    else
-      local nst, saved = M.templatePushVersioned(st, rec, opts)
-      st = nst
-      if saved then
-        summary.imported = summary.imported + 1
-        summary.names[#summary.names + 1] = rec.name
-      else
-        summary.skipped = summary.skipped + 1
-      end
-    end
-  end
-  return st, summary
-end
-
 -- ---- Spawn presets (roadmap #4a) --------------------------------------------
 -- "Save this setup" for the New Session modal: a named {folder, editor,
 -- permMode, provider} bundle, plus per-project last-used recall. Stored in a
@@ -14731,332 +14180,13 @@ function M.newProjectPath(parent, name)
 end
 
 -- ===========================================================================
--- L1 — Agent Profiles registry + "spawn from a saved agent"
+-- Launch-flag helpers: a persona block and the extra spawn flags
 -- ===========================================================================
--- A saved agent profile extends a spawn preset with a persona + capability
--- refs. Stored in cc-agents.json (operator data, same posture as cc-presets).
--- DECLARATIVE: Shepherd only emits launch flags/files; native Claude Code owns
--- the actual agent/skill/MCP execution. Profile shape (all but `name` optional):
---   { name, folder, provider, model, permMode, seedPrompt, role, goal, backstory,
---     skills[], mcpServers[], knowledge[], plugins[], policyBundle, requiredEnv[],
---     folderGlobs[], modelByMode, category, favorite, hidden, archived, deleted,
---     forkedFrom, lastSpawnedAt, versions[] }
--- MCP registry lives in cc-mcp.json: { servers = { {id, label, transport, command,
---   args[], url, allowedTools[], authTokenEnv, description}, ... } }.
-M.AGENT_CAP = 50
-M.MCP_CAP = 30
-
+-- 2026-11-19: saved agent profiles (cc-agents.json) and their MCP server registry (cc-mcp.json)
+-- were removed. What stays is used elsewhere: the trimmed-string helper (the skills enumerator),
+-- the persona block (the find-only audit preset) and spawnExtraFlags (spawnSpec, restart in place).
 local function agTrim(s) return tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", "") end
--- Normalize an optional array-of-strings field: drop non-strings/blanks, dedupe.
-local function agStrList(v)
-  local out, seen = {}, {}
-  if type(v) == "table" then
-    for _, x in ipairs(v) do
-      if type(x) == "string" then
-        local s = agTrim(x)
-        if s ~= "" and not seen[s] then seen[s] = true; out[#out + 1] = s end
-      end
-    end
-  end
-  return out
-end
-local function aglist(state)
-  if type(state) == "table" and type(state.agents) == "table" then return state.agents end
-  return {}
-end
-
--- Known top-level profile fields. Unknown keys are FLAGGED by validateAgent (a
--- typo'd key is a dead no-op otherwise) but don't block loading on their own.
-M.AGENT_FIELDS = { name = true, folder = true, provider = true, model = true,
-  permMode = true, seedPrompt = true, role = true, goal = true, backstory = true,
-  skills = true, mcpServers = true, knowledge = true, plugins = true,
-  policyBundle = true, requiredEnv = true, folderGlobs = true, modelByMode = true,
-  agentName = true, category = true, favorite = true, hidden = true, archived = true,
-  deleted = true, forkedFrom = true, lastSpawnedAt = true, versions = true }
-
--- Pre-flight validator (L1): returns { ok, errors[] } collecting ALL problems.
--- `refs` (optional) enables cross-reference checks: { providers=set, bundles=set,
--- skills=set, mcp=set } — pass nil/{} at load time (cross-refs are a spawn-time
--- concern, not a reason to drop a stored record).
-function M.validateAgent(rec, refs)
-  refs = refs or {}
-  if type(rec) ~= "table" then return { ok = false, errors = { "not an object" } } end
-  local errs = {}
-  if agTrim(rec.name) == "" then errs[#errs + 1] = "missing required field: name" end
-  if rec.folder ~= nil and not (type(rec.folder) == "string" and rec.folder:sub(1, 1) == "/") then
-    errs[#errs + 1] = "folder must be an absolute path"
-  end
-  for _, f in ipairs({ "skills", "mcpServers", "knowledge", "plugins", "requiredEnv",
-                       "folderGlobs", "versions" }) do
-    if rec[f] ~= nil and type(rec[f]) ~= "table" then errs[#errs + 1] = f .. " must be a list" end
-  end
-  for k in pairs(rec) do
-    if not M.AGENT_FIELDS[k] then errs[#errs + 1] = "unknown field: " .. tostring(k) end
-  end
-  if refs.providers and agTrim(rec.provider) ~= "" and not refs.providers[tostring(rec.provider)] then
-    errs[#errs + 1] = "provider not found: " .. tostring(rec.provider)
-  end
-  if refs.bundles and agTrim(rec.policyBundle) ~= "" and not refs.bundles[tostring(rec.policyBundle)] then
-    errs[#errs + 1] = "policy bundle not found: " .. tostring(rec.policyBundle)
-  end
-  if refs.mcp then
-    for _, id in ipairs(agStrList(rec.mcpServers)) do
-      if not refs.mcp[id] then errs[#errs + 1] = "MCP server not found: " .. id end
-    end
-  end
-  if refs.skills then
-    for _, s in ipairs(agStrList(rec.skills)) do
-      if not refs.skills[s] then errs[#errs + 1] = "skill not found: " .. s end
-    end
-  end
-  return { ok = #errs == 0, errors = errs }
-end
-
-local function agNorm(rec)
-  return {
-    name = agTrim(rec.name),
-    folder = (type(rec.folder) == "string" and rec.folder:sub(1, 1) == "/") and M.normDir(rec.folder) or nil,
-    provider = rec.provider, model = rec.model, permMode = rec.permMode,
-    seedPrompt = rec.seedPrompt, role = rec.role, goal = rec.goal, backstory = rec.backstory,
-    skills = agStrList(rec.skills), mcpServers = agStrList(rec.mcpServers),
-    knowledge = agStrList(rec.knowledge), plugins = agStrList(rec.plugins),
-    policyBundle = rec.policyBundle,
-    requiredEnv = type(rec.requiredEnv) == "table" and rec.requiredEnv or nil,
-    folderGlobs = agStrList(rec.folderGlobs),
-    modelByMode = type(rec.modelByMode) == "table" and rec.modelByMode or nil,
-    agentName = rec.agentName, category = rec.category, favorite = rec.favorite == true,
-    hidden = rec.hidden == true, archived = rec.archived == true, deleted = rec.deleted == true,
-    forkedFrom = rec.forkedFrom, lastSpawnedAt = rec.lastSpawnedAt,
-    versions = type(rec.versions) == "table" and rec.versions or nil,
-  }
-end
-
--- Load the registry with the fail-safe discipline (cline/AutoGPT enrichment):
--- validate EACH record, keep the valid (normalized), DROP only the bad, and
--- RETURN the dropped names+reasons so the FX glue can surface them once (instead
--- of presetList's silent drop). Duplicates keep the first. Returns {valid, errors}.
-function M.agentLoad(state)
-  local valid, errors, seen = {}, {}, {}
-  for _, rec in ipairs(aglist(state)) do
-    local v = M.validateAgent(rec, {})
-    local nm = (type(rec) == "table") and agTrim(rec.name) or ""
-    if not v.ok then
-      errors[#errors + 1] = { name = nm ~= "" and nm or "(unnamed)",
-                              reason = table.concat(v.errors, "; ") }
-    elseif seen[nm] then
-      errors[#errors + 1] = { name = nm, reason = "duplicate name (kept first)" }
-    else
-      seen[nm] = true; valid[#valid + 1] = agNorm(rec)
-    end
-  end
-  return { valid = valid, errors = errors }
-end
-
--- Clean list (common path) — all valid records incl. hidden/archived/deleted
--- (the UI filters those for the spawn picker; the registry view shows them).
-function M.agentList(state) return M.agentLoad(state).valid end
-
--- Strict save: reject an invalid profile (returns state-unchanged + false +
--- errors), else replace same-name in place / prepend, capped. Mirrors presetPush.
-function M.agentPush(state, profile, cap)
-  cap = tonumber(cap) or M.AGENT_CAP
-  local list = M.agentList(state)
-  profile = type(profile) == "table" and profile or {}
-  local v = M.validateAgent(profile, {})
-  if not v.ok then return { agents = list }, false, v.errors end
-  local entry = agNorm(profile)
-  local out, replaced = {}, false
-  for _, p in ipairs(list) do
-    if p.name == entry.name then out[#out + 1] = entry; replaced = true
-    else out[#out + 1] = p end
-  end
-  if not replaced then table.insert(out, 1, entry) end
-  while #out > cap do table.remove(out) end
-  return { agents = out }, true
-end
-
-function M.agentRemove(state, name)
-  local out = {}
-  for _, p in ipairs(M.agentList(state)) do
-    if p.name ~= name then out[#out + 1] = p end
-  end
-  return { agents = out }
-end
-
-function M.agentGet(state, name)
-  for _, p in ipairs(M.agentList(state)) do
-    if p.name == name then return p end
-  end
-  return nil
-end
-
--- Fork/duplicate with lineage: deep-copies the named profile to a unique
--- "<name> (copy)[ N]", stamps forkedFrom, clears favorite. No secret-strip needed
--- (only env-var NAMES are ever stored). Returns newState, ok.
-function M.agentFork(state, name)
-  local src = M.agentGet(state, name)
-  if not src then return state, false end
-  local copy = {}
-  for k, vv in pairs(src) do copy[k] = vv end
-  local base = src.name .. " (copy)"
-  local nm, n = base, 2
-  while M.agentGet(state, nm) do nm = base .. " " .. n; n = n + 1 end
-  copy.name = nm; copy.forkedFrom = src.name; copy.favorite = false
-  local st = M.agentPush(state, copy)
-  return st, true
-end
-
--- Bounded sort for the registry list. key in {name, favorite, lastUsed, updated}.
-function M.agentSort(list, key)
-  local out = {}
-  for _, p in ipairs(list or {}) do out[#out + 1] = p end
-  local k = tostring(key or "name")
-  local function lc(s) return tostring(s or ""):lower() end
-  table.sort(out, function(a, b)
-    if k == "favorite" then
-      local fa, fb = a.favorite and 1 or 0, b.favorite and 1 or 0
-      if fa ~= fb then return fa > fb end
-      return lc(a.name) < lc(b.name)
-    elseif k == "lastUsed" then
-      local la, lb = tonumber(a.lastSpawnedAt) or 0, tonumber(b.lastSpawnedAt) or 0
-      if la ~= lb then return la > lb end
-      return lc(a.name) < lc(b.name)
-    end
-    return lc(a.name) < lc(b.name)
-  end)
-  return out
-end
-
--- The management flags the registry UI toggles per agent.
-M.AGENT_FLAGS = { favorite = true, hidden = true, archived = true, deleted = true }
-
--- Toggle a boolean management flag (favorite/hidden/archived/deleted) on an agent,
--- preserving EVERY other field (operates on RAW state, like scheduleSetEnabled) so
--- a flag flip can't drop the profile's skills/mcp/knowledge/etc. Unknown flag or
--- missing name -> unchanged copy. Pure.
-function M.agentSetFlag(state, name, flag, value)
-  local out, target, fl = {}, agTrim(name), tostring(flag)
-  for _, p in ipairs(aglist(state)) do
-    if type(p) == "table" and agTrim(p.name) == target and M.AGENT_FLAGS[fl] then
-      local c = {}; for k, v in pairs(p) do c[k] = v end
-      c[fl] = value == true
-      out[#out + 1] = c
-    else
-      out[#out + 1] = p
-    end
-  end
-  return { agents = out }
-end
-
--- ---- MCP server registry (cc-mcp.json) -------------------------------------
-M.MCP_TRANSPORTS = { stdio = true, sse = true, http = true }
-local function mcplist(state)
-  if type(state) == "table" and type(state.servers) == "table" then return state.servers end
-  return {}
-end
-
-function M.validateMcp(rec)
-  if type(rec) ~= "table" then return { ok = false, errors = { "not an object" } } end
-  local errs = {}
-  if agTrim(rec.id) == "" then errs[#errs + 1] = "missing required field: id" end
-  local tr = agTrim(rec.transport):lower()
-  if not M.MCP_TRANSPORTS[tr] then
-    errs[#errs + 1] = "transport must be stdio|sse|http"
-  elseif tr == "stdio" then
-    if agTrim(rec.command) == "" then errs[#errs + 1] = "stdio transport needs a command" end
-  else
-    if agTrim(rec.url) == "" then errs[#errs + 1] = tr .. " transport needs a url" end
-  end
-  return { ok = #errs == 0, errors = errs }
-end
-
-local function mcNorm(rec)
-  return { id = agTrim(rec.id), label = rec.label, transport = agTrim(rec.transport):lower(),
-           command = rec.command, args = agStrList(rec.args), url = rec.url,
-           allowedTools = agStrList(rec.allowedTools), authTokenEnv = rec.authTokenEnv,
-           description = rec.description }
-end
-
-function M.mcpLoad(state)
-  local valid, errors, seen = {}, {}, {}
-  for _, rec in ipairs(mcplist(state)) do
-    local v = M.validateMcp(rec)
-    local id = (type(rec) == "table") and agTrim(rec.id) or ""
-    if not v.ok then
-      errors[#errors + 1] = { id = id ~= "" and id or "(no id)",
-                              reason = table.concat(v.errors, "; ") }
-    elseif seen[id] then
-      errors[#errors + 1] = { id = id, reason = "duplicate id (kept first)" }
-    else
-      seen[id] = true; valid[#valid + 1] = mcNorm(rec)
-    end
-  end
-  return { valid = valid, errors = errors }
-end
-
-function M.mcpList(state) return M.mcpLoad(state).valid end
-
-function M.mcpPush(state, rec, cap)
-  cap = tonumber(cap) or M.MCP_CAP
-  local list = M.mcpList(state)
-  rec = type(rec) == "table" and rec or {}
-  local v = M.validateMcp(rec)
-  if not v.ok then return { servers = list }, false, v.errors end
-  local entry = mcNorm(rec)
-  local out, replaced = {}, false
-  for _, s in ipairs(list) do
-    if s.id == entry.id then out[#out + 1] = entry; replaced = true
-    else out[#out + 1] = s end
-  end
-  if not replaced then table.insert(out, 1, entry) end
-  while #out > cap do table.remove(out) end
-  return { servers = out }, true
-end
-
-function M.mcpRemove(state, id)
-  local out = {}
-  for _, s in ipairs(M.mcpList(state)) do
-    if s.id ~= id then out[#out + 1] = s end
-  end
-  return { servers = out }
-end
-
-function M.mcpGet(state, id)
-  for _, s in ipairs(M.mcpList(state)) do
-    if s.id == id then return s end
-  end
-  return nil
-end
-
--- Build the claude `--mcp-config` object from resolved MCP records. stdio ->
--- {command,args,env?}; sse/http -> {type,url,headers?}. Secrets ride as ${VAR}
--- refs (Claude Code expands them at launch) — Shepherd never stores the value.
-function M.mcpConfig(servers)
-  local mcp = {}
-  for _, s in ipairs(servers or {}) do
-    local id = agTrim(s.id)
-    if id ~= "" then
-      local tr = agTrim(s.transport):lower()
-      -- R1-11: authTokenEnv names an env var expanded as ${...} into an MCP env key /
-      -- Bearer header. Constrain to a POSIX shell identifier (the only valid var-name
-      -- charset) so a crafted name can't inject; a non-matching name drops the token.
-      local atok = s.authTokenEnv and agTrim(s.authTokenEnv) or ""
-      local hasTok = atok:match("^[A-Za-z_][A-Za-z0-9_]*$") ~= nil
-      if tr == "stdio" then
-        local e = { command = s.command, args = agStrList(s.args) }
-        if hasTok then e.env = { [atok] = "${" .. atok .. "}" } end
-        mcp[id] = e
-      elseif tr == "sse" or tr == "http" then
-        local e = { type = tr, url = s.url }
-        if hasTok then e.headers = { Authorization = "Bearer ${" .. atok .. "}" } end
-        mcp[id] = e
-      end
-    end
-  end
-  return { mcpServers = mcp }
-end
-
--- Compose a profile's persona (role/goal/backstory) for --append-system-prompt.
+-- Compose a persona (role/goal/backstory) for --append-system-prompt (the audit preset's).
 -- nil when there are no persona fields (so the spawn stays byte-identical).
 function M.personaPrompt(profile)
   if type(profile) ~= "table" then return nil end
@@ -15069,25 +14199,8 @@ function M.personaPrompt(profile)
   return table.concat(parts, "\n")
 end
 
--- Which required env-var NAMES are unset/blank in the spawned shell env.
--- requiredEnv: list of { name, required? } or bare strings (required by default).
-function M.missingEnv(profile, shellEnv)
-  shellEnv = type(shellEnv) == "table" and shellEnv or {}
-  local missing = {}
-  local req = (type(profile) == "table") and profile.requiredEnv or nil
-  for _, e in ipairs(type(req) == "table" and req or {}) do
-    local name = (type(e) == "table") and agTrim(e.name) or agTrim(e)
-    local isReq = (type(e) ~= "table") or (e.required ~= false)
-    if name ~= "" and isReq then
-      local val = shellEnv[name]
-      if val == nil or tostring(val) == "" then missing[#missing + 1] = name end
-    end
-  end
-  return missing
-end
-
--- Profile-derived launch flags (L1), appended after the base spawnFlags inside
--- spawnSpec. All optional -> {} (a non-agent spawn is byte-identical). The shell
+-- Extra launch flags, appended after the base spawnFlags inside spawnSpec (the find-only audit
+-- preset, restart in place). All optional -> {} (a plain spawn is byte-identical). The shell
 -- sinks shArg-quote value-bearing flags; the kitty argv path keeps them raw.
 -- opts: { appendSystemPrompt, mcpConfigPath, strictMcp, agentName, addDirs[], pluginDirs[],
 --         allowedTools (list or string), settings (a settings file path or a JSON string) }
@@ -15153,7 +14266,7 @@ end
 --   * --permission-mode dontAsk + --allowedTools: anything not allowed is refused, not asked.
 --   * The one writable path is an Edit(//<findings>) rule: Claude Code applies Edit rules to every
 --     file-writing tool (Write included); a Write(path) rule is ignored.
---   * A PreToolUse hook answering "allow" (Shepherd's gate, autopilot, an Approve on the card)
+--   * A PreToolUse hook answering "allow" (Shepherd's gate, an Approve on the card)
 --     overrides dontAsk, but not a deny rule -- so --settings denies Bash, NotebookEdit,
 --     Playwright's run-anything tool, and every edit under the audited folder and its repo root.
 --   * Claude Code hands MCP servers its cwd as their root, so a Playwright tool given an explicit
@@ -15260,59 +14373,7 @@ function M.auditLaunchOpts(plan, settingsPath, mcpPath)
            allowedTools = plan.allowedTools, settings = settingsPath }
 end
 
--- Resolve a saved agent profile into a concrete spawn intent. ctx = { mcpState }
--- (the MCP registry to dereference mcpServers names against). Returns the pieces
--- the FX layer turns into spawnSpec opts + an mcp-config file:
---   { folder, permMode, providerId, seedPrompt, appendSystemPrompt, agentName,
---     addDirs[], pluginDirs[], mcpServers[](resolved), mcpConfig(table|nil),
---     policyBundle, errors[] }.
-function M.resolveAgent(profile, ctx)
-  ctx = ctx or {}
-  local res = { errors = {}, addDirs = {}, pluginDirs = {}, mcpServers = {} }
-  if type(profile) ~= "table" then res.errors[#res.errors + 1] = "no profile"; return res end
-  res.folder = profile.folder
-  res.permMode = profile.permMode
-  res.providerId = (agTrim(profile.provider) ~= "") and profile.provider or nil
-  res.seedPrompt = (agTrim(profile.seedPrompt) ~= "") and profile.seedPrompt or nil
-  res.appendSystemPrompt = M.personaPrompt(profile)
-  res.agentName = (agTrim(profile.agentName) ~= "") and profile.agentName or nil
-  res.policyBundle = profile.policyBundle
-  res.addDirs = agStrList(profile.knowledge)
-  res.pluginDirs = agStrList(profile.plugins)
-  local servers = {}
-  for _, id in ipairs(agStrList(profile.mcpServers)) do
-    local rec = M.mcpGet(ctx.mcpState, id)
-    if rec then servers[#servers + 1] = rec
-    else res.errors[#res.errors + 1] = "MCP server not found: " .. id end
-  end
-  res.mcpServers = servers
-  if #servers > 0 then res.mcpConfig = M.mcpConfig(servers) end
-  return res
-end
-
--- Profiles whose folderGlobs match `dir` (folder-scoped auto-attach). A profile
--- with no folderGlobs never auto-matches; a malformed glob fails open (skipped,
--- never errors). Glob syntax: `*` within a path segment, `**` across segments;
--- a leading `~` expands to $HOME.
-function M.profilesForFolder(profiles, dir)
-  local d = M.normDir(tostring(dir or ""))
-  local out = {}
-  if d == "" then return out end
-  local home = os.getenv("HOME") or "~"
-  for _, p in ipairs(profiles or {}) do
-    for _, g in ipairs(agStrList(p.folderGlobs)) do
-      local glob = g:gsub("^~", home)
-      -- escape Lua-pattern magic (NOT `*`), then map `**`->`.*`, `*`->`[^/]*`.
-      local pat = "^" .. glob:gsub("[%^%$%(%)%.%[%]%+%-%%]", "%%%1")
-                              :gsub("%*%*", "\1"):gsub("%*", "[^/]*"):gsub("\1", ".*") .. "$"
-      local ok, m = pcall(string.match, d, pat)
-      if ok and m then out[#out + 1] = p; break end
-    end
-  end
-  return out
-end
-
--- ---- Skills enumerator (L1 skills card) ------------------------------------
+-- ---- Skills enumerator (the 🔌 MCPs & Skills viewer) ------------------------
 -- Parse a SKILL.md / microagent .md leading YAML frontmatter into a card. Strips
 -- a `---`...`---` fence and reads name/display_title/description; falls back to
 -- the file stem for name. Pure (operates on file text the FX layer reads).
@@ -16071,30 +15132,8 @@ function M.worklistNormalize(t)
       end
     end
   end
-  -- playbooks (2026-10-03): each tab's picked markdown sources, rebuilt like todoMeta -- fresh
-  -- tables throughout (each tombstone set its own), entries without an id or absolute path dropped.
-  local playbooks = {}
-  if type(t.playbooks) == "table" then
-    for k, v in pairs(t.playbooks) do
-      if type(k) == "string" and k ~= "" and type(v) == "table" then
-        local list = {}
-        for _, e in ipairs(v) do
-          if type(e) == "table" and type(e.id) == "string" and e.id ~= ""
-             and type(e.path) == "string" and e.path:sub(1, 1) == "/" then
-            local seen = {}
-            if type(e.seen) == "table" then
-              for sk, sv in pairs(e.seen) do if type(sk) == "string" and sv then seen[sk] = true end end
-            end
-            list[#list + 1] = { id = e.id, path = e.path,
-              name = (type(e.name) == "string" and e.name ~= "") and e.name or (e.path:match("([^/]+)$") or e.path),
-              added = tonumber(e.added), removed = tonumber(e.removed), mtime = tonumber(e.mtime), seen = seen }
-          end
-        end
-        if #list > 0 then playbooks[k] = list end
-      end
-    end
-  end
-  return { generic = generic, byProject = byProject, todoMeta = todoMeta, playbooks = playbooks }
+  -- (2026-11-19: a leftover `playbooks` list -- playbooks were removed -- is dropped on read.)
+  return { generic = generic, byProject = byProject, todoMeta = todoMeta }
 end
 
 -- ---- TODO.md import (file -> worklist; Shepherd never writes the file) -------
@@ -16227,30 +15266,19 @@ end
 -- took its file with it, which isn't the line going away. Tombstones (meta.seen) cover
 -- every root, so an item the user cleared never resurrects from a worktree's copy.
 -- Returns { added, updated, missing }. Pure.
--- Playbooks (mining round 2 D3a, 2026-10-03): `kind` = { src = "playbook", file, name, seen }
--- runs the SAME merge for one picked markdown file: only items with that src AND srcFile match,
--- new items carry srcFile/srcName, and the tombstones are the playbook's own (kind.seen) -- so
--- todoMeta is never touched and the tab is never enrolled in TODO.md sync by a playbook.
-function M.worklistImportTodoRoots(state, key, sources, now, idgen, kind)
+-- (2026-11-19: the `kind` argument that ran this merge for a playbook went with playbooks.)
+function M.worklistImportTodoRoots(state, key, sources, now, idgen)
   local counts = { added = 0, updated = 0, missing = 0 }
   if type(state) ~= "table" then return counts end
   if type(key) ~= "string" or key == "" or key == "generic" or key == "master" then return counts end
   if type(state.byProject) ~= "table" then state.byProject = {} end
   if type(state.byProject[key]) ~= "table" then state.byProject[key] = {} end
-  local meta
-  if type(kind) == "table" then
-    if type(kind.seen) ~= "table" then kind.seen = {} end
-    meta = kind
-  else
-    if type(state.todoMeta) ~= "table" then state.todoMeta = {} end
-    if type(state.todoMeta[key]) ~= "table" then state.todoMeta[key] = {} end
-    meta = state.todoMeta[key]
-    if type(meta.seen) ~= "table" then meta.seen = {} end
-  end
-  local srcTag = (type(kind) == "table" and kind.src) or "todo"
-  local srcFile = type(kind) == "table" and kind.file or nil
+  if type(state.todoMeta) ~= "table" then state.todoMeta = {} end
+  if type(state.todoMeta[key]) ~= "table" then state.todoMeta[key] = {} end
+  local meta = state.todoMeta[key]
+  if type(meta.seen) ~= "table" then meta.seen = {} end
   local function ours(it)
-    return type(it) == "table" and it.src == srcTag and (srcFile == nil or it.srcFile == srcFile)
+    return type(it) == "table" and it.src == "todo"
   end
   local list = state.byProject[key]
   local union, order, read, mainRoot = {}, {}, {}, nil
@@ -16334,10 +15362,9 @@ function M.worklistImportTodoRoots(state, key, sources, now, idgen, kind)
     if not u.matched and not meta.seen[t] then
       local it = { id = tostring(idgen and idgen() or ""), text = t, done = false,
                    ts = tonumber(now) or 0, details = "", due = "", steps = {},
-                   src = srcTag, srcText = t, fileDone = u.done and true or nil, audit = u.audit,
+                   src = "todo", srcText = t, fileDone = u.done and true or nil, audit = u.audit,
                    liveRun = u.liveRun and true or nil, fileWait = u.wait and true or nil,
                    claimTs = (u.done or u.wait) and (tonumber(now) or 0) or nil }
-      if srcFile then it.srcFile, it.srcName = srcFile, kind.name end
       tag(it, u)
       list[#list + 1] = it
       u.matched = true
@@ -16348,107 +15375,13 @@ function M.worklistImportTodoRoots(state, key, sources, now, idgen, kind)
   return counts
 end
 
--- ---- Playbooks: a picked markdown checklist as a My List source (2026-10-03) ----
--- Mining round 2, unit D3a. state.playbooks[key] = { {id, path, name, added, removed?, seen}, ... }
--- in cc-worklist.json. The path comes from a native file chooser (FX), never from the webview; the
--- webview only ever names a source by its id. Removing one sets `removed` and keeps the entry, so
--- its tombstones survive and adding the same file again revives it without resurrecting what Adam
--- cleared; its items stay in the list to be verified either way.
-
--- Is this path a markdown file? (.md / .markdown, any case.) Pure.
-function M.isMarkdownPath(path)
-  if type(path) ~= "string" then return false end
-  local ext = path:lower():match("%.([%a]+)$")
-  return ext == "md" or ext == "markdown"
-end
-
--- Why a picked file can't be a playbook on this tab, or nil when it can. todoRoots = the roots whose
--- TODO.md already imports into the tab: that file is a source already. Pure.
-function M.worklistPlaybookRefusal(path, todoRoots)
-  if type(path) ~= "string" or path:sub(1, 1) ~= "/" then return "Pick a file on this Mac." end
-  if not M.isMarkdownPath(path) then return "A playbook is a markdown file (.md)." end
-  for _, r in ipairs(todoRoots or {}) do
-    if type(r) == "string" and r ~= "" and path == (r:gsub("/+$", "") .. "/TODO.md") then
-      return "That is this project's TODO.md, which already imports here."
-    end
-  end
-  return nil
-end
-
--- The tab's sources list (the stored entries, removed ones included); nil-safe.
-function M.worklistPlaybookEntries(state, key)
-  local all = type(state) == "table" and type(state.playbooks) == "table" and state.playbooks[key] or nil
-  return type(all) == "table" and all or {}
-end
-
--- The tab's ACTIVE playbooks (removed ones left out), in the order they were added. Pure.
-function M.worklistPlaybooks(state, key)
-  local out = {}
-  for _, e in ipairs(M.worklistPlaybookEntries(state, key)) do
-    if type(e) == "table" and not e.removed then out[#out + 1] = e end
-  end
-  return out
-end
-
--- Add a picked file as a source on a project tab. Returns the entry, or nil + a reason:
--- "tab" (not a project tab), "path" (not an absolute markdown path), "already" (listed).
--- The same file added again after a Remove revives its old entry (same id, tombstones kept). Pure.
-function M.worklistPlaybookAdd(state, key, path, now, idgen)
-  if type(state) ~= "table" then return nil, "tab" end
-  if type(key) ~= "string" or key == "" or key == "generic" or key == "master" or key == "archive" then
-    return nil, "tab"
-  end
-  if type(path) ~= "string" or path:sub(1, 1) ~= "/" or not M.isMarkdownPath(path) then return nil, "path" end
-  if type(state.playbooks) ~= "table" then state.playbooks = {} end
-  if type(state.playbooks[key]) ~= "table" then state.playbooks[key] = {} end
-  local list = state.playbooks[key]
-  for _, e in ipairs(list) do
-    if type(e) == "table" and e.path == path then
-      if not e.removed then return nil, "already" end
-      e.removed = nil
-      return e
-    end
-  end
-  local e = { id = tostring(idgen and idgen() or ""), path = path,
-              name = path:match("([^/]+)$") or path, added = tonumber(now) or 0, seen = {} }
-  list[#list + 1] = e
-  return e
-end
-
--- Remove playbook: stop importing it. Its items stay (to be verified), and so does its entry, marked
--- removed, holding the tombstones. Returns true when an active source was removed. Pure.
-function M.worklistPlaybookRemove(state, key, id, now)
-  for _, e in ipairs(M.worklistPlaybookEntries(state, key)) do
-    if type(e) == "table" and e.id == id and id ~= nil and not e.removed then
-      e.removed = tonumber(now) or 0
-      return true
-    end
-  end
-  return false
-end
-
--- Merge one playbook's parsed lines (core.parseTodoFile) into its tab, through the TODO.md merge
--- (core.worklistImportTodoRoots with the playbook as `kind`). parsed == nil means the file wasn't
--- read (moved, deleted): nothing changes, so an unreadable file never flags every line missing.
--- A removed source imports nothing. Returns { added, updated, missing }. Pure.
-function M.worklistImportPlaybook(state, key, id, parsed, now, idgen)
-  local entry
-  for _, e in ipairs(M.worklistPlaybookEntries(state, key)) do
-    if type(e) == "table" and e.id == id and not e.removed then entry = e end
-  end
-  if not entry or type(parsed) ~= "table" then return { added = 0, updated = 0, missing = 0 } end
-  if type(entry.seen) ~= "table" then entry.seen = {} end
-  return M.worklistImportTodoRoots(state, key, { { root = "", isMain = true, parsed = parsed } }, now, idgen,
-    { src = "playbook", file = entry.path, name = entry.name, seen = entry.seen })
-end
-
 -- ---- Run selected: the checklist runner in My List (2026-10-03) ----
 -- Mining round 2, unit D3b. Adam selects open items on a project's My List tab and clicks Run
 -- selected. They run ONE AT A TIME, each in a fresh session in the repo's main checkout (the
 -- sequential exception): the tab opens through the expect-tag machinery with the item's brief typed in.
 -- When is an item finished? Never on the session's word alone:
---   * a file line (TODO.md, or a playbook's): its box is ticked in that file (FX reads it with
---     core.parseTodoFile) and the turn's label isn't "did nothing";
+--   * a TODO.md line: its box is ticked in that file (FX reads it with core.parseTodoFile) and the
+--     turn's label isn't "did nothing";
 --   * any other item (Adam's own, an audit finding): its OWN session reported done through cc-run.sh.
 -- Then -- and only for a run Adam started -- M.worklistRunCheck sets HIS checkmark (done, doneTs,
 -- doneBy = "run:<id>"). That is the one narrow carve-out from the HARD RULE: importing still never
@@ -16490,10 +15423,8 @@ do
     if it.src == "todo" then
       if it.srcRoots ~= nil then return nil, "its line is only in a worktree's TODO.md -- it belongs to that branch" end
       return "file"
-    elseif it.src == "playbook" then
-      if type(it.srcFile) ~= "string" or it.srcFile:sub(1, 1) ~= "/" then return nil, "its playbook's file is unknown" end
-      return "file"
     end
+    -- (2026-11-19: playbooks were removed; a leftover playbook line reports done like Adam's own)
     return "report"
   end
   -- The open items on a tab that can't run, and why: { [id] = why }, or nil when every one can.
@@ -16535,7 +15466,7 @@ do
     for _, it in ipairs(type(list) == "table" and list or {}) do
       if type(it) == "table" and want[it.id] and #items < M.RUN.maxItems then
         local kind = M.runItemKind(it)
-        local file = (kind == "file") and ((it.src == "playbook") and it.srcFile or ctx.todoFile) or nil
+        local file = (kind == "file") and ctx.todoFile or nil
         if kind == "report" or (kind == "file" and type(file) == "string" and file:sub(1, 1) == "/") then
           local text = capChars(tostring(it.text or ""), 500)
           local src = (type(it.srcText) == "string" and it.srcText ~= "") and it.srcText or text
@@ -19555,19 +18486,9 @@ do
   end
 end
 
--- ===========================================================================
--- L2 — Named policy / guardrail bundles + attachments
--- ===========================================================================
--- Turn the flat fleet policy (policies.patterns.autoAllow/autoDeny + gate.tools)
--- into NAMED, attachable bundles. A session's EFFECTIVE policy is resolved here
--- (pure) with precedence: per-session override > attached bundle (matched by
--- project/group/provider/key) > fleet default. The dashboard resolves each session
--- and writes a per-session policy file the gate (cc-approve.sh) reads -- KEEP IN
--- SYNC (the shell wiring mirrors this resolution / consumes its output).
--- Config: policies.bundles = { [name] = { autoAllow[], autoDeny[], gateTools,
---   autopilot, lockedPermMode, toolLimits{tool=N}, disableGlobal } };
---   policies.attachments = [ { match = {project,group,providerId,key}, bundle } ].
-
+-- ---- Glob matching and the built-in always-ask list ---------------------------------------
+-- (These lived with named policy bundles, which were removed on 2026-11-19 with autopilot: the
+-- merge gates and agent globs match with M.globEq, Settings lists M.ALWAYS_ASK_BUILTINS.)
 -- Glob-equality for one match field: nil/"" pattern = wildcard; supports * and ?.
 function M.globEq(pat, val)
   if pat == nil or pat == "" then return true end
@@ -19576,98 +18497,6 @@ function M.globEq(pat, val)
                        :gsub("%*", ".*"):gsub("%?", ".") .. "$"
   local ok, m = pcall(string.match, val, rx)
   return ok and m ~= nil
-end
-
-function M.policyBundles(cfg)
-  local b = M.config(cfg, "policies.bundles", nil)
-  return type(b) == "table" and b or {}
-end
-function M.policyBundle(cfg, name)
-  if not name or tostring(name) == "" then return nil end
-  local b = M.policyBundles(cfg)[tostring(name)]
-  return type(b) == "table" and b or nil
-end
-
--- First attachment whose match matches the session -> its bundle name, or nil.
--- session = { project|projectKey, group, providerId, key }. An absent/"" match
--- field is a wildcard; all present fields must glob-match.
-function M.matchAttachment(cfg, session)
-  session = session or {}
-  local atts = M.config(cfg, "policies.attachments", nil)
-  if type(atts) ~= "table" then return nil end
-  for _, a in ipairs(atts) do
-    if type(a) == "table" and type(a.match) == "table" and a.bundle then
-      local m = a.match
-      if M.globEq(m.project, session.project or session.projectKey)
-         and M.globEq(m.group, session.group)
-         and M.globEq(m.providerId, session.providerId)
-         and M.globEq(m.key, session.key) then
-        return tostring(a.bundle)
-      end
-    end
-  end
-  return nil
-end
-
--- Resolve a session's EFFECTIVE policy. override (optional) = a bundle name, or
--- { bundle, disableGlobal }. Precedence: override > attachment > fleet. autoDeny
--- and autoAllow are the bundle's UNION the fleet's (unless disableGlobal drops the
--- fleet lists); gateTools reuses resolveGateTools precedence. Pure + deterministic.
-function M.resolvePolicy(cfg, session, override)
-  local ovName, ovDisable
-  if type(override) == "table" then ovName = override.bundle; ovDisable = override.disableGlobal
-  elseif type(override) == "string" and override ~= "" then ovName = override end
-  local bundleName = (ovName and tostring(ovName) ~= "" and ovName) or M.matchAttachment(cfg, session)
-  local bundle = M.policyBundle(cfg, bundleName) or {}
-  local source = (ovName and "session") or (bundleName and "attachment") or "fleet"
-  local disableGlobal = ovDisable
-  if disableGlobal == nil then disableGlobal = bundle.disableGlobal == true end
-  local function arr(v) return type(v) == "table" and v or {} end
-  local function union(a, b)
-    local out, seen = {}, {}
-    for _, x in ipairs(a) do local s = tostring(x); if not seen[s] then seen[s] = true; out[#out + 1] = x end end
-    for _, x in ipairs(b) do local s = tostring(x); if not seen[s] then seen[s] = true; out[#out + 1] = x end end
-    return out
-  end
-  local fleetAllow = disableGlobal and {} or arr(M.config(cfg, "policies.patterns.autoAllow", nil))
-  local fleetDeny  = disableGlobal and {} or arr(M.config(cfg, "policies.patterns.autoDeny", nil))
-  -- alwaysAsk (2026-09-28): the bundle's own extra always-ask commands. The gate adds them to
-  -- the built-ins and the fleet's policies.alwaysAsk.patterns (read from the config itself), so
-  -- a bundle can only add to the list -- disableGlobal never drops the fleet's. Left out when
-  -- empty: cc_always_ask_candidate reads the file's text for a non-empty list.
-  local aa = agStrList(arr(bundle.alwaysAsk))
-  return {
-    bundle = bundleName, source = source, disableGlobal = disableGlobal,
-    autoAllow = union(arr(bundle.autoAllow), fleetAllow),
-    autoDeny  = union(arr(bundle.autoDeny), fleetDeny),
-    gateTools = M.resolveGateTools(bundle.gateTools, nil, M.config(cfg, "gate.tools", nil)),
-    autopilot = bundle.autopilot == true,
-    lockedPermMode = bundle.lockedPermMode,
-    toolLimits = type(bundle.toolLimits) == "table" and bundle.toolLimits or nil,
-    alwaysAsk = #aa > 0 and aa or nil,
-  }
-end
-
--- The per-session file the gate reads (~/.claude/cc-policy/<key>) for a resolvePolicy result, or
--- nil when the fleet's own rules apply (no file: the gate reads the config). One shape for every
--- writer: the card's Policy dropdown, the tick, and a spawn from a profile (pendingPolicy). Pure.
-function M.policyFileFor(resolved)
-  if type(resolved) ~= "table" or resolved.source == "fleet" then return nil end
-  local t = { autoAllow = resolved.autoAllow, autoDeny = resolved.autoDeny, bundle = resolved.bundle }
-  if resolved.autopilot then t.autopilot = true end  -- bundle auto-approve (cc-approve reads .autopilot)
-  -- the bundle's extra always-ask commands: cc-approve.sh reads .alwaysAsk from this file only
-  if type(resolved.alwaysAsk) == "table" and #resolved.alwaysAsk > 0 then t.alwaysAsk = resolved.alwaysAsk end
-  return t
-end
-
--- 2026-10-15: what a spawn from an agent profile naming a bundle leaves for the session it starts
--- (FX.writePendingPolicy -> cc-notes/pending/<pendingNoteId>.policy.json, taken at SessionStart by
--- cc_take_pending_policy): the choice, as the card's dropdown saves it, and the rules resolved for it
--- -- a chosen bundle wins over attachments, so they need no session context. nil when no bundle. Pure.
-function M.pendingPolicy(cfg, name)
-  name = agTrim(name)
-  if name == "" then return nil end
-  return { bundle = name, policy = M.policyFileFor(M.resolvePolicy(cfg, {}, name)) }
 end
 
 -- The always-ask commands built into cc_always_ask_match (cc-lib.sh), in Adam's order: the
@@ -19690,708 +18519,17 @@ M.ALWAYS_ASK_BUILTINS = {
   { rule = "npm run deploy", example = "npm run deploy" },
 }
 
--- Starter bundles the UI offers (the operator copies one into policies.bundles).
--- read-only = gate everything that mutates; mind the escalation semantics (these
--- are autoDeny rules, NOT an allow-list).
-M.DEFAULT_POLICY_BUNDLES = {
-  ["read-only"]  = { autoDeny = { "Bash", "Write", "Edit", "MultiEdit", "NotebookEdit" } },
-  ["no-bash"]    = { autoDeny = { "Bash" } },
-  ["no-network"] = { autoDeny = { "Bash(curl*)", "Bash(wget*)", "WebFetch" } },
-}
-
--- Tools at/over their per-bundle usage ceiling, given a counts map {tool=n}.
--- Returns a list of { tool, used, limit }. (Soft/next-request limit; the ledger
--- supplies the counts -- Claude Code owns true enforcement.)
-function M.overToolLimit(toolLimits, counts)
-  local out = {}
-  if type(toolLimits) ~= "table" then return out end
-  counts = type(counts) == "table" and counts or {}
-  for tool, lim in pairs(toolLimits) do
-    local n = tonumber(counts[tool]) or 0
-    local L = tonumber(lim)
-    if L and n >= L then out[#out + 1] = { tool = tool, used = n, limit = L } end
-  end
-  return out
-end
-
--- ---- L2 bundle/attachment EDITOR — pure CRUD on the policies subtree --------
--- The L2 editor authors policies.bundles (a name->bundle MAP) + policies.attachments
--- (an ORDERED array; first match wins) inside cc-config.json. These pure ops take
--- the `policies` subtree and return a NEW one (policies.patterns rides through
--- untouched); the dashboard reads cfg, applies, writes cfg back. No clock, no hs.*.
-
-function M.validatePolicyBundle(rec)
-  if type(rec) ~= "table" then return { ok = false, errors = { "not an object" } } end
-  local errs = {}
-  for _, f in ipairs({ "autoAllow", "autoDeny", "alwaysAsk" }) do
-    if rec[f] ~= nil and type(rec[f]) ~= "table" then errs[#errs + 1] = f .. " must be a list" end
-  end
-  if rec.lockedPermMode ~= nil and tostring(rec.lockedPermMode) ~= "" then
-    local pm = tostring(rec.lockedPermMode)
-    if pm ~= "default" and pm ~= "acceptEdits" and pm ~= "plan" then
-      errs[#errs + 1] = "lockedPermMode must be default|acceptEdits|plan"
-    end
-  end
-  if rec.toolLimits ~= nil and type(rec.toolLimits) ~= "table" then errs[#errs + 1] = "toolLimits must be a map" end
-  return { ok = #errs == 0, errors = errs }
-end
-
--- Normalize a bundle to only its SET fields (so an empty field doesn't persist).
-function M.policyBundleNorm(rec)
-  rec = type(rec) == "table" and rec or {}
-  local out = {}
-  if type(rec.autoAllow) == "table" then local l = agStrList(rec.autoAllow); if #l > 0 then out.autoAllow = l end end
-  if type(rec.autoDeny) == "table" then local l = agStrList(rec.autoDeny); if #l > 0 then out.autoDeny = l end end
-  if type(rec.alwaysAsk) == "table" then local l = agStrList(rec.alwaysAsk); if #l > 0 then out.alwaysAsk = l end end
-  -- gateTools is a normalized STRING (space-separated, like gate.tools) -- parseToolList
-  -- dedupes + joins; drop it if it ends up empty.
-  if rec.gateTools ~= nil and tostring(rec.gateTools) ~= "" then
-    local g = M.parseToolList(rec.gateTools); if g ~= "" then out.gateTools = g end
-  end
-  if rec.autopilot == true then out.autopilot = true end
-  if rec.disableGlobal == true then out.disableGlobal = true end
-  if type(rec.lockedPermMode) == "string" and rec.lockedPermMode ~= "" then out.lockedPermMode = rec.lockedPermMode end
-  if type(rec.toolLimits) == "table" then
-    local tl = {}
-    for k, v in pairs(rec.toolLimits) do local n = tonumber(v); if n and agTrim(k) ~= "" then tl[agTrim(k)] = n end end
-    if next(tl) then out.toolLimits = tl end
-  end
-  return out
-end
-
-local function polCopy(policies)
-  local out = {}
-  if type(policies) == "table" then for k, v in pairs(policies) do out[k] = v end end
-  return out
-end
-
--- Upsert a named bundle. Returns newPolicies, ok, errors. Validated + normalized.
-function M.policySetBundle(policies, name, rec)
-  name = agTrim(name)
-  local v = M.validatePolicyBundle(rec)
-  if name == "" then v.ok = false; v.errors = v.errors or {}; v.errors[#v.errors + 1] = "bundle needs a name" end
-  if not v.ok then return policies, false, v.errors end
-  local out = polCopy(policies)
-  local bundles = {}
-  if type(out.bundles) == "table" then for k, vv in pairs(out.bundles) do bundles[k] = vv end end
-  bundles[name] = M.policyBundleNorm(rec)
-  out.bundles = bundles
-  return out, true
-end
-
-function M.policyRemoveBundle(policies, name)
-  name = agTrim(name)
-  local out = polCopy(policies)
-  local bundles = {}
-  if type(out.bundles) == "table" then for k, vv in pairs(out.bundles) do if k ~= name then bundles[k] = vv end end end
-  out.bundles = bundles
-  return out
-end
-
-function M.validateAttachment(att)
-  if type(att) ~= "table" then return { ok = false, errors = { "not an object" } } end
-  local errs = {}
-  if att.bundle == nil or agTrim(att.bundle) == "" then errs[#errs + 1] = "attachment needs a bundle" end
-  if att.match ~= nil and type(att.match) ~= "table" then errs[#errs + 1] = "match must be an object" end
-  return { ok = #errs == 0, errors = errs }
-end
-
--- Keep only the present match fields (blank = wildcard, so drop it).
-function M.attachmentNorm(att)
-  local m = type(att.match) == "table" and att.match or {}
-  local match = {}
-  for _, k in ipairs({ "project", "group", "providerId", "key" }) do
-    if type(m[k]) == "string" and agTrim(m[k]) ~= "" then match[k] = agTrim(m[k]) end
-  end
-  return { match = match, bundle = agTrim(att.bundle) }
-end
-
-local function attArr(policies)
-  local a = (type(policies) == "table" and type(policies.attachments) == "table") and policies.attachments or {}
-  local out = {}; for _, x in ipairs(a) do out[#out + 1] = x end; return out
-end
-
-function M.policyAddAttachment(policies, att)
-  local v = M.validateAttachment(att)
-  if not v.ok then return policies, false, v.errors end
-  local out = polCopy(policies)
-  local arr = attArr(policies); arr[#arr + 1] = M.attachmentNorm(att)
-  out.attachments = arr
-  return out, true
-end
-
-function M.policySetAttachment(policies, index, att)
-  local v = M.validateAttachment(att)
-  if not v.ok then return policies, false, v.errors end
-  local arr = attArr(policies); index = tonumber(index)
-  if not index or index < 1 or index > #arr then return policies, false, { "bad attachment index" } end
-  local out = polCopy(policies)
-  arr[index] = M.attachmentNorm(att); out.attachments = arr
-  return out, true
-end
-
-function M.policyRemoveAttachment(policies, index)
-  local out = polCopy(policies)
-  local arr, res = attArr(policies), {}
-  index = tonumber(index)
-  for i, x in ipairs(arr) do if i ~= index then res[#res + 1] = x end end
-  out.attachments = res
-  return out
-end
-
--- Reorder an attachment (dir -1 up / +1 down). First-match-wins, so order matters.
-function M.policyMoveAttachment(policies, index, dir)
-  local out = polCopy(policies)
-  local arr = attArr(policies)
-  index = tonumber(index); dir = tonumber(dir)
-  local j = (index and dir) and (index + dir) or nil
-  if index and j and index >= 1 and index <= #arr and j >= 1 and j <= #arr then
-    arr[index], arr[j] = arr[j], arr[index]
-  end
-  out.attachments = arr
-  return out
-end
-
--- ===========================================================================
--- L6 — Event-callback rule engine (cc-rules.json)
--- ===========================================================================
--- Declarative, OPT-IN rules that react to a session edge with a safe effect --
--- generalizing the hard-coded auto-respawn/continue/escalation onto the existing
--- level-triggered dispatcher (NOT a new event bus). A rule = { name, enabled,
--- trigger = { kind, match? }, processor = { kind, text?, label? }, once? }. The
--- dashboard detects the edge each tick and runs ALL matching rules' processors in
--- declared order (rulesForEdge returns every match, not first-wins);
--- `once` self-mutates a fired-marker through fx (like routePending). Off unless the
--- global rules.enabled is set AND the rule is enabled. Validate -> fail-safe load ->
--- list mirrors the L1 agent registry.
-M.RULE_CAP = 50
--- Triggers: the three status EDGES (done/error/approval) fire per-tile in the refresh
--- loop; hung/loop/starved fire at their OWN detection sites (the watchdog / loop
--- watchdog / routing starvation clock) -- the engine calls runRules there on the
--- rising edge. Processors map onto present SAFE effects: log->ledger, relabel->setLabel,
--- nudge/feed/continue->the delivery-gated keystroke/queue paths.
-M.RULE_TRIGGERS = { done = true, error = true, approval = true, hung = true, loop = true, starved = true }
-M.RULE_PROCESSORS = { log = true, relabel = true, nudge = true, feed = true, continue = true }
-M.RULE_FIELDS = { name = true, enabled = true, trigger = true, processor = true, once = true }
-
-local function rlist(state)
-  if type(state) == "table" and type(state.rules) == "table" then return state.rules end
-  return {}
-end
-
--- Validate a rule: returns { ok, errors[] }. name non-blank; trigger.kind in
--- RULE_TRIGGERS; processor.kind in RULE_PROCESSORS; processor-specific required
--- fields (nudge needs text; relabel needs label). Unknown fields flagged.
-function M.validateRule(rec)
-  if type(rec) ~= "table" then return { ok = false, errors = { "not an object" } } end
-  local errs = {}
-  if agTrim(rec.name) == "" then errs[#errs + 1] = "missing required field: name" end
-  local tr = rec.trigger
-  if type(tr) ~= "table" then errs[#errs + 1] = "trigger must be an object"
-  elseif not M.RULE_TRIGGERS[tostring(tr.kind)] then
-    errs[#errs + 1] = "unknown trigger kind: " .. tostring(tr.kind)
-  elseif tr.match ~= nil and type(tr.match) ~= "table" then
-    errs[#errs + 1] = "trigger.match must be an object"
-  end
-  local pr = rec.processor
-  if type(pr) ~= "table" then errs[#errs + 1] = "processor must be an object"
-  elseif not M.RULE_PROCESSORS[tostring(pr.kind)] then
-    errs[#errs + 1] = "unknown processor kind: " .. tostring(pr.kind)
-  else
-    if pr.kind == "nudge" and agTrim(pr.text) == "" then errs[#errs + 1] = "nudge processor needs text" end
-    if pr.kind == "feed" and agTrim(pr.text) == "" then errs[#errs + 1] = "feed processor needs text" end
-    if pr.kind == "relabel" and agTrim(pr.label) == "" then errs[#errs + 1] = "relabel processor needs label" end
-  end
-  for k in pairs(rec) do
-    if not M.RULE_FIELDS[k] then errs[#errs + 1] = "unknown field: " .. tostring(k) end
-  end
-  return { ok = #errs == 0, errors = errs }
-end
-
-local function ruleNorm(rec)
-  local tr = type(rec.trigger) == "table" and rec.trigger or {}
-  local pr = type(rec.processor) == "table" and rec.processor or {}
-  return {
-    name = agTrim(rec.name),
-    enabled = rec.enabled ~= false,  -- default ON (the global rules.enabled gates the engine)
-    trigger = { kind = tostring(tr.kind),
-                match = type(tr.match) == "table" and tr.match or nil },
-    processor = { kind = tostring(pr.kind), text = tplStr(pr.text), label = tplStr(pr.label) },
-    once = rec.once == true,
-  }
-end
-
--- Fail-safe load (mirrors agentLoad/templateLoad): validate each, keep valid
--- (normalized), drop bad with reasons, dedupe by name. Returns {valid, errors}.
-function M.ruleLoad(state)
-  local valid, errors, seen = {}, {}, {}
-  for _, rec in ipairs(rlist(state)) do
-    local v = M.validateRule(rec)
-    local nm = (type(rec) == "table") and agTrim(rec.name) or ""
-    if not v.ok then
-      errors[#errors + 1] = { name = nm ~= "" and nm or "(unnamed)", reason = table.concat(v.errors, "; ") }
-    elseif seen[nm] then
-      errors[#errors + 1] = { name = nm, reason = "duplicate name (kept first)" }
-    else
-      seen[nm] = true; valid[#valid + 1] = ruleNorm(rec)
-    end
-  end
-  return { valid = valid, errors = errors }
-end
-
-function M.ruleList(state) return M.ruleLoad(state).valid end
-
--- 2026-09-30: a rule's provider match read it.providerId, which no tile carried -- only the
--- policy resolver worked a session's provider out, into a local. Every tile gets it here, once a
--- tick and before the rules run: the profile its spawn-time model names (the status file's
--- $ANTHROPIC_MODEL, what a profile sets), else the one its live model does. nil = no profile.
-function M.stampProviders(list, cfg)
-  for _, it in ipairs(type(list) == "table" and list or {}) do
-    if type(it) == "table" then
-      local p = M.providerByModel(cfg, it.statusModel, it.base_url) or M.providerByModel(cfg, it.model, it.base_url)
-      it.providerId = p and p.id or nil
-    end
-  end
-  return list
-end
-
--- Does a rule's scope match this tile? match fields (project/group/sessionKey/
--- provider) are wildcard-globbed; an absent/"" field matches anything; nil match =
--- fleet-wide. Reuses the L2 globEq.
-local function ruleScopeMatch(match, item)
-  if type(match) ~= "table" then return true end
-  item = type(item) == "table" and item or {}
-  return M.globEq(match.project, item.projectKey) and M.globEq(match.group, item.group)
-     and M.globEq(match.sessionKey, item.key) and M.globEq(match.provider, item.providerId)
-end
-
--- Does this rule fire for an `edgeKind` event on `item`? enabled + trigger kind +
--- scope. Pure; the caller detects the edge (done/error/hung/approval/starved/loop)
--- and the `once`/fired bookkeeping.
-function M.ruleFires(rule, edgeKind, item)
-  if type(rule) ~= "table" or rule.enabled == false then return false end
-  if type(rule.trigger) ~= "table" or rule.trigger.kind ~= edgeKind then return false end
-  return ruleScopeMatch(rule.trigger.match, item)
-end
-
--- All rules (in order) that fire for an edge on a tile -- sequential execution is
--- the caller running them in order (one dispatcher per tick).
-function M.rulesForEdge(rules, edgeKind, item)
-  local out = {}
-  for _, r in ipairs(type(rules) == "table" and rules or {}) do
-    if M.ruleFires(r, edgeKind, item) then out[#out + 1] = r end
-  end
-  return out
-end
-
--- ---- L6 rule CRUD (editor) — mirrors the agent registry --------------------
-function M.ruleGet(state, name)
-  for _, r in ipairs(M.ruleList(state)) do if r.name == agTrim(name) then return r end end
-  return nil
-end
-
--- Upsert a rule: validate -> replace same-name in place / prepend -> cap. Returns
--- newState, ok, errors.
-function M.rulePush(state, rec, cap)
-  cap = tonumber(cap) or M.RULE_CAP
-  rec = type(rec) == "table" and rec or {}
-  local v = M.validateRule(rec)
-  if not v.ok then return { rules = M.ruleList(state) }, false, v.errors end
-  local entry = ruleNorm(rec)
-  local out, replaced = {}, false
-  for _, r in ipairs(M.ruleList(state)) do
-    if r.name == entry.name then out[#out + 1] = entry; replaced = true
-    else out[#out + 1] = r end
-  end
-  if not replaced then table.insert(out, 1, entry) end
-  while #out > cap do table.remove(out) end
-  return { rules = out }, true
-end
-
-function M.ruleRemove(state, name)
-  local out, target = {}, agTrim(name)
-  for _, r in ipairs(M.ruleList(state)) do if r.name ~= target then out[#out + 1] = r end end
-  return { rules = out }
-end
-
--- Toggle a rule's enabled flag on RAW state (preserve every field). Pure.
-function M.ruleSetEnabled(state, name, on)
-  local out, target = {}, agTrim(name)
-  for _, r in ipairs(rlist(state)) do
-    if type(r) == "table" and agTrim(r.name) == target then
-      local c = {}; for k, v in pairs(r) do c[k] = v end
-      c.enabled = on == true
-      out[#out + 1] = c
-    else
-      out[#out + 1] = r
-    end
-  end
-  return { rules = out }
-end
-
--- ===========================================================================
--- L7 — Scheduled spawns / routines (cc-schedules.json)
--- ===========================================================================
--- A routine fires the NORMAL spawn/nudge effects on a schedule (NOT a second
--- executor). A record = { name, kind = cron|oneShot, cron? (5-field), at? (epoch),
--- folder, editor?, provider?, model?, permMode?, prompt?|templateRef?|agentRef?,
--- enabled = false, tags?, lastFiredAt? }. All scheduling is PURE on an injected
--- `now` (local-tz via os.date, which is plain-lua safe). Off by default (enabled).
-M.SCHEDULE_CAP = 50
-M.SCHEDULE_FIELDS = { name = true, kind = true, cron = true, at = true, folder = true,
-  editor = true, provider = true, model = true, permMode = true, prompt = true,
-  templateRef = true, agentRef = true, enabled = true, tags = true, lastFiredAt = true,
-  action = true, digestHours = true, pushTopic = true, branch = true }
--- 2026-10-03 (E1b): `gate` runs the repo's merge gate on main in its main checkout (M.mainGreenRun);
--- `branch` (optional, default "main") is the branch that checkout must be on
-M.SCHEDULE_ACTIONS = { spawn = true, digest = true, gate = true }
-
-local function slist(state)
-  if type(state) == "table" and type(state.schedules) == "table" then return state.schedules end
-  return {}
-end
-
--- Match one cron field spec against an integer value within [lo,hi]. Supports
--- "*", "N", "A-B", "A,B,C", "*/S", "A-B/S" (and lists of those). Pure.
-local function cronFieldMatch(spec, value, lo, hi)
-  for rawPart in (tostring(spec or "*") .. ","):gmatch("([^,]*),") do
-    local part = rawPart:gsub("%s", "")
-    if part ~= "" then
-      local base, step = part, 1
-      local b, s = part:match("^(.-)/(%d+)$")
-      if b then base = b; step = tonumber(s) or 1 end
-      local rlo, rhi
-      if base == "*" then rlo, rhi = lo, hi
-      else
-        local a, z = base:match("^(%d+)%-(%d+)$")
-        if a then rlo, rhi = tonumber(a), tonumber(z)
-        else local n = tonumber(base); if n then rlo, rhi = n, n end end
-      end
-      if rlo and rhi and step >= 1 and value >= rlo and value <= rhi
-         and ((value - rlo) % step == 0) then return true end
-    end
-  end
-  return false
-end
-
--- Does a 5-field cron ("min hour dom month dow") match a time table t =
--- {min, hour, day, month, wday}? wday is os.date's 1=Sun..7=Sat. Cron dow is
--- 0-6 (0=Sun, also 7=Sun). Standard rule: when BOTH dom and dow are restricted,
--- match if EITHER matches; otherwise AND. Pure.
-function M.cronMatches(cron, t)
-  local f = {}
-  for w in tostring(cron or ""):gmatch("%S+") do f[#f + 1] = w end
-  if #f ~= 5 then return false end
-  if type(t) ~= "table" then return false end
-  local minOk = cronFieldMatch(f[1], t.min, 0, 59)
-  local hourOk = cronFieldMatch(f[2], t.hour, 0, 23)
-  local monOk = cronFieldMatch(f[4], t.month, 1, 12)
-  local domStar = (f[3]:gsub("%s", "") == "*")
-  local dowStar = (f[5]:gsub("%s", "") == "*")
-  local cronDow = (tonumber(t.wday) or 1) - 1  -- 0=Sun..6=Sat
-  local domOk = cronFieldMatch(f[3], t.day, 1, 31)
-  local dowOk = cronFieldMatch(f[5], cronDow, 0, 6)
-             or (cronDow == 0 and cronFieldMatch(f[5], 7, 0, 7))  -- 7 = Sunday alias
-  local dayOk
-  if domStar and dowStar then dayOk = true
-  elseif domStar then dayOk = dowOk
-  elseif dowStar then dayOk = domOk
-  else dayOk = domOk or dowOk end
-  return minOk and hourOk and monOk and dayOk
-end
-
--- The next epoch (>= the next whole minute after `now`) a cron matches, or nil if
--- none within ~366 days. Display-only (the board's "next run") -- the firing path
--- uses dueSchedules, which only checks the CURRENT minute. Pure (now injected).
-function M.nextRunAt(cron, now)
-  now = tonumber(now)
-  if not now then return nil end
-  local t = now - (now % 60) + 60  -- next whole minute
-  local horizon = t + 366 * 86400
-  while t <= horizon do
-    local dt = os.date("*t", t)
-    if M.cronMatches(cron, { min = dt.min, hour = dt.hour, day = dt.day, month = dt.month, wday = dt.wday }) then
-      return t
-    end
-    t = t + 60
-  end
-  return nil
-end
-
--- Schedules due to fire at `now`: enabled, and either a cron matching the CURRENT
--- minute (and not already fired this minute) or a oneShot whose `at` has passed and
--- never fired. Pure (now injected); the caller stamps lastFiredAt + deletes one-shots.
-function M.dueSchedules(list, now)
-  now = tonumber(now)
-  local out = {}
-  if not now or type(list) ~= "table" then return out end
-  local dt = os.date("*t", now)
-  local curMin = now - (now % 60)
-  for _, s in ipairs(list) do
-    if type(s) == "table" and s.enabled then
-      local last = tonumber(s.lastFiredAt) or 0
-      local due = false
-      if s.kind == "oneShot" then
-        local at = tonumber(s.at)
-        due = at ~= nil and at <= now and last == 0
-      elseif s.kind == "cron" then
-        due = (last < curMin) and M.cronMatches(s.cron,
-          { min = dt.min, hour = dt.hour, day = dt.day, month = dt.month, wday = dt.wday })
-      end
-      if due then out[#out + 1] = s end
-    end
-  end
-  return out
-end
-
--- Best-effort human rendering of a 5-field cron for the routine board. Pure.
-function M.humanizeCron(cron)
-  local f = {}
-  for w in tostring(cron or ""):gmatch("%S+") do f[#f + 1] = w end
-  if #f ~= 5 then return tostring(cron or "") end
-  local mi, h, dom, mon, dow = f[1], f[2], f[3], f[4], f[5]
-  local DOW = { ["0"] = "Sun", ["1"] = "Mon", ["2"] = "Tue", ["3"] = "Wed",
-                ["4"] = "Thu", ["5"] = "Fri", ["6"] = "Sat", ["7"] = "Sun" }
-  local function hhmm()
-    local hn, mn = tonumber(h), tonumber(mi)
-    return (hn and mn) and string.format("%02d:%02d", hn, mn) or nil
-  end
-  if mi == "*" and h == "*" and dom == "*" and mon == "*" and dow == "*" then return "every minute" end
-  local everyN = mi:match("^%*/(%d+)$")
-  if everyN and h == "*" and dom == "*" and mon == "*" and dow == "*" then return "every " .. everyN .. " min" end
-  if mi == "0" and h == "*" and dom == "*" and mon == "*" and dow == "*" then return "hourly" end
-  local t = hhmm()
-  if t and dom == "*" and mon == "*" and dow == "*" then return "daily at " .. t end
-  if t and dom == "*" and mon == "*" and DOW[dow] then return DOW[dow] .. " at " .. t end
-  if t and tonumber(dom) and mon == "*" and dow == "*" then return "monthly on day " .. dom .. " at " .. t end
-  return tostring(cron)
-end
-
--- Pre-flight validator (L7): returns { ok, errors[] }. name + folder required; cron
--- needs 5 fields; oneShot needs a numeric `at`; unknown fields flagged.
-function M.validateSchedule(rec)
-  if type(rec) ~= "table" then return { ok = false, errors = { "not an object" } } end
-  local errs = {}
-  if agTrim(rec.name) == "" then errs[#errs + 1] = "missing required field: name" end
-  local kind = tostring(rec.kind)
-  if kind ~= "cron" and kind ~= "oneShot" then errs[#errs + 1] = "kind must be cron or oneShot"
-  elseif kind == "cron" then
-    local n = 0; for _ in tostring(rec.cron or ""):gmatch("%S+") do n = n + 1 end
-    if n ~= 5 then errs[#errs + 1] = "cron must have 5 fields" end
-  elseif kind == "oneShot" and tonumber(rec.at) == nil then
-    errs[#errs + 1] = "oneShot needs an `at` epoch"
-  end
-  local action = rec.action == nil and "spawn" or tostring(rec.action)
-  if not M.SCHEDULE_ACTIONS[action] then errs[#errs + 1] = "action must be spawn, digest or gate" end
-  -- a `spawn` routine needs a folder, and so does a `gate` one (its repo); a `digest` routine doesn't
-  -- (it pushes a report)
-  if action ~= "digest" and agTrim(rec.folder) == "" then
-    errs[#errs + 1] = "missing required field: folder"
-  end
-  -- it reaches a shell line (M.mainGreenRun): a plain ref name only
-  if rec.branch ~= nil and not mergeRefOk(rec.branch) then
-    errs[#errs + 1] = "branch must be a plain branch name"
-  end
-  for k in pairs(rec) do
-    if not M.SCHEDULE_FIELDS[k] then errs[#errs + 1] = "unknown field: " .. tostring(k) end
-  end
-  return { ok = #errs == 0, errors = errs }
-end
-
-local function scheduleNorm(rec)
-  return {
-    name = agTrim(rec.name), kind = tostring(rec.kind),
-    cron = tplStr(rec.cron), at = tonumber(rec.at),
-    folder = tplStr(rec.folder), editor = tplStr(rec.editor), provider = tplStr(rec.provider),
-    model = tplStr(rec.model), permMode = tplStr(rec.permMode),
-    prompt = tplStr(rec.prompt), templateRef = tplStr(rec.templateRef), agentRef = tplStr(rec.agentRef),
-    enabled = rec.enabled == true,  -- default OFF (a routine must be explicitly enabled)
-    tags = type(rec.tags) == "table" and rec.tags or nil,
-    lastFiredAt = tonumber(rec.lastFiredAt),
-    -- default: spawn a session. 2026-10-03: a gate routine stays one -- read as a spawn, it would
-    -- start a session in the repo instead of checking main
-    action = (rec.action == "digest" or rec.action == "gate") and rec.action or "spawn",
-    digestHours = tonumber(rec.digestHours), pushTopic = tplStr(rec.pushTopic),
-    branch = tplStr(rec.branch),
-  }
-end
-
--- Fail-safe load (mirrors agentLoad/ruleLoad): keep valid (normalized), drop bad
--- with reasons, dedupe by name. Returns {valid, errors}.
-function M.scheduleLoad(state)
-  local valid, errors, seen = {}, {}, {}
-  for _, rec in ipairs(slist(state)) do
-    local v = M.validateSchedule(rec)
-    local nm = (type(rec) == "table") and agTrim(rec.name) or ""
-    if not v.ok then
-      errors[#errors + 1] = { name = nm ~= "" and nm or "(unnamed)", reason = table.concat(v.errors, "; ") }
-    elseif seen[nm] then
-      errors[#errors + 1] = { name = nm, reason = "duplicate name (kept first)" }
-    else
-      seen[nm] = true; valid[#valid + 1] = scheduleNorm(rec)
-    end
-  end
-  return { valid = valid, errors = errors }
-end
-
-function M.scheduleList(state) return M.scheduleLoad(state).valid end
-
--- After a routine fires: stamp its lastFiredAt (cron) or REMOVE it (a oneShot
--- self-deletes after a delivered fire). Operates on the RAW state (preserves any
--- extra fields) so the persisted file isn't lossily normalized. Returns newState. Pure.
-function M.scheduleMarkFired(state, name, now)
-  local out, target = {}, agTrim(name)
-  for _, s in ipairs(slist(state)) do
-    if type(s) == "table" and agTrim(s.name) == target then
-      if s.kind ~= "oneShot" then
-        local c = {}; for k, v in pairs(s) do c[k] = v end
-        c.lastFiredAt = tonumber(now)
-        out[#out + 1] = c
-      end  -- oneShot: dropped (self-delete)
-    else
-      out[#out + 1] = s
-    end
-  end
-  return { schedules = out }
-end
-
--- Backpressure: skip firing new routines when the live fleet is at/over `cap`
--- (cap <= 0 disables the limit). Pure.
-function M.scheduleBackpressure(liveTiles, cap)
-  cap = tonumber(cap) or 0
-  if cap <= 0 then return false end
-  return (tonumber(liveTiles) or 0) >= cap
-end
-
--- ---- L7 routine-board CRUD + cron builder (UI layer) -----------------------
--- These power the routine board (Add/run-now/pause/resume) so routines no longer
--- have to be hand-edited in cc-schedules.json. All pure; the firing engine above
--- is untouched.
-
--- Assemble a 5-field cron from the Add-Routine picker state. Pure; HAND-MIRRORED
--- in the panel JS (`cronBuildJS`) for the live preview -- keep them in sync.
--- spec = { freq = minute|hour|day|week|month, every?, minute?, hour?, weekdays?[], dom? }.
--- Always returns a valid 5-field cron (validateSchedule/cronMatches accept it).
-function M.cronBuild(spec)
-  spec = type(spec) == "table" and spec or {}
-  local function clamp(v, lo, hi, dflt)
-    v = tonumber(v); if not v then return dflt end
-    v = math.floor(v)
-    if v < lo then return lo elseif v > hi then return hi else return v end
-  end
-  local freq = tostring(spec.freq or "day")
-  local mi = clamp(spec.minute, 0, 59, 0)
-  local hr = clamp(spec.hour, 0, 23, 9)
-  if freq == "minute" then
-    local n = clamp(spec.every, 1, 59, 5)
-    return "*/" .. n .. " * * * *"
-  elseif freq == "hour" then
-    return mi .. " * * * *"
-  elseif freq == "week" then
-    local seen, days = {}, {}
-    for _, d in ipairs(type(spec.weekdays) == "table" and spec.weekdays or {}) do
-      local n = tonumber(d)
-      if n and n >= 0 and n <= 6 and not seen[n] then seen[n] = true; days[#days + 1] = n end
-    end
-    table.sort(days)
-    local dow = (#days > 0) and table.concat(days, ",") or "*"
-    return mi .. " " .. hr .. " * * " .. dow
-  elseif freq == "month" then
-    local dom = clamp(spec.dom, 1, 31, 1)
-    return mi .. " " .. hr .. " " .. dom .. " * *"
-  else  -- day (default)
-    return mi .. " " .. hr .. " * * *"
-  end
-end
-
--- Save a routine: validates (validateSchedule), replaces same-name in place,
--- else prepends; caps (oldest dropped). On a replace, carries forward the old
--- lastFiredAt unless the new record sets one -- so editing a routine via the
--- board can't resurface an already-fired oneShot or re-fire a cron this minute.
--- Returns newState, ok, errors. Mirrors agentPush.
-function M.schedulePush(state, rec, cap)
-  cap = tonumber(cap) or M.SCHEDULE_CAP
-  rec = type(rec) == "table" and rec or {}
-  local v = M.validateSchedule(rec)
-  if not v.ok then return { schedules = M.scheduleList(state) }, false, v.errors end
-  local entry = scheduleNorm(rec)
-  local out, replaced = {}, false
-  for _, s in ipairs(M.scheduleList(state)) do
-    if s.name == entry.name then
-      if entry.lastFiredAt == nil then entry.lastFiredAt = s.lastFiredAt end
-      out[#out + 1] = entry; replaced = true
-    else out[#out + 1] = s end
-  end
-  if not replaced then table.insert(out, 1, entry) end
-  while #out > cap do table.remove(out) end
-  return { schedules = out }, true
-end
-
--- Delete a routine by name (no-op copy on miss).
-function M.scheduleRemove(state, name)
-  local out, target = {}, agTrim(name)
-  for _, s in ipairs(M.scheduleList(state)) do
-    if s.name ~= target then out[#out + 1] = s end
-  end
-  return { schedules = out }
-end
-
--- Get one normalized routine by name, or nil.
-function M.scheduleGet(state, name)
-  local target = agTrim(name)
-  for _, s in ipairs(M.scheduleList(state)) do
-    if s.name == target then return s end
-  end
-  return nil
-end
-
--- Toggle a routine's enabled flag (board pause/resume). Operates on the RAW
--- state (like scheduleMarkFired) so every field -- incl. lastFiredAt + any
--- hand-added extras -- rides through untouched. Pure.
-function M.scheduleSetEnabled(state, name, on)
-  local out, target = {}, agTrim(name)
-  for _, s in ipairs(slist(state)) do
-    if type(s) == "table" and agTrim(s.name) == target then
-      local c = {}; for k, val in pairs(s) do c[k] = val end
-      c.enabled = on == true
-      out[#out + 1] = c
-    else
-      out[#out + 1] = s
-    end
-  end
-  return { schedules = out }
-end
-
--- Annotate the routine list for the board: each row gets a human-readable
--- schedule string (`human`) + the next epoch it'll fire (`nextRunAt`,
--- display-only -- the firing path uses dueSchedules). Pure (now injected).
-function M.scheduleBoard(list, now)
-  local out = {}
-  for _, s in ipairs(type(list) == "table" and list or {}) do
-    local row = {}
-    for k, v in pairs(s) do row[k] = v end
-    if s.kind == "oneShot" then
-      row.human = "once"
-      -- not yet fired -> its scheduled epoch; fired oneShots are gone from disk
-      row.nextRunAt = (s.lastFiredAt == nil) and tonumber(s.at) or nil
-    else
-      row.human = M.humanizeCron(s.cron)
-      row.nextRunAt = M.nextRunAt(s.cron, now)
-    end
-    out[#out + 1] = row
-  end
-  return out
-end
-
 -- ---- Main is still green (2026-10-03, mining round 2 unit E1b) ---------------------------------
--- A routine with action "gate" runs its repo's merge gate (M.mainGreenGateFor: the merge.gates entry
+-- A check runs its repo's merge gate (M.mainGreenGateFor: the merge.gates entry
 -- a session in the main checkout gets, or main's own .worktree-check) in the repo's MAIN checkout,
 -- through the one gate lane per repo, behind every run that judges a merge. M.mainGreenRun first
 -- checks that checkout is on its branch with no uncommitted tracked changes -- otherwise it isn't
 -- main's commit under test, and the run is couldn't-run -- then prints the sha it tests.
 -- M.mainGreenVerdict folds a finished run into the repo's record: red once (one banner, one coach-log
 -- entry), red again quietly, and the next green clears it; a run that couldn't run or timed out says
--- nothing about main and changes nothing. Opt-in: nothing runs until Adam adds a gate routine.
+-- nothing about main and changes nothing. Opt-in: a routine with action "gate" asked for a check
+-- until routines were removed (2026-11-19); nothing in the panel asks for one now (the dashboard's
+-- FX._mainGreen.due takes a request).
 M.MAIN_GREEN_SHA_TAG = "@@main-sha"
 M.MAIN_GREEN_LINES = 12          -- failing lines kept on the record (and the card's tooltip)
 M.MAIN_GREEN_TAIL_LINES = 8      -- ...or, when none matches a failure shape, the log's last lines
@@ -20481,17 +18619,8 @@ function M.mainRedView(rec)
   return { label = "⚠ " .. b .. " is red", tip = tip }
 end
 
--- A repo no gate routine checks any more keeps no flag: records whose routine folder is gone drop.
-function M.mainGreenPrune(state, routines)
-  local keep, out = {}, {}
-  for _, r in ipairs(type(routines) == "table" and routines or {}) do
-    if type(r) == "table" and r.action == "gate" and type(r.folder) == "string" then keep[r.folder] = true end
-  end
-  for cd, rec in pairs(type(state) == "table" and state or {}) do
-    if type(rec) == "table" and keep[rec.folder] then out[cd] = rec end
-  end
-  return out
-end
+-- (M.mainGreenPrune, which dropped a repo's flag once no gate routine checked it, went with routines
+-- on 2026-11-19.)
 
 -- ~/.claude/cc-main-green.json = { [commonDir] = record }; garbled or missing -> {}.
 function M.parseMainGreen(raw)
@@ -22544,127 +20673,6 @@ function M.backgroundActivity(files, now, opts)
   return { active = count > 0, count = count, newest = newest }
 end
 
--- ---- DR7: A/B fork-to-compare (explicitly-invoked, operator-aware) ----------
--- "Build both pathways, keep the best." An operator launches the SAME task into 2+
--- isolated variants (differing by model and/or prompt), each running in its OWN git
--- worktree (branch ab/<cohort>/<label>) so parallel builds never clobber each other;
--- they run as normal tiles; at the end a side-by-side compare (DR4 scores + optional
--- LLM-judge) helps keep the winner (losers' worktrees removed). This module is the PURE
--- planning + comparison; the worktree/spawn/close effects live in the dashboard.
-
--- Sanitize one path/branch component: lowercase, non-alnum -> "-", collapse, trim, cap.
-function M.abSlug(s)
-  s = tostring(s or ""):lower():gsub("[^%w]+", "-"):gsub("^%-+", ""):gsub("%-+$", "")
-  if #s > 24 then s = s:sub(1, 24):gsub("%-+$", "") end
-  return s
-end
-
--- Branch + worktree path for a variant (deterministic). Worktrees live under a
--- `.cc-ab/` dir BESIDE the repo (a sibling, never inside the tracked tree).
-function M.abBranchName(cohort, label) return "ab/" .. M.abSlug(cohort) .. "/" .. M.abSlug(label) end
-function M.abWorktreePath(repoRoot, cohort, label)
-  repoRoot = tostring(repoRoot or ""):gsub("/+$", "")
-  local parent = repoRoot:match("^(.*)/[^/]+$") or "."
-  local name = repoRoot:match("([^/]+)$") or "repo"
-  return parent .. "/.cc-ab/" .. name .. "-" .. M.abSlug(cohort) .. "-" .. M.abSlug(label)
-end
-
--- Validate + build a cohort plan from a spec:
---   { cohort, repoRoot, base="HEAD", task, variants = { {label, model?, provider?, prompt?} ... } }
--- Each variant's task = its own `prompt` (if set) else the base task; model/provider are
--- the per-variant overrides. Returns { ok=false, error } or
---   { ok=true, cohort, repoRoot, base, variants = [{ id,label,branch,worktreePath,task,model,provider }] }.
--- Requires >= 2 variants with non-empty, DISTINCT (post-slug) labels and a task to run.
-function M.abCohortPlan(spec)
-  if type(spec) ~= "table" then return { ok = false, error = "no spec" } end
-  local repoRoot = tostring(spec.repoRoot or "")
-  if repoRoot == "" then return { ok = false, error = "no repo root (A/B needs a git repo)" } end
-  local baseTask = tostring(spec.task or ""):gsub("^%s+", ""):gsub("%s+$", "")
-  local vs = spec.variants
-  if type(vs) ~= "table" or #vs < 2 then return { ok = false, error = "need at least 2 variants" } end
-  local cohort = M.abSlug(spec.cohort ~= nil and spec.cohort or "")
-  if cohort == "" then return { ok = false, error = "no cohort id" } end
-  local base = (spec.base ~= nil and tostring(spec.base) ~= "") and tostring(spec.base) or "HEAD"
-  local out, seen = {}, {}
-  for _, v in ipairs(vs) do
-    if type(v) ~= "table" then return { ok = false, error = "bad variant" } end
-    local label = tostring(v.label or ""):gsub("^%s+", ""):gsub("%s+$", "")
-    local id = M.abSlug(label)
-    if label == "" or id == "" then return { ok = false, error = "every variant needs a label" } end
-    if seen[id] then return { ok = false, error = "duplicate variant label: " .. label } end
-    seen[id] = true
-    local task = tostring(v.prompt or ""):gsub("^%s+", ""):gsub("%s+$", "")
-    if task == "" then task = baseTask end
-    if task == "" then return { ok = false, error = "variant " .. label .. " has no task (set a base task or a per-variant prompt)" } end
-    out[#out + 1] = {
-      id = id, label = label,
-      branch = M.abBranchName(cohort, label),
-      worktreePath = M.abWorktreePath(repoRoot, cohort, label),
-      task = task,
-      model = (v.model ~= nil and tostring(v.model) ~= "") and tostring(v.model) or nil,
-      provider = (v.provider ~= nil and tostring(v.provider) ~= "") and tostring(v.provider) or nil,
-    }
-  end
-  return { ok = true, cohort = cohort, repoRoot = repoRoot, base = base, variants = out }
-end
-
--- Quoted git commands the dashboard runs via /bin/sh (same posture as
--- folderScanShellCommand). `add` creates the variant's worktree+branch off `base`;
--- `remove --force` drops a loser's worktree (its branch is left for you to delete/merge).
-function M.gitWorktreeAddCmd(repoRoot, worktreePath, branch, base)
-  return M.GIT .. " -C " .. shArg(repoRoot) .. " worktree add -b " .. shArg(branch)
-    .. " " .. shArg(worktreePath) .. " " .. shArg(base or "HEAD")
-end
-function M.gitWorktreeRemoveCmd(repoRoot, worktreePath)
-  return M.GIT .. " -C " .. shArg(repoRoot) .. " worktree remove --force " .. shArg(worktreePath)
-end
--- Delete a variant's branch (after its worktree is removed, which frees the branch).
--- Used to leave NO trace on a rolled-back launch + to fully discard a loser on keep.
-function M.gitBranchDeleteCmd(repoRoot, branch)
-  return M.GIT .. " -C " .. shArg(repoRoot) .. " branch -D " .. shArg(branch)
-end
-
--- Side-by-side comparison: rank the variants by DR4 run score (scored variants first,
--- highest score wins; ties broken by original order). scoresByLabel[label] = {score, hadData}.
--- Returns { rows = [{label, model, score, hadData, rank}], winner = label|nil }.
-function M.abCompare(variants, scoresByLabel)
-  scoresByLabel = type(scoresByLabel) == "table" and scoresByLabel or {}
-  local rows = {}
-  for i, v in ipairs(variants or {}) do
-    local s = scoresByLabel[v.label] or {}
-    rows[#rows + 1] = { label = v.label, model = v.model, idx = i,
-                        score = tonumber(s.score), hadData = s.hadData == true }
-  end
-  table.sort(rows, function(a, b)
-    if a.hadData ~= b.hadData then return a.hadData end        -- scored before unscored
-    if a.hadData and a.score ~= b.score then return (a.score or 0) > (b.score or 0) end
-    return a.idx < b.idx                                       -- stable tie-break
-  end)
-  local winner
-  for i, r in ipairs(rows) do r.rank = i; r.idx = nil; if i == 1 and r.hadData then winner = r.label end end
-  return { rows = rows, winner = winner }
-end
-
--- LLM-judge rubric prompt (pasted into a session via the Improve/audit-review path) to
--- get a qualitative pick across the variants' outputs. Pure string assembly.
-function M.abJudgePrompt(taskText, entries)
-  local parts = {
-    "Compare these approaches to the SAME task and pick the single best one. Be decisive.",
-    "", "TASK:", tostring(taskText or "(no task recorded)"), "",
-  }
-  for _, e in ipairs(entries or {}) do
-    if type(e) == "table" then
-      parts[#parts + 1] = "## Variant " .. tostring(e.label or "?")
-        .. (e.model and (" (model: " .. tostring(e.model) .. ")") or "")
-      parts[#parts + 1] = tostring(e.output or "(no output captured)")
-      parts[#parts + 1] = ""
-    end
-  end
-  parts[#parts + 1] = "Judge on correctness, completeness, and code quality. Name the WINNING variant"
-    .. " by its label and justify the pick in 3-4 sentences; then list each loser's single biggest weakness."
-  return table.concat(parts, "\n")
-end
-
 -- ---- Appearance: design-token themes + per-token overrides -----------------
 -- The panel's whole stylesheet references CSS custom properties (--bg, --surface,
 -- --accent, --st-working, ...) declared in :root. Appearance lets the operator pick
@@ -23194,7 +21202,7 @@ function M.resolveAppearance(ap)
     density = (ap.density == "dense") and "dense" or "comfortable",
     font = (type(ap.font) == "string" and M.APPEARANCE_FONTS[ap.font]) and ap.font or M.APPEARANCE_DEFAULT_FONT,
     reduceMotion = ap.reduceMotion == true,
-    -- 2026-09-18: the Effort/Mode/Model/Gate/Policy/Auto-model row is opt-in. It stays
+    -- 2026-09-18: the Effort/Mode/Model/Gate row is opt-in (Policy and Auto-model went 2026-11-19). It stays
     -- available for anyone who wants it, but a panel shouldn't carry six controls its
     -- owner has never touched. Not a theme attribute -- importTheme deliberately drops it.
     modelControls = ap.modelControls == true,
@@ -23965,7 +21973,7 @@ M.FEATURES = {
     what = "Every running Claude Code session shows up as a live tile — working, waiting on you, done, or errored.",
     why = "An air-traffic screen for your AI helpers: see who needs attention at a glance instead of hunting through windows." },
   { key = "spawn", cat = "Core", title = "Spawn new sessions",
-    what = "Launch a session into any project — choose editor, permission mode, model/provider, and a first task, with saved presets.",
+    what = "Launch a session into any project — choose editor, permission mode, and a first task, with saved presets.",
     why = "Start work from the dashboard instead of wiring up each terminal by hand." },
   { key = "search", cat = "Core", title = "Find in fleet",
     what = "Search across every session's recent activity to locate the one you mean.",
@@ -23985,7 +21993,7 @@ M.FEATURES = {
     what = "When a session wants a risky tool it pauses, and you approve or deny right from the panel; unanswered, it safely falls back.",
     why = "You stay in control without editor windows popping up — and it never silently auto-runs." },
   { key = "alwaysask", cat = "Control", new = true, title = "Always-ask commands",
-    what = "git push, rm -rf, history rewrites (reset --hard, clean -f, branch -D, worktree remove --force, checkout -- .), any publish, gh release create, gh pr merge and a Cloudflare production deploy (wrangler deploy, through npx or pnpm dlx too, and npm run deploy) wait for your click on the card, even with the gate off, and no autopilot, auto-allow, repeat approval or bundle can pass them. With Shepherd closed, Claude Code's own prompt asks instead. Add your own in Settings.",
+    what = "git push, rm -rf, history rewrites (reset --hard, clean -f, branch -D, worktree remove --force, checkout -- .), any publish, gh release create, gh pr merge and a Cloudflare production deploy (wrangler deploy, through npx or pnpm dlx too, and npm run deploy) wait for your click on the card, even with the gate off, and no auto-allow or repeat approval can pass them. With Shepherd closed, Claude Code's own prompt asks instead. Add your own in Settings.",
     why = "The commands you can't take back never run on autopilot -- even inside cd x && ..., sh -c or sudo." },
   { key = "fence", cat = "Control", new = true, title = "Worktree fence",
     what = "A session can't edit files in another worktree of its own repo, or run git that changes one (git -C <other> commit, cd <other> && git add, --work-tree, GIT_DIR=...). Read-only git (status, log, diff) still works, and a session in the main checkout may change main. Its own approved merge into main is the one exception.",
@@ -24021,7 +22029,7 @@ M.FEATURES = {
     what = "When a merge's test gate goes red, Shepherd runs the same gate on a scratch worktree at the merge-base (once per merge-base, behind any gate that judges a merge), and the review splits the failing lines: already failing on main, or new in this branch. It's information only: a red gate stays red, and a run on main that couldn't finish counts on neither side.",
     why = "A unit cut from a red main no longer takes the blame for main's failures, and a real regression isn't waved off as old." },
   { key = "maingreen", cat = "Control", new = true, title = "Main-green check",
-    what = "A routine with the action \"Check main is green\" runs a repo's merge gate in its main checkout at the time you set, in the repo's gate lane behind any merge. When main goes red you get one banner, the repo's card shows ⚠ main is red with the failing lines in its tooltip, and the coach's log notes it; the next green run clears the flag. A run that couldn't run (uncommitted changes, another branch checked out, a busy suite) or timed out never counts as red.",
+    what = "A check runs a repo's merge gate in its main checkout, in the repo's gate lane behind any merge. (A routine with the action \"Check main is green\" started one at the time you set; routines were removed on 2026-11-19, so nothing in the panel starts one now.) When main goes red you get one banner, the repo's card shows ⚠ main is red with the failing lines in its tooltip, and the coach's log notes it; the next green run clears the flag. A run that couldn't run (uncommitted changes, another branch checked out, a busy suite) or timed out never counts as red.",
     why = "A main that broke between merges is caught on your schedule, not by the next unit's red gate." },
   { key = "reqs", cat = "Control", new = true, title = "Requirement ids and merge receipts",
     what = "Every merge review carries a receipt: the source (the batch, the REQ ids the request names, or the session's first prompt), the requester's words, the tests it changed by layer, the gate, red-first and checker evidence, and the known issues from cc-merge.sh request --known-issues. The receipt is display only.",
@@ -24073,11 +22081,8 @@ M.FEATURES = {
   { key = "liverun", cat = "Control", new = true, title = "Needs a live run",
     what = "A TODO.md line written `- [~] text`, or carrying `(needs live run)` / `(live check)`, is one only a live run can check. My List marks it with a ▶ live run chip, and a `[~]` line waits in the To verify lane, since the work is in and only your live run is left. A `[~]` line is never done; a marked `[x]` keeps its ✓ auto badge.",
     why = "The checks that need you to deploy and look don't hide among the ones a test already proved." },
-  { key = "playbooks", cat = "Control", new = true, title = "Playbooks in My List",
-    what = "📘 Add a playbook… on a project's My List tab picks any markdown checklist on this Mac. Its `- [ ]` lines import like TODO.md's, grouped under the file's name, and its ✓ auto and ▶ live run badges follow the file as it changes. Remove playbook stops the import and keeps its items to be verified.",
-    why = "A release or deploy checklist you keep outside the repo sits in the same list you verify everything else in." },
   { key = "runner", cat = "Control", new = true, title = "Run selected",
-    what = "▶ Run… on a project's My List tab: pick open items (TODO.md lines, playbook lines, your own) and Run selected works through them one at a time, each in a fresh session in the repo's main checkout, its brief typed into a new tab for you to send. A file line counts once its box is ticked and the turn did something; your own item once its session reports done with cc-run.sh. Then the item gets your checkmark, shown as ✓ by run (uncheck it as usual). Three in a row that finish nothing stop the run; a live-run item or a blocked report pauses it.",
+    what = "▶ Run… on a project's My List tab: pick open items (TODO.md lines, your own) and Run selected works through them one at a time, each in a fresh session in the repo's main checkout, its brief typed into a new tab for you to send. A file line counts once its box is ticked and the turn did something; your own item once its session reports done with cc-run.sh. Then the item gets your checkmark, shown as ✓ by run (uncheck it as usual). Three in a row that finish nothing stop the run; a live-run item or a blocked report pauses it.",
     why = "A checklist of small jobs gets worked through while you verify, instead of you starting each session by hand." },
   { key = "stories", cat = "Control", new = true, title = "User stories",
     what = "When a project has spec/product/user-stories.md, a gated tab shows its stories by capability area — add, edit, and save them in place.",
@@ -24100,23 +22105,11 @@ M.FEATURES = {
     what = "Shepherd can leave a session a message instead of typing it. The message waits in ~/.claude/cc-inbox and arrives when the session's current turn ends -- it carries on with it -- or at its next start. An idle session in a kitty window or a VS Code window of its own gets it typed, as one line, once it's ready; in a VS Code window shared with other Claude tabs nothing is typed and the card says the message is waiting. Diagnostics counts what's waiting.",
     why = "Automation can reach a session in a shared window, or mid-turn, without keystrokes landing in the wrong tab." },
   { key = "trace", cat = "Automate", new = true, title = "Automation dry run & trace",
-    what = "Every automatic action -- auto-continue, rules, respawn, the self-summary, ending a tab-less leftover, a mailbox message, the /rc sweep -- is recorded as acted, refused (with why) or, in a dry run, would. Settings turns dry run on for all automation or one feature at a time; ☰ → Automation trace (or ⚡ Trace in the detail panel for one session) lists the decisions newest first, repeats collapsed to ×N.",
+    what = "Every automatic action -- auto-continue, respawn, the self-summary, ending a tab-less leftover, a mailbox message, the /rc sweep -- is recorded as acted, refused (with why) or, in a dry run, would. Settings turns dry run on for all automation or one feature at a time; ☰ → Automation trace (or ⚡ Trace in the detail panel for one session) lists the decisions newest first, repeats collapsed to ×N.",
     why = "See what automation would do before you let it, and what it did while you were away." },
   { key = "compact", cat = "Automate", new = true, title = "Auto-compact with notes",
     what = "Claude Code compacts each session at 85% of its window (changeable in Settings; Shepherd sets CLAUDE_AUTOCOMPACT_PCT_OVERRIDE in ~/.claude/settings.json). At the first turn end a few points before that, the session is asked once to write its working notes to ~/.claude/cc-notes; the summary is told they come back, and the session gets them back whole right after it compacts. A 📝 on the card means it has notes; the detail panel says when they're next due. Diagnostics warns if the installed claude stops reading the override.",
     why = "A long session keeps its plan, decisions and next steps through a compaction instead of losing what the summary leaves out." },
-  { key = "policies", cat = "Automate", title = "Policy bundles & autopilot",
-    what = "Reusable auto-allow/deny rules per session or fleet, plus a timed autopilot that approves everything for a while.",
-    why = "Pre-decide the routine calls so you only ever see the ones that matter." },
-  { key = "automodel", cat = "Automate", title = "Model auto-routing",
-    what = "Automatically pick a cheap, standard, or strong model based on how hard the task looks.",
-    why = "Spend the expensive model only where the work actually needs it." },
-  { key = "rules", cat = "Automate", title = "Automation rules",
-    what = "Run a chosen action when an event fires — e.g. on error, on done, on a starved queue.",
-    why = "Encode your own reflexes so the fleet reacts without you." },
-  { key = "routines", cat = "Automate", title = "Routines",
-    what = "Scheduled actions that fire on a cron-like timetable.",
-    why = "Standups, sweeps, or kickoffs happen on their own." },
   { key = "coach", cat = "Automate", new = true, title = "Coach",
     what = "Weekly (coach.enabled, catching up after sleep), once enough new evidence has come in since its last run (coach.evidence: a 24h cooldown and a daily cap across repos), or from a session's 🧭 Coach button, a read-only Sonnet reads the repo's last 10 sessions -- your corrections, interrupts, tool errors, denials with a note, merge notes, checker findings and lessons sessions filed with cc-lesson.sh -- and suggests up to 5 CLAUDE.md edits, each with its evidence. They wait behind a 🧭 chip on the project card: Apply writes CLAUDE.md and commits it alone (refused if it changed since the coach read it or has uncommitted edits), Skip puts one aside. It never proposes undoing a DECISIONS.md entry, and can suggest new ones. A lessons ledger keeps every Apply, Skip (with an optional one-line reason) and Undo for the next run: an applied suggestion isn't proposed again, a skipped or undone one comes back only with new evidence, and a repeat says \"seen in N runs\". Each run also judges the applied edits at least 3 later sessions postdate -- working, still seen (with quotes) or no data yet -- on their history rows, where Sharpen asks the coach for a better wording of one edit alone. It also reviews the repo's Claude Code auto-memory (~/.claude/projects/<repo>/memory/): delete, rewrite or keep a note, or promote one into CLAUDE.md as an edit row -- Apply only while the file is as the coach read it, backed up in Shepherd's own folder first, MEMORY.md's index kept in step, and Undo puts it back.",
     why = "The corrections you keep repeating end up in the instructions every session reads first." },
@@ -24177,29 +22170,17 @@ M.FEATURES = {
     why = "Tune the panel to your screen and taste." },
 
   -- ---- Connect & extend ----
-  { key = "agents", cat = "Connect & extend", title = "Agent profiles",
-    what = "Save agent configs — role, skills, MCP servers, knowledge — and spawn with them.",
-    why = "Launch a specialized agent in one click instead of re-typing flags." },
   { key = "audit", cat = "Connect & extend", new = true, title = "Find-only audit",
     what = "The 🔍 Audit (find-only) chip in the New session dialog spawns an auditor that reads the code and drives the running app in a headless browser, and can write only its findings file (~/.cc-audit/<project>/AUDIT-FINDINGS.md). Edits in the repo, shell commands and Playwright file saves are refused even if the gate would allow them. Its `- [ ] [SEV] AUD-NNN` lines import into the project's My List tagged as findings, never as done.",
     why = "Get an honest bug list from a session that can't quietly fix, or break, what it's auditing." },
   { key = "mcp", cat = "Connect & extend", title = "MCPs & Skills",
     what = "See and manage the MCP servers and skills available to your sessions.",
     why = "Know exactly what tools your agents can reach." },
-  { key = "templates", cat = "Connect & extend", title = "Prompt templates",
-    what = "Reusable task templates with variables you fill in at send time.",
-    why = "Stop re-writing the same prompts." },
-  { key = "providers", cat = "Connect & extend", title = "Providers & models",
-    what = "Use Claude tiers, other companies' models, or local models through a gateway.",
-    why = "Route work to whatever model fits, all from one place." },
   { key = "bridge", cat = "Connect & extend", title = "SSH status bridge",
     what = "Mirror and monitor sessions running on remote machines.",
     why = "Watch your whole fleet, not just the one in front of you." },
 
   -- ---- Power tools ----
-  { key = "ab", cat = "Power tools", title = "A/B compare",
-    what = "Fork a task into variants, run them side by side, score them, and keep the winner.",
-    why = "Try multiple approaches at once and pick the best." },
   { key = "hotkeys", cat = "Power tools", title = "Global hotkeys",
     what = "Approve, jump to who needs you, cycle, spawn, and toggle the panel from anywhere.",
     why = "Drive the fleet without reaching for the mouse." },

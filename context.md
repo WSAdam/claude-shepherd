@@ -19,18 +19,18 @@ session. It also runs Adam's parallel-worktree method end to end. What it automa
 (the README's [feature tour](README.md#feature-tour) has the full list; `core.FEATURES` holds 81
 entries):
 
-- **Feeding work:** routines (cron spawns, digests, the main-green check), event rules, auto-continue with back-off,
+- **Feeding work:** auto-continue with back-off,
   auto-respawn with handoff notes, auto-compact with notes.
 - **Steering without keystrokes:** the session mailbox, cross-repo tickets,
   AskUserQuestion answered on the card, the Stop guards.
-- **Safety:** the opt-in approval gate and policy bundles, always-ask commands, the
+- **Safety:** the opt-in approval gate, always-ask commands, the
   worktree fence, one worktree per agent.
 - **Merging:** ready-to-merge requests, Shepherd-run test gates, the red-first proof, gate blame,
   the merge checker, batches driven by a session with grant grading, the overlap radar, worktree
   leases, the main-moved notice.
 - **Learning and looking back:** the coach (CLAUDE.md and memory edits, across repos too), the
   audit ledger, History (every transcript, Resume), the Time view, usage and
-  cost, commit stats, My List (TODO.md import, playbooks, Run selected).
+  cost, commit stats, My List (TODO.md import, Run selected).
 
 It is not offline. What reaches the network:
 
@@ -188,7 +188,8 @@ disk, `FX.alert`, interrupted turns, FSEvents). These are the others.
   a turn that did nothing or only planned. From the second such turn in a row it backs off (2
   minutes, doubling to 30). A usage limit is left to the resume path. Auto-respawn has the same edge
   discipline. Both are off in code and on in `defaults/`.
-- **Agent profiles and policy bundles** (L1/L2, 2026-06-14) rest on three facts:
+- **Launch flags** (they came with agent profiles and policy bundles, L1/L2, 2026-06-14; both were
+  removed 2026-11-19, and the find-only audit and restart in place use what's left) rest on three facts:
   1. **Shepherd stays a thin layer over the `claude` CLI** (`~/.local/bin/claude`): it emits flags
      (`--mcp-config`, `--agent`, `--plugin-dir`, `--append-system-prompt`, `--add-dir`, `--settings`,
      `--allowedTools`) through `core.spawnExtraFlags` and never reimplements MCP, skills or plugins.
@@ -196,9 +197,9 @@ disk, `FX.alert`, interrupted turns, FSEvents). These are the others.
   2. **`gate.tools` is a hold-for-approval list, not a capability allow-list.** A read-only agent is
      built with `autoDeny` of the mutating set (`core.DEFAULT_GATE_TOOLS`), never by adding tools to
      `gate.tools`.
-  3. **Secrets are never stored.** Records keep the env-var name (`authTokenEnv`), expanded by the
-     spawned login shell. Operator registries (`cc-presets.json`, `cc-agents.json`, `cc-mcp.json`)
-     live outside the Settings round-trip; spawns are dry-run until `spawn.live`.
+  3. **Secrets are never stored.** Records keep the env-var name, expanded by the spawned login
+     shell. Operator registries (`cc-presets.json`) live outside the Settings round-trip; spawns are
+     dry-run until `spawn.live`.
 
   The gate reads `~/.claude/cc-policy/<key>` (resolved by `core.resolvePolicy`, written atomically by
   `FX.writeResolvedPolicy`) as authoritative. The per-tick orphan sweep must stay decoupled from the
@@ -377,10 +378,10 @@ green. See [the CHANGELOG section](CHANGELOG.md#2026-10-04--mining-round-2):
 - Stop guards: question, fakeDone, unfinished (`cc_stop_guard`; on in `defaults/`).
 - The coach: a lessons ledger, evidence runs and `cc-lesson.sh`, edit outcomes and Sharpen, a review
   of the repo's auto-memory, lessons across repos into the global CLAUDE.md.
-- Steering: the fleet idle alert, playbooks and Run selected
+- Steering: the fleet idle alert, Run selected
   in My List (`cc-run.sh`).
 - Merging: brief pre-flight, gate blame, the main-moved notice, the main-green check (a routine with
-  `"action": "gate"`), grant grading (a risky merge on a batch grant waits for Adam's click).
+  `"action": "gate"` started it until routines were removed on 2026-11-19), grant grading (a risky merge on a batch grant waits for Adam's click).
 - Unseen sessions: grey cards for live sessions with no status file; History listing every transcript
   (`FX.refreshPastSessions`, a background scan) with Resume. (The transcript keeper, `cc-keep/` and
   Diagnostics' `cleanupPeriodDays` offer, was removed 2026-11-19.)
@@ -468,6 +469,9 @@ colors / size / font, live. Plus a field-reported new-project spawn bug fixed.
 
 ## State (2026-06-18) — DR7 A/B fork-to-compare (deep-research backlog COMPLETE)
 
+(A/B compare was removed 2026-11-19; this section is history. `modelOverride` and the
+terminal-flavor `coldStart` stay: respawn and any fresh-folder spawn with a model env use them.)
+
 DR7 shipped — **the deep-research backlog DR1–DR7 is now fully done + deployed + committed.** An
 operator-invoked **⚖ A/B** panel flow (header button): run the SAME task as 2+ variants (model and/or
 prompt), each isolated in its own **git worktree** (branch `ab/<cohort>/<label>`), then compare
@@ -496,6 +500,8 @@ worktrees/branches, behind a confirm).
   extension panel; an abandoned (never-kept) cohort's worktrees are cleaned via keep or `git worktree prune`.
 
 ## State (2026-06-18) — DR6 per-session model auto-routing (opt-in, off by default)
+
+(Model auto-routing was removed 2026-11-19; this section is history.)
 
 DR6 shipped (deep-research backlog now DR1–DR6 done; only DR7 left). Per-session, opt-in, OFF by default,
 NEVER fleet-wide. When a session opts in (detail-panel **Auto-model** checkbox), each queued/routed feed
@@ -750,19 +756,19 @@ in the AI-leaderboard reviews of the #4/#5 commits. New KEEP-IN-SYNC + invariant
 
 **Feature-mining → build:** 5 top AI apps (LiteLLM/crewAI/OpenHands/cline/AutoGPT) were adversarially
 mined into a backlog L1–L7 (`todos.md` and the per-project reports in `docs/feature-mining/`, both in git history).
-**L1 — Agent Profiles ("spawn from a saved agent")** is the first shipped (see [CHANGELOG.md](CHANGELOG.md)):
+**L1 — Agent Profiles ("spawn from a saved agent")** (removed 2026-11-19; this section is history) was the first shipped (see [CHANGELOG.md](CHANGELOG.md)):
 a pure-`cc-core` registry layer (`cc-agents.json` + `cc-mcp.json`, validator, `resolveAgent`, `mcpConfig`,
 `personaPrompt`, `spawnExtraFlags`, skills parser) plus the New-Session modal's Agents chip row, Save-as-agent,
 and a read-only Skills card. The richer registry-management UI (folders/favorites/fork/sort, in-panel
 skills/MCP/knowledge attach editor) is the deferred L1 follow-up.
 
-**L2 — named policy/guardrail bundles** is shipped too: `policies.bundles` + `policies.attachments` resolved
+**L2 — named policy/guardrail bundles** (removed 2026-11-19 with autopilot; this section is history) was shipped too: `policies.bundles` + `policies.attachments` resolved
 per session (`core.resolvePolicy`, precedence override > attachment > fleet) into a `cc-policy/<key>` file the
 gate (`cc-approve.sh`) reads authoritatively, with a detail-panel Policy dropdown, an orphan sweep, atomic
 writes, and SessionEnd cleanup — built with an adversarial-review pass that caught + fixed an orphaned-policy
 enforcement bug. Deferred: the bundle/attachment editor UI.
 
-**L3 — parameterized + versioned prompt templates** is shipped: saved templates (`cc-templates.json`) grew from
+**L3 — parameterized + versioned prompt templates** (removed 2026-11-19; this section is history) was shipped: saved templates (`cc-templates.json`) grew from
 flat `{name, text}` into structured/versioned records with `{{var}}` interpolation, all back-compat. The
 load-bearing facts a refactor must keep:
 - **cc-core is the authoritative renderer — no JS render twin.** `core.renderTemplate` does the substitution;
@@ -822,7 +828,7 @@ the transcript Shepherd already tails + local state, all off-by-default where th
   hooks inspector, session-history browser, and a Settings UI for the auto-title/loop/banner toggles
   (config-only for now).
 
-**L6 — event-callback rule engine** is shipped: opt-in `cc-rules.json` rules react to a session edge with a
+**L6 — event-callback rule engine** (removed 2026-11-19; this section is history) was shipped: opt-in `cc-rules.json` rules react to a session edge with a
 safe effect, layered on the existing level-triggered dispatcher (NOT a new bus). Off unless `rules.enabled`.
 - **Pure layer:** `validateRule`/`ruleLoad`(fail-safe)/`ruleList`; `ruleScopeMatch` (globEq on
   project/group/sessionKey/provider); `ruleFires`/`rulesForEdge`. v1 `RULE_TRIGGERS = {done, error, approval}`
@@ -837,7 +843,7 @@ safe effect, layered on the existing level-triggered dispatcher (NOT a new bus).
   auto and the **manual** Continue paths ledger post-dispatch gated on that (review-caught the manual eager log).
 - **Deferred:** hung/loop/starved triggers, feed/continue processors, per-rule status lifecycle, a rules editor UI.
 
-**L7 — scheduled spawns / routines** is shipped (the LAST mined-backlog phase): routines fire the NORMAL
+**L7 — scheduled spawns / routines** (removed 2026-11-19; the main-green engine stays; this section is history) was shipped (the LAST mined-backlog phase): routines fire the NORMAL
 spawn/nudge effects on a schedule (NOT a second executor). Triple opt-in: `schedules.enabled` + per-routine
 `enabled` + `spawn.live` (scheduled spawns still dry-run by default).
 - **Pure layer:** `cronMatches` (5-field; `*`/`N`/`A-B`/`A,B,C`/`*/S`; dom-OR-dow when both set; 0/7=Sun),

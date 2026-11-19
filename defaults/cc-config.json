@@ -105,10 +105,6 @@
   },
   "providers": [],
   "policies": {
-    "autopilot": {
-      "minutes": 15,
-      "enabled": false
-    },
     "patterns": {
       "enabled": false,
       "autoAllow": [],

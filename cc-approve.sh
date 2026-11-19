@@ -10,14 +10,15 @@
 #
 # Policy order (auto-decisions fire even if the panel isn't running):
 #   1. policies.patterns.autoDeny   -> deny   (safety first)
-#   2. policies.autopilot           -> allow  (this session, time-boxed)
-#   3. policies.patterns.autoAllow  -> allow
-#   4. policies.approveRepeats      -> allow  (same request approved before)
+#   2. policies.patterns.autoAllow  -> allow
+#   3. policies.approveRepeats      -> allow  (same request approved before)
 #   else -> panel; on a human "allow", remember it for approveRepeats.
+# (2026-11-19: named policy bundles -- cc-policy/<key> -- and autopilot -- cc-autopilot/<key>,
+# and a bundle's autopilot -- were removed. A file an older Shepherd left there is never read.)
 #
 # Always ask (2026-09-28): an always-ask Bash command (cc_always_ask_match in cc-lib.sh: git
-# push, rm -rf, history rewrites, publish, plus policies.alwaysAsk.patterns and a bundle's
-# alwaysAsk) skips 2-4 and goes to the panel whether or not the gate is armed or the tool is
+# push, rm -rf, history rewrites, publish, plus policies.alwaysAsk.patterns) skips 2-3 and goes
+# to the panel whether or not the gate is armed or the tool is
 # gated; autoDeny (armed gate only) still wins. With no panel, or no answer in time, it
 # answers "ask" so Claude Code's own prompt shows, never nothing. An Approve is never
 # remembered.
@@ -47,16 +48,8 @@ GATE_TOOLS="$(printf '%s' "$GATE_TOOLS" | tr ',\n\t\r' '    ')"
 GATE_TIMEOUT="${CC_GATE_TIMEOUT:-120}"
 HEARTBEAT_MAX_AGE="${CC_PANEL_MAX_AGE:-5}"
 APPROVED_DIR="$CC_APPROVED_DIR"    # defined in cc-lib.sh so SessionEnd can clean it
-AUTOPILOT_DIR="$CC_AUTOPILOT_DIR"  # (same env-var overrides as before)
-# Per-session gated-tools overrides (Feature D): one file per key, like cc-autopilot.
+# Per-session gated-tools overrides (Feature D): one file per key.
 GATE_TOOLS_DIR="${CC_GATE_TOOLS_DIR:-${HOME}/.claude/cc-gate-tools}"
-# Per-session resolved policy bundle (L2): one JSON file per key, written by the
-# panel (core.resolvePolicy → {autoAllow,autoDeny,bundle}). When present its lists
-# are AUTHORITATIVE and apply REGARDLESS of policies.patterns.enabled (attaching a
-# bundle is an explicit opt-in). Absent → fall back to the fleet policies.patterns.*
-# gated by .policies.patterns.enabled (unchanged). KEEP IN SYNC with
-# core.resolvePolicy in cc-core.lua (which produces this file's contents).
-POLICY_DIR="${CC_POLICY_DIR:-${HOME}/.claude/cc-policy}"
 
 emit_allow() {
   printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}'
@@ -221,16 +214,14 @@ esac
 # This hook runs for every tool call, so cc_always_ask_candidate looks first in pure bash:
 # only a Bash call whose JSON carries a held word, plain or quote-split (`git p"ush"`), or with
 # extras configured, reads further.
-# Extras: the fleet's policies.alwaysAsk.patterns plus the session's bundle alwaysAsk (the
-# resolved policy file). A bundle can add to the list, never take from it.
+# Extras: the fleet's policies.alwaysAsk.patterns. (A named bundle's alwaysAsk went with policy
+# bundles on 2026-11-19.)
 ALWAYS_ASK=""
 if cc_always_ask_candidate "$INPUT" && cc_have_jq; then
   [ -n "$KEY" ] || load_identity
   if [ "$TOOL" = "Bash" ]; then
     [ -n "$SIG" ] || load_summary
     AA_EXTRAS="$(cc_config_array '.policies.alwaysAsk.patterns')"
-    [ -f "$POLICY_DIR/$KEY" ] \
-      && AA_EXTRAS="$AA_EXTRAS"$'\n'"$(jq -r '.alwaysAsk[]? // empty' "$POLICY_DIR/$KEY" 2>/dev/null)"
     if cc_always_ask_match "$SUMMARY" "$AA_EXTRAS"; then
       ALWAYS_ASK="$CC_AA_RULE"
       echo "[cc-approve] ✋ always-ask ($ALWAYS_ASK): $TOOL ($KEY)" >&2
@@ -244,7 +235,7 @@ cc_have_jq || exit 0
 [ -n "$KEY" ] || load_identity
 
 # Per-session gated-tools override (Feature D, least-privilege). A dedicated file
-# mirrors cc-autopilot/<key>: absent -> use the fleet GATE_TOOLS computed above;
+# per key: absent -> use the fleet GATE_TOOLS computed above;
 # "-"/"NONE" (any case) -> gate NOTHING for this session; else gate exactly the
 # listed tools (commas/newlines/tabs normalized to spaces -- a one-tool-per-line
 # file is the natural shell idiom and must gate, not silently fail open). One
@@ -261,12 +252,6 @@ if [ -f "$GATE_TOOLS_DIR/$KEY" ]; then
   esac
 fi
 
-# L2: the per-session resolved policy file (named bundle), keyed like the override
-# above. Read once here (KEY is known); match_patterns consults it on the hot path.
-POLICY_FILE="$POLICY_DIR/$KEY"
-POLICY_BUNDLE=""
-[ -f "$POLICY_FILE" ] && POLICY_BUNDLE="$(jq -r '.bundle // empty' "$POLICY_FILE" 2>/dev/null || true)"
-
 # Not a gated tool (for this session) -> normal flow (reads etc. stay fast). An always-ask
 # command is held whatever gate.tools or the session's override says.
 if [ -z "$ALWAYS_ASK" ]; then
@@ -280,23 +265,14 @@ fi
 # ---- Policy evaluation (Phase 4c) -----------------------------------------
 PAT_ENABLED="$(cc_config '.policies.patterns.enabled' 'false')"
 
-# Run the request against a config pattern list; on the FIRST match, log + record
-# the ledger decision + emit it + exit. Shared by autoDeny and autoAllow (the two
-# loops were byte-identical apart from the verb). $1 = jq path to the list,
-# $2 = outcome (deny|allow), $3 = "by" label. No-op when patterns are disabled.
-# L2: when a per-session POLICY_FILE exists its lists win and apply regardless of
-# PAT_ENABLED (bundle = explicit opt-in); the ledger `by` carries the bundle name.
-# Otherwise read the fleet `.policies.patterns.<leaf>` gated by PAT_ENABLED (old
-# behavior). $1 = leaf (autoAllow|autoDeny), $2 = outcome (deny|allow), $3 = by.
+# Run the request against the fleet `.policies.patterns.<leaf>` list (gated by
+# PAT_ENABLED); on the FIRST match, log + record the ledger decision + emit it + exit.
+# Shared by autoDeny and autoAllow. $1 = leaf (autoAllow|autoDeny), $2 = outcome
+# (deny|allow), $3 = "by" label. No-op when patterns are disabled.
 match_patterns() {
   local leaf="$1" pats pat by="$3"
-  if [ -f "$POLICY_FILE" ]; then
-    pats="$(jq -r --arg k "$leaf" '.[$k][]? // empty' "$POLICY_FILE" 2>/dev/null)"
-    [ -n "$POLICY_BUNDLE" ] && by="bundle:$POLICY_BUNDLE"
-  else
-    [ "$PAT_ENABLED" = "true" ] || return 0
-    pats="$(cc_config_array ".policies.patterns.$leaf")"
-  fi
+  [ "$PAT_ENABLED" = "true" ] || return 0
+  pats="$(cc_config_array ".policies.patterns.$leaf")"
   [ -n "$pats" ] || return 0
   while IFS= read -r pat; do
     [ -n "$pat" ] || continue
@@ -319,38 +295,17 @@ match_patterns() {
 # acts only while the gate is armed.
 [ -f "$GATE_FLAG" ] && match_patterns autoDeny deny autoDeny
 
-# 2-4 only ever allow, so an always-ask command skips them all.
-# 2a. bundle autopilot: an attached/per-session bundle set autopilot:true. This is
-# POLICY_FILE-authoritative (the resolved-policy file the panel writes), mirroring
-# how autoAllow/autoDeny already honor POLICY_FILE. Placed AFTER autoDeny so deny
-# still wins ("auto-approve everything not denied").
-if [ -z "$ALWAYS_ASK" ] && [ -f "$POLICY_FILE" ] && [ "$(jq -r '.autopilot // empty' "$POLICY_FILE" 2>/dev/null)" = "true" ]; then
-  echo "[cc-approve] 🛫 bundle autopilot auto-allow: $TOOL ($KEY)" >&2
-  ledger_decision allow "bundle:${POLICY_BUNDLE:-?}"
-  emit_allow
-  exit 0
-fi
+# 2-3 only ever allow, so an always-ask command skips them all.
+# (2026-11-19: a bundle's autopilot and the time-boxed per-session autopilot were removed.)
 
-# 2b. autopilot: this session is trusted for a time-boxed window
-if [ -z "$ALWAYS_ASK" ] && [ "$(cc_config '.policies.autopilot.enabled' 'false')" = "true" ] && [ -f "$AUTOPILOT_DIR/$KEY" ]; then
-  EXP="$(cat "$AUTOPILOT_DIR/$KEY" 2>/dev/null || echo 0)"
-  case "$EXP" in ''|*[!0-9]*) EXP=0 ;; esac  # empty file: cat succeeds, so `|| echo 0` never runs
-  if [ "$(cc_now)" -lt "$EXP" ]; then
-    echo "[cc-approve] 🛫 autopilot auto-allow: $TOOL ($KEY)" >&2
-    ledger_decision allow autopilot
-    emit_allow
-    exit 0
-  fi
-fi
-
-# 3. autoAllow patterns
+# 2. autoAllow patterns
 # SECURITY: an autoAllow glob is a PREFIX/shell-glob match on the command, so
 # `Bash(ls*)` also auto-allows `ls; rm -rf /` or `ls && curl … | sh`. Keep
 # autoAllow patterns tight (prefer exact tools like `Read`, or anchored commands)
 # — autoDeny runs first and always wins, so deny dangerous shapes there.
 [ -n "$ALWAYS_ASK" ] || match_patterns autoAllow allow autoAllow
 
-# 4. approveRepeats: identical request already approved this session
+# 3. approveRepeats: identical request already approved this session
 if [ -z "$ALWAYS_ASK" ] && [ "$(cc_config '.policies.approveRepeats' 'false')" = "true" ]; then
   if [ -f "$APPROVED_DIR/$KEY" ] && grep -Fxq "$SIG" "$APPROVED_DIR/$KEY" 2>/dev/null; then
     echo "[cc-approve] 🔁 auto-allow (approved before): $TOOL ($KEY)" >&2

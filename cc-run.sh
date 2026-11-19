@@ -6,7 +6,7 @@
 #   cc-run.sh --help
 #
 # Run selected in Shepherd's My List works through the items Adam picked one at a time, each in a
-# fresh session whose brief names the run and the item. A file line (TODO.md, a playbook) is done
+# fresh session whose brief names the run and the item. A TODO.md line is done
 # when its box is ticked in the file; any other item (Adam's own, an audit finding) is done only
 # when its session runs `cc-run.sh done`. Any item's session can say it is stuck with `blocked`,
 # which pauses the run and tells Adam. The report is ~/.claude/cc-run/<run>.<item>.<epoch>-<pid>.json,

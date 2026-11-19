@@ -19,8 +19,8 @@ the **☰** menu, **⚙** Settings, and the layout switcher. The small **⌨** b
 corner shows every shortcut, read from the live bindings.
 
 The **☰** menu, top to bottom: Tickets ([cross-repo tickets](automation.md#cross-repo-tickets)), Filter sessions, Find in fleet,
-Fleet insights, Audit ledger, Routines, Templates, Agents, MCPs & Skills, Policy bundles, Automation
-rules, Automation trace ([what automation did and would do](automation.md#dry-run-and-the-automation-trace)), Cost & tokens,
+Fleet insights, Audit ledger, MCPs & Skills,
+Automation trace ([what automation did and would do](automation.md#dry-run-and-the-automation-trace)), Cost & tokens,
 Diagnostics, Features list, Shift report (while the ledger is on), Hidden sessions (while any are
 hidden) and Notifications.
 
@@ -48,8 +48,6 @@ In order (a remote SSH-bridge tile offers only Relabel and Set group):
   provider/model, lineage and activity counts) into `~/.claude/cc-exports/` and reveal it in Finder.
 - **Capture as scenario…**: save a scrubbed window of the session's transcript for the detector
   corpus, when a card reads wrong ([Development](development.md#capturing-a-scenario)).
-- **⚖ A/B fork-to-compare…**: run the same task as 2+ variants in isolated git worktrees of this
-  project, then compare them and keep the winner ([Automation](automation.md#ab-compare)).
 - **Clear conversation / Compact**: confirm, then run `/clear` or `/compact` in the session.
 - **Close instance**: confirm, then close the session and remove the tile. In a window shared with
   other sessions the tab bridge closes just its Claude tab (a batch unit's by its tag, any other by
@@ -83,8 +81,6 @@ In order (a remote SSH-bridge tile offers only Relabel and Set group):
 - **Continue**: on an errored tile the Approve button becomes **Continue**, which types `continue`
   and Enter to resume the aborted turn. Auto-respawn is held off so you resume the *same* session.
   **Auto-Continue** does this for you ([Automation](automation.md#auto-respawn-and-auto-continue)).
-- **Autopilot**: time-box a session to auto-approve all its gated prompts (needs the gate and
-  `policies.autopilot.enabled`).
 - **Clear / Compact**: confirm, then run `/clear` or `/compact` in the session.
 - **Score**: rate the session 0–100 from the audit ledger
   ([Usage and cost](usage-and-cost.md#run-score)).
@@ -107,7 +103,7 @@ In order (a remote SSH-bridge tile offers only Relabel and Set group):
   insights are already claimed, and needs `LB_URL` / `GRADE_PREVIEW_TOKEN` in your shell.
 - **Nudge box**: a multi-line input. **Enter** sends, **Shift+Enter** adds a newline, so a pasted
   list arrives intact. **Paste an image** and it's attached as a chip; **Send** delivers text and
-  image through the clipboard (one ⌘V). **Tpl ▾** inserts a saved template.
+  image through the clipboard (one ⌘V).
 
 **Model controls** (off by default; ⚙ Settings → Appearance → **Model controls**) add a row of six:
 
@@ -116,18 +112,16 @@ In order (a remote SSH-bridge tile offers only Relabel and Set group):
   Kitty, best-effort in the VS Code extension.
 - **Model**: shows the session's **current** model (read live from the transcript, so it follows
   an in-session `/model`) and switches it within the provider (`/model <id>`). The list comes from
-  the `providers[]` you define; with none it shows just the current model. Changing the provider or
+  the `providers[]` you keep in `cc-config.json`; with none it shows just the current model. Changing the provider or
   base URL needs a new session.
 - **Gate**: per-session tool gating
   ([Approvals and policies](approvals-and-policies.md#which-tools-are-gated)).
-- **Policy**: attach a policy bundle to this session.
-- **Auto-model**: per-session model auto-routing ([Automation](automation.md#model-auto-routing)).
 
 The detail panel also shows badges for the detected **editor**, **permission mode** and
 **effort**.
 
 ⚙ Settings → Appearance → **Hide the detail panel's controls** (off by default) takes the whole
-bottom of the panel off screen: the button rows, the nudge box and the template menu. What it
+bottom of the panel off screen: the button rows and the nudge box. What it
 leaves is what you can't reach any other way: a session **waiting on the gate** brings back
 Approve, Deny, the reason box and Stop (and hides them again once you answer), and an **errored**
 session brings back the Continue button. A held question and the plan / TODO box stay as they are.
@@ -206,15 +200,12 @@ without a folder falls back to the same prompts.)
 - **Open existing / Start new project**: open a folder, or create a new one and start in it. A new
   project gets extra settle time, opens VS Code with `--disable-workspace-trust`, and **pastes** the
   initial task, so the prompt reliably lands.
-- **Presets**: ▶ chips that spawn a saved folder + editor + mode + provider bundle in one click.
+- **Presets**: ▶ chips that spawn a saved folder + editor + mode bundle in one click.
   **Save as preset** captures the current form (`~/.claude/cc-presets.json`; ✕ deletes). Picking a
-  known folder also recalls the editor, mode and provider you last used there.
-- **Agents**: ✦ chips that spawn from a saved agent profile
-  ([Providers and integrations](providers-and-integrations.md#agent-profiles)).
+  known folder also recalls the editor and mode you last used there.
 - **🔍 Audit (find-only)**: a built-in chip that spawns an auditor in the folder you picked. It reads
   the code and drives the running app in a headless browser, and can write only its findings file
   ([Find-only audit](providers-and-integrations.md#find-only-audit)).
-- **Templates**: seed the initial task from a saved template, with its variables filled in first.
 - **Fuzzy folder search**: type a fragment of a project name. Your project roots
   (`spawn.searchRoots`, default `~/Programming`) are indexed once per open, with
   [fd](https://github.com/sharkdp/fd) when installed (gitignore-aware) or `find` otherwise.
@@ -224,14 +215,12 @@ without a folder falls back to the same prompts.)
   launch reliably. VS Code and Cursor open the window, then drive Claude Code best-effort: by default
   they open the **Claude Code extension panel** and type the initial task into it
   (`spawn.vscodeFlavor: "terminal"` types a `claude` command into an integrated terminal instead).
-  SSH spawns, gateway providers, a non-Default permission mode and agent-profile spawns always use
+  SSH spawns, gateway providers (`spawn.provider`), a non-Default permission mode and the find-only audit always use
   the terminal flavor, since the extension can't take those launch flags. If the project's window already
   has a live Claude tab, the spawn opens a **new Claude tab** with the task typed in; press Return to
   send it.
 - **Permission mode**: Default / Plan / Accept edits / Automate (bypass), passed as
   `claude --permission-mode <m>` (Automate is `bypassPermissions`).
-- **Provider**: the model or backend for this session
-  ([Providers and integrations](providers-and-integrations.md#providers-and-models)).
 - **Initial task** (optional).
 
 A spawned VS Code or Cursor window takes the frame of the editor window you already have open,

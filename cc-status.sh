@@ -106,10 +106,10 @@ if ! cc_have_jq; then
   # double-quote, backslash, or control char on Unix/macOS); STATUS is one of our
   # own literals so it needs no escaping. Without this the file would be malformed
   # and parseStatusList would silently drop the tile.
-  # Emit `editor` even here (cc_detect_editor is pure shell, no jq): the R1-31
-  # kitty/terminal auto-model guard and focusProject routing depend on it; omitting
-  # it makes the auto-model gate fail OPEN, pasting VS Code chat keystrokes into a
-  # real terminal/Kitty window.
+  # Emit `editor` even here (cc_detect_editor is pure shell, no jq): focusProject routing
+  # depends on it; omitting it would paste VS Code chat keystrokes into a real
+  # terminal/Kitty window. (The R1-31 auto-model guard read it too, until model
+  # auto-routing was removed 2026-11-19.)
   FB_EDITOR="$(cc_detect_editor)"
   # R3-25: write atomically (temp + mv, the cc_merge/cc_del_field idiom) so a concurrent
   # 1Hz dashboard poll never observes an empty/partial file (which the JSON decode drops,
@@ -643,8 +643,6 @@ fi
 # stdout. Printed once, last, after the status file is written: the parts read this session's
 # identity (claude pid, kitty lineage) from it.
 if [ "$EVENT" = "sessionstart" ]; then
-  # 2026-10-15: a fresh session takes the policy bundle its agent profile's spawn left for it (silent)
-  [ "$(cc_get "$INPUT" '.source')" != startup ] || cc_take_pending_policy "$KEY" "$CWD"
   cc_session_context "$(cc_get "$INPUT" '.source')" "$KEY" "$CWD"
 fi
 

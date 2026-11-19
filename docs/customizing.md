@@ -40,7 +40,7 @@ appearance to defaults** starts over.
 Two switches in the same tab change what the detail panel shows. They are panel preferences, so a
 theme export never carries them:
 
-- **Model controls** (off by default) adds the Effort, Mode, Model, Gate, Policy and Auto-model row
+- **Model controls** (off by default) adds the Effort, Mode, Model and Gate row
   ([Controls](controls.md#the-detail-panel)).
 - **Hide the detail panel's controls** (off by default) hides the button rows and the nudge box,
   bringing back only what a waiting or errored session needs

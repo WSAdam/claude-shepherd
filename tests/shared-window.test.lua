@@ -135,9 +135,9 @@ check("a nudge to a shared-window session is refused", acted == nil)
 check("...before any focus or keystroke  (focus=" .. focusCalls .. " taps=" .. taps .. ")", focusCalls == 0 and taps == 0)
 check("...and an alert says why", refusalAlerts() == 1)
 
--- the direct paths (queue feed, /clear, image paste, Improve...) hit the effect layer itself
+-- the direct paths (/clear, image paste, Improve...) hit the effect layer itself
 local _, pasted = quiet(function() return fx.pasteIntoWindow(fx.targetFor(a1), { text = "x" }) end)
-check("a direct paste into a shared window reports not delivered (a queued task stays queued)", pasted == false)
+check("a direct paste into a shared window reports not delivered", pasted == false)
 check("...logs the refusal", logged("NOT sent") and logged("hosts 2 Claude sessions"))
 check("...still with no focus or keystroke", focusCalls == 0 and taps == 0)
 check("the alert shows at most once a minute per session", refusalAlerts() == 1)
@@ -217,7 +217,8 @@ check("the bridge path never focused a window or pressed a key", focusCalls == 0
 local _, lone = quiet(function() return fx.pasteIntoWindow(fx.targetFor(b1), { text = "x" }) end)
 check("a session alone in its window is still typed into (its window focused, the paste scheduled)",
       lone == true and focusCalls == 1 and not logged("NOT sent to"))
-check("the router never picks a shared-window session", not core.sessionFree(a1) and core.sessionFree(b1))
+-- 2026-11-19, REQUIREMENT CHANGE: "the router never picks a shared-window session" went with the task
+-- queue and its router (core.sessionFree)
 
 -- 2026-09-11: Jump brings the session's own tab forward through the tab bridge -- Adam's second
 -- Focus in a two-tab window landed on the other tab's chat.

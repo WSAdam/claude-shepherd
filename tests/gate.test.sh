@@ -153,10 +153,11 @@ assert_eq "policy autoDeny -> deny" "deny" "$(decision "$out")"
 out="$(runpol x '{"session_id":"a1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"ls -la"}}')"
 assert_eq "policy autoAllow -> allow" "allow" "$(decision "$out")"
 
-# C: per-session autopilot (future expiry) -> allow anything gated
+# C: 2026-11-19, REQUIREMENT CHANGE: autopilot was removed. A leftover expiry file -- even one
+# that hasn't expired, with policies.autopilot.enabled still in the config -- allows nothing.
 mkdir -p "$CC_AUTOPILOT_DIR"; echo 9999999999 > "$CC_AUTOPILOT_DIR/ap1"
 out="$(runpol x '{"session_id":"ap1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"make deploy"}}')"
-assert_eq "autopilot -> allow" "allow" "$(decision "$out")"
+assert_eq "leftover autopilot file -> no decision" "" "$out"
 
 # C: expired autopilot does NOT auto-allow (no panel -> no output)
 echo 1 > "$CC_AUTOPILOT_DIR/ap2"
@@ -314,36 +315,25 @@ bg=$!; wait_block "$TMP/ov5.json"; answer ov5 deny; wait $bg
 got="$(jq -r '.hookSpecificOutput.permissionDecision' "$TMP/out_ov5" 2>/dev/null)"
 assert_eq "empty override file: Bash still gated (empty = fleet default)" "deny" "$got"
 
-# ---- L2: per-session resolved policy bundle file (cc-policy/<key>) ----
-# The panel writes core.resolvePolicy output here; the gate reads it as authoritative
-# and opt-in (applies even with NO fleet policies enabled). CONFIG_FILE stays none.json
-# (no fleet patterns) throughout, so a decision can ONLY come from the policy file.
+# ---- A leftover per-session policy file (cc-policy/<key>) is never read (2026-11-19) ----
+# 2026-11-19, REQUIREMENT CHANGE: named policy bundles were removed. The panel resolved a session's
+# bundle into this file and the gate read it as authoritative (its autoAllow / autoDeny / autopilot
+# applied with no fleet policy). Now a file an older Shepherd left must decide nothing: with a stale
+# heartbeat and no fleet policy, each request falls straight through to Claude Code's own flow.
 mkdir -p "$CC_POLICY_DIR"
-
-# A) policy-file autoDeny denies a gated tool with no fleet policy at all
-date +%s > "$HB"
+echo 0 > "$HB"   # stale heartbeat -> no panel wait
 printf '{"autoDeny":["Bash(rm*)"],"bundle":"read-only"}' > "$CC_POLICY_DIR/pol1"
-out="$(printf '%s' '{"session_id":"pol1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"rm -rf build"}}' \
-    | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 bash "$APP" 2>/dev/null)"
-assert_eq "policy file: autoDeny denies (no fleet policy needed)" "deny" "$(decision "$out")"
-
-# B) policy-file autoAllow allows a gated tool
+out="$(printf '%s' '{"session_id":"pol1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"rm -r build"}}' \
+    | CC_GATE_FLAG="$FLAG" bash "$APP" 2>/dev/null)"
+assert_eq "leftover policy file: its autoDeny denies nothing" "" "$out"
 printf '{"autoAllow":["Bash(ls*)"],"bundle":"loose"}' > "$CC_POLICY_DIR/pol2"
 out="$(printf '%s' '{"session_id":"pol2","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"ls -la"}}' \
-    | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 bash "$APP" 2>/dev/null)"
-assert_eq "policy file: autoAllow allows" "allow" "$(decision "$out")"
-
-# B2) R1-04: bundle autopilot:true auto-allows a gated tool with no fleet flag
+    | CC_GATE_FLAG="$FLAG" bash "$APP" 2>/dev/null)"
+assert_eq "leftover policy file: its autoAllow allows nothing" "" "$out"
 printf '{"autopilot":true,"bundle":"loose"}' > "$CC_POLICY_DIR/polap"
 out="$(printf '%s' '{"session_id":"polap","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"anything goes"}}' \
-    | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 bash "$APP" 2>/dev/null)"
-assert_eq "policy file: bundle autopilot allows" "allow" "$(decision "$out")"
-
-# B3) R1-04: autoDeny still beats bundle autopilot (deny must win)
-printf '{"autopilot":true,"autoDeny":["Bash(rm*)"],"bundle":"loose"}' > "$CC_POLICY_DIR/polapd"
-out="$(printf '%s' '{"session_id":"polapd","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"rm -rf build"}}' \
-    | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 bash "$APP" 2>/dev/null)"
-assert_eq "policy file: autoDeny beats bundle autopilot" "deny" "$(decision "$out")"
+    | CC_GATE_FLAG="$FLAG" bash "$APP" 2>/dev/null)"
+assert_eq "leftover policy file: a bundle autopilot allows nothing" "" "$out"
 
 # C) policy file present but no rule matches -> routes to the panel (human decides)
 date +%s > "$HB"
@@ -1222,11 +1212,10 @@ cat > "$EXCFG" <<'JSON'
 JSON
 out="$(aa_req aa16 'terraform apply -auto-approve' | CC_GATE_FLAG="$AA_NOFLAG" CC_CONFIG_FILE="$EXCFG" bash "$APP" 2>/dev/null)"
 assert_eq "always-ask: an extra from policies.alwaysAsk.patterns is held" "ask" "$(decision "$out")"
+# 2026-11-19, REQUIREMENT CHANGE: a bundle's alwaysAsk went with policy bundles; a leftover file adds nothing
 printf '{"alwaysAsk":["kubectl delete"],"bundle":"k8s"}' > "$CC_POLICY_DIR/aa17"
 out="$(aa_req aa17 'kubectl -n prod delete pod x' | CC_GATE_FLAG="$AA_NOFLAG" CC_CONFIG_FILE="$EXCFG" bash "$APP" 2>/dev/null)"
-assert_eq "always-ask: a bundle's alwaysAsk is held" "ask" "$(decision "$out")"
-out="$(aa_req aa18 'kubectl -n prod delete pod x' | CC_GATE_FLAG="$AA_NOFLAG" CC_CONFIG_FILE="$EXCFG" bash "$APP" 2>/dev/null)"
-assert_eq "always-ask: a bundle's alwaysAsk binds only its own session" "" "$out"
+assert_eq "always-ask: a leftover bundle file's alwaysAsk holds nothing" "" "$out"
 
 # the ledger: the fallback is by alwaysAsk; Adam's own click stays by human
 ALCFG="$TMP/aa-ledger.json"; echo '{ "ledger": { "enabled": true } }' > "$ALCFG"

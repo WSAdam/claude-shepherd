@@ -6,11 +6,10 @@ Each **automatic** behaviour on this page has a switch, in ⚙ Settings → Auto
 `~/.claude/cc-config.json`. A fresh install turns four on: auto-continue, the **Respawn from cwd**
 action, [auto-compact with notes](#auto-compact-with-notes) and the [fleet idle alert](#fleet-idle-alert)
 (on even with no settings file). [Handoff notes](#handoff-notes) and the
-[session mailbox](#session-mailbox) have no switch. Auto-respawn, model
-auto-routing, the self-summary, escalation, rules, routines and the coach's own runs
+[session mailbox](#session-mailbox) have no switch. Auto-respawn, the self-summary, escalation
+and the coach's own runs
 (`coach.enabled`, which its weekly and evidence runs both need) start off; their keys are in
-[Configuration](configuration.md#editing-the-file-by-hand). The manual tools (templates,
-A/B compare, a routine's **Run**) work without a switch.
+[Configuration](configuration.md#editing-the-file-by-hand).
 
 Automatic actions that type into a session are delivery-gated (a send counts only once it
 reached the session's window), skip sessions whose window hosts other sessions, wait until the
@@ -18,7 +17,7 @@ session can take the text ([below](#when-automation-types)), and are recorded in
 
 ## When automation types
 
-A rule's `nudge` or `continue`, auto-continue, the post-run
+Auto-continue, the post-run
 self-summary, the startup `/rc` sweep and a waiting [mailbox](#session-mailbox) message all type
 into a session without you. (The [Stop guards](approvals-and-policies.md#questions-asked-in-prose-come-back) never
 type: they send a turn back through the session's own Stop hook.) Each one waits until the session
@@ -29,7 +28,7 @@ can take it:
 - **Settled**: at least 3 seconds after the session's last status change. A send on a turn that
   just ended waits out the rest; it isn't dropped.
 - **One at a time**: at most one automatic send queued per session. When two fire on the same turn
-  end (a rule's nudge and the self-summary, say), the first goes and the second is refused.
+  end (auto-continue and the self-summary, say), the first goes and the second is refused.
 - **Kitty**: right before typing, Shepherd reads the window (`kitty @ get-text`) and types only
   into an empty composer. A dim prompt suggestion counts as empty; your half-typed text, an open
   menu or picker, the session survey or the trust dialog refuse the send, and so does a screen it
@@ -44,10 +43,8 @@ status file, so a turn that started in between is caught.
 A refused send records one `typing_refused` event in the ledger: `by` names the sender, `reason`
 says why (`working`, `approval`, `question`, `tool`, `queued`, `composer`, `menu`, `trust`,
 `no composer`). Shepherd then leaves that session alone until its status changes, instead of trying
-again every second. What happens to the send depends on the sender: the self-summary tries again
-after the next turn, and a rule's nudge or continue is skipped (`nudge_skipped` / `continue_skipped` with the
-reason). A nudge rule on a `hung` or `loop` edge fires while the session is still working, so it is
-always refused.
+again every second. What happens to the send depends on the sender: the self-summary, for one,
+tries again after the next turn.
 
 Your own clicks (Nudge, Continue and the rest) aren't gated: when you act, it types.
 
@@ -56,11 +53,11 @@ Your own clicks (Nudge, Continue and the rest) aren't gated: when you act, it ty
 Every automatic action goes through one door, so you can see what automation would do before you
 let it, and what it did while you were away. Your own clicks never go through it.
 
-- **What counts.** Auto-continue, a rule firing (log, relabel, nudge, continue), auto-respawn, the
+- **What counts.** Auto-continue, auto-respawn, the
   post-run self-summary, ending a tab-less leftover, a mailbox message (leaving it, and typing it
   into an idle session), and the startup `/rc` sweep.
 - **Dry run.** ⚙ Settings → Automation → **Dry run** switches it on for all automation
-  (`automation.dryRun`) or for one feature at a time (`autoContinue.dryRun`, `rules.dryRun`,
+  (`automation.dryRun`) or for one feature at a time (`autoContinue.dryRun`,
   `respawn.dryRun`, `summary.dryRun`, `tabless.dryRun`, `mailbox.dryRun`, `remoteControl.dryRun`).
   In a dry run Shepherd records what it would have done and does nothing: nothing typed, nothing
   launched or
@@ -84,46 +81,6 @@ let it, and what it did while you were away. Your own clicks never go through it
 Outside a dry run nothing changes: each action does exactly what it did before, with the same
 readiness and shared-window refusals.
 
-## Prompt templates
-
-**Tpl ▾** next to Send saves the current input as a named template and inserts saved ones back into
-the input (it never auto-sends). The **📝 Templates** editor (☰ menu) creates, edits, renames and
-deletes them. Templates live in `~/.claude/cc-templates.json`.
-
-- **Variables**: a body can carry `{{name}}` (required) and `{{name?}}` (optional). Picking a
-  template opens a fill-in form (required variables gate Insert). The built-ins fill themselves:
-  `{{date}}` / `{{today}}`, `{{now}}` and `{{prev_output}}` (the selected session's latest output).
-- **Structured or raw**: a template is a description plus an optional expected output, or raw text.
-- **Before a spawn**: the New session dialog's **Templates** picker seeds the initial task, with
-  variables filled in first.
-- **Versions**: every save keeps the previous body and bumps the version (a `v2` chip marks edited
-  templates). **Versions (N)** in the editor lists them, with a non-destructive **Revert to this**.
-- **Import a folder**: **Tpl ▾ → ⤓ Import from prompts folder…** pulls `*.prompt` / `*.md` files (an
-  optional `--- name: … ---` front-matter block plus the body) from `templates.sourceDir` (default
-  `~/.claude/cc-prompts`). Local disk only.
-
-## Model auto-routing
-
-Per session, off by default. Tick **Auto-model** in the detail panel (shown with **Model controls**)
-and each queued, auto-fed or routed task picked a model by how hard it looked, sending `/model <id>`
-just before the task. (The task queue was removed 2026-11-19, so nothing is fed and the switch has
-no effect any more.)
-
-- **hard** (default `opus`) when the task has a "hard" keyword (refactor, debug, migrate, security,
-  race condition and the like), or is 40 words or more;
-- **cheap** (default `haiku`) when it has a "cheap" keyword (typo, rename, lint, bump, changelog and
-  the like), or is 6 words or fewer;
-- **standard** (default `sonnet`) otherwise.
-
-A hard keyword wins over a cheap one. The full keyword lists are `core.AUTOMODEL_DEFAULTS` in
-[cc-core.lua](../cc-core.lua).
-
-It switches only when the chosen tier differs from the model already running, never on a direct
-Send, and only in a local, native-Anthropic session in VS Code or Cursor (a terminal's `/model` is an
-interactive picker). Tune it with `automodel.models.{cheap,standard,hard}`, `automodel.cheapMax`,
-`automodel.hardMin`, `automodel.cheapWords` and `automodel.hardWords`. The switch itself is
-per-session only (`~/.claude/cc-automodel/<key>`).
-
 ## Auto-respawn and auto-continue
 
 - **Respawn** (`respawn.enabled`, on in a fresh install): a right-click **Respawn from cwd** action
@@ -146,8 +103,7 @@ per-session only (`~/.claude/cc-automodel/<key>`).
   Kitty). From the second such turn in a row, the next continue waits 2 minutes instead of the
   grace delay, then 4, 8, 16, and at most 30. The card reads **backing off · 4m** while it waits.
   Your own prompt (a **Continue** click included) restarts the streak, and so does a turn that made
-  progress or finished something (a `TODO.md` line or a commit). The same wait holds a rule's
-  `continue` ([rules](#automation-rules)), which is dropped if the session starts a turn meanwhile.
+  progress or finished something (a `TODO.md` line or a commit).
   `startSeconds: 0` turns the back-off off.
 
 Each automatic action records an `outcome` in the ledger, and a death that can't be respawned is
@@ -423,64 +379,6 @@ Off by default (`summary.enabled`). When a session finishes a turn, Shepherd typ
 further edits. It fires once per turn (the summary's own completion is skipped so it can't loop),
 local sessions only.
 
-## Automation rules
-
-Rules react to a session event with a safe action, a lighter per-session complement to the fleet
-automations above. Create and edit them in **⚙️ Automation rules** (☰ menu), which writes
-`~/.claude/cc-rules.json`. The engine's master switch is `rules.enabled` in `cc-config.json`
-(default off). A rule is
-`{name, enabled?, trigger:{kind, match?}, processor:{kind, text?, label?}, once?}`:
-
-- **enabled** (default true): switch one rule off without deleting it.
-- **trigger.kind**: `done`, `error`, `approval`, `hung` or `loop` (the fresh edge). `hung` and
-  `loop` fire only while their detectors are on (`escalation.hung.enabled`,
-  `escalation.loop.enabled`). (`starved` fired on a starving routed queue; it went with the task
-  queue on 2026-11-19 and never fires.)
-- **trigger.match** (optional): globs on `project` (the encoded project key, as in
-  [policy attachments](approvals-and-policies.md#named-policy-bundles)), `group`, `sessionKey` and
-  `provider` (a provider profile's `id`: the profile the session's model, and for a gateway its
-  base URL, belong to); absent means fleet-wide.
-- **processor.kind**: `log` (write an audit note), `relabel` (rename the tile to `label`), `nudge`
-  (type `text` into the session through the same delivery-gated path as a manual nudge, once it
-  [can take it](#when-automation-types)) or `continue` (resume an errored turn; held by
-  [auto-continue's back-off](#auto-respawn-and-auto-continue) after turns that change nothing).
-  (`feed`, which queued `text`, went with the task queue on 2026-11-19 and does nothing.)
-- **once**: fire at most once per rule per tile, until Hammerspoon reloads.
-
-```json
-{ "name": "flag-prod-errors", "trigger": { "kind": "error", "match": { "group": "prod" } },
-  "processor": { "kind": "relabel", "label": "⚠ prod error" }, "once": true }
-```
-
-Every firing is ledgered as `by:"rule"`.
-
-## Routines
-
-Routines fire the normal spawn or digest effects, or a check that main is green, on a schedule. They are not a second executor, and
-a scheduled spawn still respects `spawn.live`. Manage them on the **⏰ Routines** board (☰ menu),
-which writes `~/.claude/cc-schedules.json`. The board shows each routine's action, schedule and next
-run, with **Run** (now), **Pause / Resume**, **Edit** and **Delete**. New routines are saved paused.
-
-- **Recurring** routines use a standard 5-field cron expression (`min hour dom month dow`, with `*`,
-  ranges, lists and `*/step`); the board's pickers fill it in. **Once** routines fire at a set time
-  and delete themselves.
-- **Spawn a session** launches a session in a folder with an editor, provider, permission mode and
-  prompt.
-- **Push a shift-report digest** pushes a fleet shift report over a window through ntfy (a
-  `pushTopic`, or the escalation topic); it needs no folder.
-- **Check main is green** (`"action": "gate"`) runs the repo's merge gate in its main checkout and
-  flags the repo's card when main is red. It takes the repo's `folder` and an optional `branch`
-  (default `main`) and spawns nothing. See [Is main still green?](merging-and-batches.md#is-main-still-green-a-scheduled-check)
-- The master switch is `schedules.enabled` in `cc-config.json` (default off). While the fleet is
-  at `schedules.maxConcurrent`, a recurring run is skipped (it's retried only within its own
-  minute) and a once-routine waits. **Run** works while the switch is off. Each firing is ledgered
-  as `schedule_fire`.
-
-```json
-{ "name": "nightly-tests", "kind": "cron", "cron": "0 2 * * *", "folder": "/path/to/repo",
-  "prompt": "run the full test suite and summarize failures", "enabled": true }
-```
-
 ## The coach
 
 The coach turns the corrections you keep making into edits to the repo's `CLAUDE.md`, the
@@ -673,22 +571,3 @@ compares them.
 - **Yours, not shipped:** the block is your own. It is never copied into Shepherd's
   `methodology/CLAUDE.md`, the copy of the workflow a fresh install gets, and `uninstall.sh` leaves
   it in place. Its record is `~/.claude/cc-coach/global.json`.
-
-## A/B compare
-
-Run the same task as 2–4 variants and keep the best one. Right-click a tile → **⚖ A/B
-fork-to-compare…** opens the A/B dialog with that tile's folder filled in (you can change it).
-
-- **New run**: a repo folder (a git repo), a base task, a permission mode, and one row per variant:
-  a label, a model and/or provider, and an optional prompt override.
-- **Launch**: one git worktree per variant beside the repo (`.cc-ab/<repo>-<cohort>-<label>` in the
-  repo's parent folder), on branch `ab/<cohort>/<label>`, then one VS Code session per variant. If
-  creating a worktree fails, the worktrees and branches already made are rolled back. Cohorts are tracked in
-  `~/.claude/cc-ab.json`.
-- **Compare**: each variant shows its model, run score (needs the ledger), live status and activity;
-  the top scorer is marked **★ lead**.
-- **⚖ Judge**: pastes a judging prompt built from each variant's recent output into the first live
-  variant's session; the verdict appears there.
-- **Keep this**: after a confirm, closes the other variants' tiles, removes their worktrees and
-  branches, and keeps the winner's worktree and branch for you to merge. A cohort you never keep
-  leaves its worktrees behind; remove them with `git worktree remove` / `git worktree prune`.

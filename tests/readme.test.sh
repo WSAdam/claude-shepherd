@@ -232,7 +232,9 @@ assert_eq "docs/controls.md's detail panel section names every button" "" "$unto
 # The ☰ menu's entries (the panel's .tm-item buttons) in docs/controls.md.
 sed -nE 's/.*class="tm-item".*<\/span> ([^<]+)<.*/\1/p' "$ROOT/claude-dashboard.lua" | sed 's/&amp;/\&/g' > "$TMP/menu.txt"
 n="$(grep -c . "$TMP/menu.txt")"
-if [ "$n" -ge 18 ]; then got=yes; else got="only $n"; fi
+# 2026-11-19: 18 -> 8, the floor that proves the read worked: features pruned that day took
+# ☰ entries with them (Queues, Automation rules, Routines, ...) -- a requirement change
+if [ "$n" -ge 8 ]; then got=yes; else got="only $n"; fi
 assert_eq "the ☰ menu's entries were read from the panel" "yes" "$got"
 flat < "$ROOT/docs/controls.md" > "$TMP/controls.md"
 untold=""

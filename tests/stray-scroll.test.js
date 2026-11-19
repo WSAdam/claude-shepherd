@@ -69,7 +69,8 @@ eq("a sub-pixel offset is not worth a jump", p.fn() === false && p.calls.length 
 
 // it has to run without anyone scrolling: on every tick's render, on a resize, and when the
 // window comes back (the offset went stale while the screen was locked)
-check("every tick's render checks it (ccUpdate)", /window\.ccUpdate = function\(items, providers, bundles\)\{[\s\S]{0,400}clampStrayScroll\(\);/.test(src));
+// 2026-11-19: ccUpdate lost its `bundles` argument with policy bundles; the render still checks it
+check("every tick's render checks it (ccUpdate)", /window\.ccUpdate = function\(items, providers\)\{[\s\S]{0,400}clampStrayScroll\(\);/.test(src));
 check("a resize checks it", src.indexOf('window.addEventListener("resize", clampStrayScroll);') >= 0);
 check("coming back into view checks it", src.indexOf('document.addEventListener("visibilitychange", clampStrayScroll);') >= 0);
 

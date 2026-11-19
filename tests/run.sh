@@ -340,9 +340,6 @@ echo ""
 echo "== lua: handoff notes -- written on the done edge, left for a respawn, pruned after 14 days (behavioral, stubbed hs + git) =="
 HOME="$(mktemp -d)" lua "$DIR/handoff.test.lua" || fail=1
 echo ""
-echo "== lua: an agent profile's policy bundle -- left by its spawn, taken by the session at SessionStart into the files the card's Policy dropdown writes (behavioral, stubbed hs + the real hook) =="
-HOME="$(mktemp -d)" lua "$DIR/profile-policy.test.lua" || fail=1
-echo ""
 echo "== bash: the session mailbox -- a message handed over at the turn end or the next start, once (cc-status.sh) =="
 bash "$DIR/mailbox.test.sh" || fail=1
 echo ""
@@ -385,7 +382,7 @@ echo ""
 echo "== lua: gate blame -- a red gate's command again at the merge-base, behind the gates that judge a merge, split into main's failures and the branch's (behavioral, stubbed hs + a real git repo) =="
 HOME="$(mktemp -d)" lua "$DIR/gateblame.test.lua" || fail=1
 echo ""
-echo "== lua: the scheduled main-green check -- a gate routine runs the repo's merge gate in its main checkout, in the gate lane; red raises one banner, a card flag and a coach-log entry, green clears it, couldn't-run never reds, a freeze or a held session stands it down (behavioral, stubbed hs + a real git repo) =="
+echo "== lua: the main-green check -- a request runs the repo's merge gate in its main checkout, in the gate lane; red raises one banner, a card flag and a coach-log entry, green clears it, couldn't-run never reds, a freeze or a held session stands it down (behavioral, stubbed hs + a real git repo) =="
 HOME="$(mktemp -d)" lua "$DIR/maingreen.test.lua" || fail=1
 echo ""
 echo "== lua: Remote Control on every card -- a session file with no bridgeSessionId shows a chip, and a VS Code tab alone in its window gets /remote-control once past the grace, never a shared window or one that's in (behavioral, stubbed hs + a temp session registry) =="
@@ -532,14 +529,8 @@ echo ""
 echo "== lua: the fleet-idle alert -- one banner (plus an ntfy push) once every local session has been idle for alerts.idleMinutes, re-armed only when one works again, an interrupted turn idle and a quiet one not, spoken through hs.speech when alerts.voice is on (pure + behavioral, stubbed hs) =="
 HOME="$(mktemp -d)" lua "$DIR/fleet-idle.test.lua" || fail=1
 echo ""
-echo "== lua: My List playbooks -- the native chooser (never a webview path) adds a markdown source, its lines import like TODO.md's, the per-tick watch follows the file, Remove keeps the items (behavioral, stubbed hs) =="
-HOME="$(mktemp -d)" lua "$DIR/worklist-playbooks.test.lua" || fail=1
-echo ""
 echo "== lua: the main moved notice -- who hears (live sibling worktrees whose files overlap the merge), the message, the verify's @@files and the radar's one-worktree scan on real repos, then the verified edge to the sibling's inbox: turn-end only (never typed), once per merged sha on disk across a reload (pure + behavioral, stubbed hs) =="
 HOME="$(mktemp -d)" lua "$DIR/main-moved.test.lua" || fail=1
-echo ""
-echo "== node: My List playbooks -- Add on project tabs only, sources listed with Remove, rows grouped under the file's name, escaped (real browser) =="
-node "$DIR/worklist-playbooks.browser.test.js" || fail=1
 echo ""
 echo "== bash: a checklist run's reports -- done and blocked for the run and item a brief names, refusals, the record core.parseRunReport reads (cc-run.sh) =="
 bash "$DIR/checklist-run.test.sh" || fail=1

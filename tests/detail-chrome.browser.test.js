@@ -61,9 +61,11 @@ const NOW = Math.floor(Date.now() / 1000);
 const WORKING = { key: "k1", name: "alpha", label: "alpha", status: "working", editor: "kitty",
                   since: NOW - 60, updated: NOW, cwd: "/tmp/alpha" };
 // The rows the toggle is about, and the ones a waiting gate has to bring back.
-const HIDDEN_ROWS = ["#d-actions", "#d-controls", "#nudge-row", "#tpl-menu", "#nudge-chip"];
+// 2026-11-19: #tpl-menu went with prompt templates
+const HIDDEN_ROWS = ["#d-actions", "#d-controls", "#nudge-row", "#nudge-chip"];
 const GATE_KEEPS = ["b-approve", "b-deny", "deny-note", "b-stop"];
-const GATE_DROPS = ["b-jump", "b-auto", "b-clear", "b-compact", "b-improve", "b-score", "b-timeline", "b-export"];
+// 2026-11-19: b-auto (Autopilot) went with autopilot
+const GATE_DROPS = ["b-jump", "b-clear", "b-compact", "b-improve", "b-score", "b-timeline", "b-export"];
 
 (async () => {
   let browser;
@@ -89,8 +91,8 @@ const GATE_DROPS = ["b-jump", "b-auto", "b-clear", "b-compact", "b-improve", "b-
       selectedKey = item.key;
       renderDetail();
       const disp = {};
-      ["#d-actions", "#d-controls", "#nudge-row", "#tpl-menu", "#nudge-chip", "#d-ask", "#d-plan",
-       "#b-jump", "#b-approve", "#b-deny", "#deny-note", "#b-stop", "#b-auto", "#b-clear",
+      ["#d-actions", "#d-controls", "#nudge-row", "#nudge-chip", "#d-ask", "#d-plan",
+       "#b-jump", "#b-approve", "#b-deny", "#deny-note", "#b-stop", "#b-clear",
        "#b-compact", "#b-improve", "#b-score", "#b-timeline", "#b-export"].forEach(function (sel) {
         const el = document.querySelector(sel);
         disp[sel] = el ? getComputedStyle(el).display : "(missing)";
@@ -195,7 +197,7 @@ const GATE_DROPS = ["b-jump", "b-auto", "b-clear", "b-compact", "b-improve", "b-
   // ---- 6. turning it back off restores the panel exactly ----
   const off = await page.evaluate((it) => window.__show(it, { modelControls: true }), WORKING);
   check("off again: the class is dropped  (" + off.body + ")", off.body.indexOf("nochrome") < 0);
-  HIDDEN_ROWS.filter(function (s) { return s !== "#tpl-menu" && s !== "#nudge-chip"; }).forEach(function (sel) {
+  HIDDEN_ROWS.filter(function (s) { return s !== "#nudge-chip"; }).forEach(function (sel) {
     check("off again: " + sel + " is back  (" + off.disp[sel] + ")", off.disp[sel] !== "none");
   });
   GATE_DROPS.forEach(function (id) {

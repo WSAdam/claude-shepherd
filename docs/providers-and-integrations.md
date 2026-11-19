@@ -2,17 +2,24 @@
 
 [← README](../README.md) · [Configuration](configuration.md) · [Controls](controls.md)
 
-Other models and backends, saved agent profiles, the MCP and skills inventory, Claude Code's Remote
+Other models and backends, the find-only audit, the MCP and skills inventory, Claude Code's Remote
 Control, and sessions on other machines.
 
 ## Providers and models
 
 Shepherd supervises **Claude Code** sessions, and Claude Code can talk to other backends, so a
 "provider profile" is a **named bundle of environment variables plus a model id** injected into the
-`claude` launch. Define profiles in **⚙ Settings → Spawn → Providers**, pick one per session in the
-**New session** dialog (or set a default), and switch a running session's model live with the detail
-panel's **Model** dropdown (`/model`). The tile and detail panel show a **model** badge for what's
-actually running.
+`claude` launch. The Settings editor for profiles and the New session dialog's **Provider** choice
+were removed on 2026-11-19; a `providers` list you keep by hand in `cc-config.json` still works:
+
+- `spawn.provider` names the profile every new session launches with (the dialog, ⌘⌥S and a preset
+  alike). Leave it unset for bare `claude`.
+- The detail panel's **Model** dropdown (`/model`) lists the profiles' models and switches a running
+  session's model live. The tile and detail panel show a **model** badge for what's actually running.
+- Respawn and restart in place match a session's model (and base URL) back to its profile, so a
+  gateway session comes back on its gateway.
+- A profile's `contextLimit` sets the context bar's window, and its `ssh` block is where the
+  [SSH status bridge](#ssh-status-bridge) finds its hosts.
 
 Two kinds:
 
@@ -49,31 +56,6 @@ CLI* (aider, gemini-cli) is out of scope: those have no hook system, so tiles an
 work. A per-provider `contextLimit` sets the context bar's window
 ([Usage and cost](usage-and-cost.md#context-fullness-bar)).
 
-## Agent profiles
-
-Beyond presets (folder + editor + mode + provider), the New session dialog has an **Agents** row:
-saved, reusable **agent profiles** you hand work to. A profile is a name, a persona (role, goal,
-backstory), a provider and model, a permission mode, an optional seed task, and attached **skills**,
-**MCP servers**, **knowledge** folders and **plugins**. Click an **✦ agent chip** to spawn from it in
-one click; **Save as agent** captures the current form.
-
-The **✦ Agents** editor (☰ menu) creates, edits, forks, archives, favourites and deletes profiles,
-and spawns from them. Its **⚙ MCP servers** sub-editor manages the servers you can attach (id,
-label, stdio / sse / http, command and arguments or URL, allowed tools, and the *name* of the
-environment variable that holds the auth token). Profiles live in `~/.claude/cc-agents.json` and
-servers in `~/.claude/cc-mcp.json`: operator data with **no secrets**; an MCP server's auth is an
-environment-variable name your shell expands, never a value. `modelByMode` and `requiredEnv` are
-hand-edit only (the editor keeps them).
-
-Spawning from an agent emits the matching Claude Code launch flags: `--append-system-prompt`
-(persona and skills), `--mcp-config` (built from `cc-mcp.json`, secrets as `${VAR}` references),
-`--add-dir` (knowledge), `--agent` and `--plugin-dir`. Real spawning still honours `spawn.live`.
-A profile's **policy bundle** has no launch flag: the spawn leaves it in `~/.claude/cc-notes/pending/`
-and the session that starts in that folder takes it at SessionStart, as if you had picked it from
-the card's **Policy** dropdown. One left for 10 minutes with no session to take it is dropped.
-`--mcp-config` and `--add-dir` take any number of values in Claude Code, so each goes out as one
-`--flag=value` word; written apart, the last one also took the agent's seed prompt as a value.
-
 ## Find-only audit
 
 The **🔍 Audit (find-only)** chip in the New session dialog is a built-in preset: it spawns an
@@ -93,7 +75,7 @@ files Playwright names itself), where the auditor can't rewrite them. Claude Cod
 `.claude` folder under `dontAsk`, which is also why the findings file lives in `~/.cc-audit/`
 instead.
 
-A PreToolUse hook that answers "allow" overrides `dontAsk`: Shepherd's gate, autopilot, an
+A PreToolUse hook that answers "allow" overrides `dontAsk`: Shepherd's gate, an
 auto-allow pattern or your **Approve** on the card can do that. A deny rule wins over any hook, so
 `--settings` carries the rules that must hold whatever the gate says:
 
@@ -129,8 +111,7 @@ leaves your findings in `~/.cc-audit/`.
 
 ## MCPs and Skills
 
-**🔌 MCPs & Skills** (☰ menu) is a read-only catalogue of what's installed for Claude Code, distinct
-from the agent-profile registry above:
+**🔌 MCPs & Skills** (☰ menu) is a read-only catalogue of what's installed for Claude Code:
 
 - **MCP servers**, read from `~/.claude.json` (the user-scope `mcpServers` plus every project's,
   de-duplicated; a server defined in both shows `user+project`). Each row shows scope, transport and
@@ -209,8 +190,8 @@ into Kitty windows.
 
 ## SSH status bridge
 
-A provider can carry `ssh: {"host": "devbox", "user": "me"}`: its sessions run `claude` on the remote
-machine inside a local terminal. With **⚙ Settings → Spawn → SSH status bridge** on, Shepherd also
+A provider can carry `ssh: {"host": "devbox", "user": "me"}`: its sessions (when `spawn.provider` names
+it) run `claude` on the remote machine inside a local terminal. With **⚙ Settings → Spawn → SSH status bridge** on, Shepherd also
 pulls each such host's remote `~/.claude/cc-status/` with rsync (every `bridge.intervalSeconds`;
 key-based auth required), so those remote sessions show as **⇄ tiles** with live status.
 

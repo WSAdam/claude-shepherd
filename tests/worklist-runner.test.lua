@@ -8,7 +8,8 @@
 -- doneBy = "run:<id>", and its tab closes by the run's tag. One run per repo, none during a batch;
 -- a live-run item pauses it (Resume skips it); Stop ends it.
 --
--- Loads the real claude-dashboard.lua under the stubbed hs (the worklist-playbooks.test.lua harness),
+-- Loads the real claude-dashboard.lua under the stubbed hs (the harness worklist-playbooks.test.lua had,
+-- until playbooks were removed 2026-11-19),
 -- posts real bridge messages through the captured controller callback, and drives FX.runTick with
 -- handmade cards. FX.openClaudeTab / FX.readSessions / FX.closeTab are recorded, so nothing opens.
 -- Side-effect-free: every file lives in a temp dir; HOME is pointed there too.
@@ -55,7 +56,7 @@ local ENV = { CC_STATUS_DIR = T .. "/status", CC_LABELS_FILE = T .. "/labels.jso
               CC_WORKLIST_FILE = WL, CC_RUN_DIR = RUNDIR, HOME = T }
 os.getenv = function(k) if ENV[k] then return ENV[k] end; return realGetenv(k) end
 
--- ---- stubbed hs (the worklist-playbooks.test.lua harness) -------------------
+-- ---- stubbed hs (the old worklist-playbooks.test.lua harness) ---------------
 local function mkstub()
   return setmetatable({}, { __index = function() return mkstub() end, __call = function() return mkstub() end })
 end

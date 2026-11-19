@@ -691,20 +691,9 @@ do
   local src = f and f:read("*a") or ""
   if f then f:close() end
   check("js-pin: dashboard source readable", #src > 0)
-  -- #15: a cancelled default-provider pick must not resurrect from the stale DOM.
-  -- showSettings passes the SAVED spawn.provider ("" = bare claude); falling back
-  -- to sel.value would re-select -- and any Save silently persist -- the cancel.
-  check("js-pin: refreshProviderDefault has NO stale-DOM fallback",
-        src:find("want = want || sel.value", 1, true) == nil)
-  check("js-pin: refreshProviderDefault keeps the saved-empty sentinel",
-        src:find('want = want || "";', 1, true) ~= nil)
-  -- #11: switching a provider card's kind back to claude must clear the
-  -- gateway-only fields the Save-merge inherited -- a stale baseUrl poisons
-  -- providerByModel's respawn matching (see core.test.lua's pure-side pin).
-  check("js-pin: non-gateway kind clears baseUrl/authTokenEnv on Save",
-        src:find("delete p.baseUrl; delete p.authTokenEnv;", 1, true) ~= nil)
-  check("js-pin: non-gateway kind clears smallFastModel/headers on Save",
-        src:find("delete p.smallFastModel; delete p.headers;", 1, true) ~= nil)
+  -- #15 (the Default provider select's stale-DOM fallback) and #11 (a provider card switched back to
+  -- Claude clearing its gateway fields): 2026-11-19, REQUIREMENT CHANGE -- the Settings providers
+  -- editor and its Default provider select went with the provider choice; see "Provider choice is gone".
   -- Context bar: the % must live ON the bar (a .pct label), the fill width is still the
   -- pct, and the band classes/colors must cover b0..b6 (mirror of core.contextBand).
   check("js-pin: ctx-bar carries a visible % label",
@@ -946,94 +935,31 @@ do
         src:find('else if(which === "shift"){ if(LEDGER_ON) openShiftReport(); }', 1, true) ~= nil)
 end
 
--- ---- L1 Agent Profiles: dashboard wiring pins ------------------------------
--- Source-level guards that the L1 FX layer / handleAction / modal JS stay wired
--- (claude-dashboard.lua is not directly unit-tested; the pure logic is in
--- cc-core + core.test). These catch an accidental unwiring on refactor.
+-- ---- L1 launch flags + skills enumerator: dashboard wiring pins ----------------
+-- 2026-11-19, REQUIREMENT CHANGE: the saved agent profile pins (cc-agents.json / cc-mcp.json I/O, the
+-- agent and MCP-registry actions, spawn from a saved agent, the modal's agent chips, Save as agent and
+-- skills card) went with agent profiles; see "Agent profiles are gone". The skills enumerator (the 🔌
+-- viewer) and the launch-flag plumbing the audit preset and restart use stay.
 do
   local f = io.open(ROOT .. "claude-dashboard.lua", "r")
   local src = f and f:read("*a") or ""
   if f then f:close() end
   check("l1-pin: dashboard source readable", #src > 0)
-
-  -- FX layer
-  check("l1-pin: AGENT_FILE constant", src:find("cc%-agents%.json") ~= nil)
-  check("l1-pin: MCP_FILE constant", src:find("cc%-mcp%.json") ~= nil)
-  check("l1-pin: FX.readAgents", src:find("function FX.readAgents()", 1, true) ~= nil)
-  check("l1-pin: FX.writeAgents", src:find("function FX.writeAgents(", 1, true) ~= nil)
-  check("l1-pin: FX.readMcp", src:find("function FX.readMcp()", 1, true) ~= nil)
   check("l1-pin: FX.listSkills enumerator", src:find("function FX.listSkills()", 1, true) ~= nil)
   check("l1-pin: listSkills uses core parser", src:find("core.parseSkillFrontmatter", 1, true) ~= nil)
-  check("l1-pin: FX.writeMcpConfig", src:find("function FX.writeMcpConfig(", 1, true) ~= nil)
 
   -- spawnSession threads agentOpts -> spawnExtraFlags (via opts.*)
   check("l1-pin: spawnSession takes agentOpts",
         src:find("function FX.spawnSession(editor, project, task, permissionMode, providerId, agentOpts, isNew, modelOverride)", 1, true) ~= nil)
   check("l1-pin: opts.appendSystemPrompt threaded", src:find("opts.appendSystemPrompt = agentOpts.appendSystemPrompt", 1, true) ~= nil)
   check("l1-pin: opts.mcpConfigPath threaded", src:find("opts.mcpConfigPath = agentOpts.mcpConfigPath", 1, true) ~= nil)
-
-  -- handleAction CRUD + spawn-from-agent
-  check("l1-pin: agent CRUD action", src:find('a == "agent%-save" or a == "agent%-delete" or a == "agent%-fork"') ~= nil)
-  check("l1-pin: agentPush wired", src:find("core.agentPush(FX.readAgents()", 1, true) ~= nil)
-  check("l1-pin: agentFork wired", src:find("core.agentFork(FX.readAgents()", 1, true) ~= nil)
-  check("l1-pin: mcp CRUD action", src:find('a == "mcp%-save" or a == "mcp%-delete"') ~= nil)
-  check("l1-pin: spawn resolves a saved agent", src:find("core.resolveAgent(profile, { mcpState = FX.readMcp() })", 1, true) ~= nil)
-  check("l1-pin: spawn writes the mcp-config", src:find("FX.writeMcpConfig(profile.name, res.mcpConfig)", 1, true) ~= nil)
-  check("l1-pin: spawn passes agentOpts", src:find("payload.provider and tostring(payload.provider) or nil, agentOpts, mode == \"new\")", 1, true) ~= nil)
-  check("l1-pin: spawn_agent ledger event", src:find('type = "spawn_agent"', 1, true) ~= nil)
-  check("l1-pin: open-new feeds agentState", src:find("agentState = { agents = core.agentList(FX.readAgents())", 1, true) ~= nil)
-
-  -- modal JS
-  check("l1-pin: Agents chip row in modal", src:find('id="n%-agents"') ~= nil)
-  check("l1-pin: skills card in modal", src:find('id="n%-skills"') ~= nil)
-  check("l1-pin: showNew takes agentState", src:find("function showNew(cfg, recent, browse, presetState, agentState, templates)", 1, true) ~= nil)
-  check("l1-pin: agentSpawn carries agent name", src:find("agent:p.name", 1, true) ~= nil)
-  check("l1-pin: ccAgents updater", src:find("function ccAgents(list)", 1, true) ~= nil)
-  check("l1-pin: saveAgent button", src:find("function saveAgent()", 1, true) ~= nil)
-  check("l1-pin: renderSkills card", src:find("function renderSkills()", 1, true) ~= nil)
+  -- 2026-11-19: the provider argument is nil now (the dialog's provider choice was removed)
+  check("l1-pin: spawn passes agentOpts", src:find("      nil, agentOpts, mode == \"new\")", 1, true) ~= nil)
+  check("l1-pin: spawn_agent ledger event (the audit preset)", src:find('type = "spawn_agent"', 1, true) ~= nil)
 end
 
--- ---- L2 named policy bundles: dashboard wiring pins ------------------------
-do
-  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
-  local src = f and f:read("*a") or ""
-  if f then f:close() end
-  check("l2-pin: dashboard source readable", #src > 0)
-  check("l2-pin: POLICY_DIR matches cc-approve default", src:find("/.claude/cc%-policy\"") ~= nil)
-  check("l2-pin: POLICY_OVERRIDE_DIR", src:find("cc%-policy%-override") ~= nil)
-  check("l2-pin: FX.policyOverride", src:find("function FX.policyOverride(", 1, true) ~= nil)
-  check("l2-pin: FX.writeResolvedPolicy", src:find("function FX.writeResolvedPolicy(", 1, true) ~= nil)
-  check("l2-pin: set-policy handler", src:find('a == "set%-policy"') ~= nil)
-  check("l2-pin: refresh resolves policy", src:find("core.resolvePolicy(cfg,", 1, true) ~= nil)
-  check("l2-pin: change-gated write via policyCache", src:find("policyCache[it.key] ~= enc", 1, true) ~= nil)
-  check("l2-pin: bundle names pushed to panel", src:find("core.policyBundles(cfg)", 1, true) ~= nil)
-  check("l2-pin: ccUpdate takes bundles", src:find("window.ccUpdate = function(items, providers, bundles)", 1, true) ~= nil)
-  check("l2-pin: d-policy select in detail", src:find('id="d%-policy"') ~= nil)
-  check("l2-pin: onPolicyChange", src:find("function onPolicyChange()", 1, true) ~= nil)
-  check("l2-pin: syncPolicySelect called", src:find("syncPolicySelect(it)", 1, true) ~= nil)
-  check("l2-pin: d-policy disabled for remote", src:find('"d-model","d-gate","d-policy","nudge"', 1, true) ~= nil)
-
-  -- cc-approve.sh reads the per-session policy file (KEEP-IN-SYNC anchor)
-  local g = io.open(ROOT .. "cc-approve.sh", "r")
-  local gsrc = g and g:read("*a") or ""
-  if g then g:close() end
-  check("l2-pin: cc-approve POLICY_DIR default", gsrc:find("CC_POLICY_DIR", 1, true) ~= nil)
-  check("l2-pin: cc-approve reads POLICY_FILE in match_patterns",
-        gsrc:find('jq -r --arg k "$leaf"', 1, true) ~= nil)
-  check("l2-pin: cc-approve bundle in ledger by", gsrc:find('by="bundle:$POLICY_BUNDLE"', 1, true) ~= nil)
-
-  -- Review fixes: orphan sweep (decoupled from hasAtt/hasOvr), atomic write, cc_remove cleanup.
-  check("l2-fix: orphan sweep reads POLICY_DIR", src:find("for _, n in ipairs(FX.readDir(POLICY_DIR))", 1, true) ~= nil)
-  check("l2-fix: sweep clears keys not (re)written this tick", src:find("not wrote[n] then", 1, true) ~= nil)
-  check("l2-fix: writeResolvedPolicy is atomic (temp+rename)",
-        src:find("torn truncate-then-write", 1, true) ~= nil and src:find("os.rename(tmp, path)", 1, true) ~= nil)
-  local lib = io.open(ROOT .. "cc-lib.sh", "r")
-  local lsrc = lib and lib:read("*a") or ""
-  if lib then lib:close() end
-  check("l2-fix: cc-lib hoists CC_POLICY_DIR", lsrc:find("CC_POLICY_DIR=", 1, true) ~= nil)
-  check("l2-fix: cc_remove reaps the L2 policy files",
-        lsrc:find('"$CC_POLICY_DIR/$1" "$CC_POLICY_OVERRIDE_DIR/$1"', 1, true) ~= nil)
-end
+-- ---- L2 named policy bundles: their pins went with them (2026-11-19, requirement change; see
+-- "Policy bundles and autopilot are gone") ----
 
 -- ---- L3 pins: template {{var}} render wiring (dashboard) -------------------
 -- cc-core owns the render (no JS render twin); these guard the FX handler +
@@ -1043,43 +969,8 @@ do
   local src = f and f:read("*a") or ""
   if f then f:close() end
   check("l3-pin: dashboard source readable", #src > 0)
-  -- Lua handler: render action (cc-core authoritative) + versioned save + rich list
-  check("l3-pin: template-render action", src:find('a == "template%-render"') ~= nil)
-  check("l3-pin: render via cc-core",
-        src:find("core.renderTemplate(core.composeTemplate(rec)", 1, true) ~= nil)
-  check("l3-pin: prev_output from selected tile", src:find("sel.activity", 1, true) ~= nil)
-  check("l3-pin: save is versioned",
-        src:find("core.templatePushVersioned(FX.readTemplates()", 1, true) ~= nil)
-  check("l3-pin: list reply carries vars", src:find("vars = core.effectiveVars(r)", 1, true) ~= nil)
-  check("l3-pin: rendered echoed to panel", src:find("ccTemplateRendered(", 1, true) ~= nil)
-  -- panel JS: var form -> render round-trip -> no-auto-send insert
-  check("l3-pin: JS ccTemplateRendered", src:find("function ccTemplateRendered(o)", 1, true) ~= nil)
-  check("l3-pin: JS var form", src:find("function renderVarForm()", 1, true) ~= nil)
-  check("l3-pin: JS sends template-render", src:find('send("template-render"', 1, true) ~= nil)
-  check("l3-pin: required-var gates Insert", src:find("btn.disabled = !ok", 1, true) ~= nil)
-  check("l3-pin: menu renders body", src:find('esc(t.body || "")', 1, true) ~= nil)
-  check("l3-pin: insert stays no-auto-send", src:find("el.value = (o && o.text)", 1, true) ~= nil)
-  -- review-fix: dropped/corrupt records are surfaced, not silently reaped on save/delete
-  check("l3-pin: load surfaces dropped records", src:find("dropped \" .. #loaded.errors", 1, true) ~= nil)
-  -- Inc 3: render-before-spawn — modal template picker seeds #n-task via the same render
-  check("l3-pin: shared enrichedTemplates helper", src:find("local function enrichedTemplates()", 1, true) ~= nil)
-  check("l3-pin: open-new passes templates to modal", src:find("local tpls = enrichedTemplates()", 1, true) ~= nil)
-  check("l3-pin: showNew takes templates arg",
-        src:find("function showNew(cfg, recent, browse, presetState, agentState, templates)", 1, true) ~= nil)
-  check("l3-pin: modal n-templates row", src:find('id="n-templates"', 1, true) ~= nil)
-  check("l3-pin: modal picker fn", src:find("function modalTplPick(name)", 1, true) ~= nil)
-  check("l3-pin: render target switch", src:find("var tplRenderTarget", 1, true) ~= nil)
-  check("l3-pin: modal render targets n-task", src:find('tplRenderTarget = "n-task"', 1, true) ~= nil)
-  check("l3-pin: modal required-var gates Use", src:find('document.getElementById("m-tpl-go")', 1, true) ~= nil)
-  -- 2026-11-19, REQUIREMENT CHANGE: the task queue was removed (see "The task queue, auto-feed and project
-  -- routing are gone"); Inc 4's render-before-feed pins (renderFeed) went with it.
-  -- Inc 5: definition source — import *.prompt/*.md from a local dir via cc-core
-  check("l3-pin: PROMPTS_DIR constant", src:find("local PROMPTS_DIR", 1, true) ~= nil)
-  check("l3-pin: FX.listPromptFiles", src:find("function FX.listPromptFiles(dir)", 1, true) ~= nil)
-  check("l3-pin: template-import handler", src:find('a == "template%-import"') ~= nil)
-  check("l3-pin: import via cc-core promptImport", src:find("core.promptImport(FX.readTemplates()", 1, true) ~= nil)
-  check("l3-pin: sourceDir config override", src:find('core.config(loadConfig(), "templates.sourceDir"', 1, true) ~= nil)
-  check("l3-pin: JS import row", src:find("function templateImport()", 1, true) ~= nil)
+  -- 2026-11-19, REQUIREMENT CHANGE: the L3 template pins went with prompt templates (see "Prompt
+  -- templates are gone"); this block's later pins stay.
   -- 2026-11-19, REQUIREMENT CHANGE: the task queue was removed (see "The task queue, auto-feed and project
   -- routing are gone"); the L4 pins (@role:/@all: routing, applyGroups before the
   -- router, sequential mode, per-task timing and its reaping) went with it.
@@ -1128,19 +1019,8 @@ do
         and src:find("origin = opts and opts.origin })", 1, true) ~= nil)
   check("l5-pin: banner decision via cc-core", src:find("core.notifyDecision(pv.status, it, cfg)", 1, true) ~= nil)
   check("l5-pin: banner gated off by default", src:find('core.config(cfg, "notifications.banner.onApproval", false)', 1, true) ~= nil)
-  -- L6: event-callback rule engine (cc-rules.json, off by default), safe processors
-  check("l6-pin: RULES_FILE + FX.readRules", src:find("local RULES_FILE", 1, true) ~= nil
-        and src:find("function FX.readRules()", 1, true) ~= nil)
-  check("l6-pin: rules gated off by default", src:find('core.config(cfg, "rules.enabled", false)', 1, true) ~= nil)
-  check("l6-pin: ruleSet loaded once per refresh", src:find("core.ruleList(FX.readRules())", 1, true) ~= nil)
-  check("l6-pin: runRules helper", src:find("local function runRules(ruleSet, it, edgeKind)", 1, true) ~= nil)
-  check("l6-pin: fires via core.rulesForEdge", src:find("core.rulesForEdge(ruleSet, edgeKind, it)", 1, true) ~= nil)
-  check("l6-pin: fired on a fresh status edge", src:find("runRules(ruleSet, it, it.status)", 1, true) ~= nil)
-  check("l6-pin: log processor ledgers by:rule", src:find('type = "rule", rule = r.name', 1, true) ~= nil)
-  -- 2026-09-28 requirement change: the nudge now carries Shepherd's mark; same delivery-gated path.
-  check("l6-pin: nudge processor uses delivery-gated path",
-        src:find('core.handleAction(FX, target, "nudge", core.shepherdSays(p.text))', 1, true) ~= nil)
-  check("l6-pin: once-state reaped on vanish", src:find("if tk and not newPrev[tk] then ruleFired[k] = nil", 1, true) ~= nil)
+  -- L6: the event-callback rule engine's pins went with automation rules (2026-11-19, requirement
+  -- change; see "Automation rules are gone"). L6 Inc 3's automation result ledger below stays.
   -- L6 Inc 3: automation result ledger — outcome field + the previously-silent blocked branch
   -- R1-22: outcome reflects the REAL launch (ok on a real spawn, dryrun on the no-op),
   -- and the dead tile is dropped only when a launch actually happened.
@@ -1161,10 +1041,7 @@ do
   -- from Adam's); his own Continue click still types a plain "continue".
   check("auto-continue types a [shepherd]-marked continue",
         src:find('core.handleAction(FX, ct, "continue", core.shepherdSays("continue"))', 1, true) ~= nil)
-  check("a rule's continue is marked too",
-        src:find('core.handleAction(FX, target, "continue", core.shepherdSays("continue"))', 1, true) ~= nil)
-  check("a rule's nudge is marked too",
-        src:find('core.handleAction(FX, target, "nudge", core.shepherdSays(p.text))', 1, true) ~= nil)
+  -- (a rule's continue and nudge were marked too; they went with automation rules, 2026-11-19)
   check("the self-summary prompt is marked too",
         src:find("{ text = core.shepherdSays(core.summaryPrompt(su)) }", 1, true) ~= nil)
   -- 2026-09-28: a finished tile says how its last turn ended: read from the tail on the done edge,
@@ -1176,112 +1053,13 @@ do
   check("a vanished tile's label is reaped", src:find("core.reapUnbacked(FX._turnLabel, newPrev)", 1, true) ~= nil)
   check("the card says how the turn ended", src:find("return (LABELS[st] || st) + turnTail(it);", 1, true) ~= nil)
   check("...and so does its Instances row", src:find('(LABELS[im.status] || "Idle") + turnTail(im)', 1, true) ~= nil)
-  -- L7: scheduled routines (cc-schedules.json, off by default) firing engine
-  check("l7-pin: SCHEDULES_FILE + FX.readSchedules", src:find("local SCHEDULES_FILE", 1, true) ~= nil
-        and src:find("function FX.readSchedules()", 1, true) ~= nil)
-  check("l7-pin: schedules gated off by default", src:find('core.config(cfg, "schedules.enabled", false)', 1, true) ~= nil)
-  check("l7-pin: fires via core.dueSchedules", src:find("core.dueSchedules(core.scheduleList(sstate), os.time())", 1, true) ~= nil)
-  check("l7-pin: fires through the normal spawn fx", src:find("FX.spawnSession(r.editor or core.config(cfg", 1, true) ~= nil)
-  check("l7-pin: backpressure honored", src:find("core.scheduleBackpressure(liveCount, cap)", 1, true) ~= nil)
-  check("l7-pin: mark fired (stamp/self-delete)", src:find("core.scheduleMarkFired(sstate, r.name, os.time())", 1, true) ~= nil)
-  check("l7-pin: schedule_fire ledger", src:find('type = "schedule_fire", routine = r.name', 1, true) ~= nil)
-  -- L7 Inc 4: periodic digest action pushes a fleetStandup over a window
-  check("l7-pin: digest action branch", src:find('if r.action == "digest" then', 1, true) ~= nil)
-  check("l7-pin: digest builds fleetStandup", src:find("core.fleetStandup(ledgerSnapshot()", 1, true) ~= nil)
-  check("l7-pin: digest pushes via FX.push", src:find('FX.push(topic, "Claude Shepherd: shift report', 1, true) ~= nil)
-  -- L7 board UI (deferred polish): the routine board overlay + CRUD bridge handlers
-  check("l7board-pin: open/save/delete/toggle bridge",
-        src:find('a == "open-routines" or a == "schedule-save" or a == "schedule-delete"', 1, true) ~= nil)
-  check("l7board-pin: save via core.schedulePush", src:find("core.schedulePush(FX.readSchedules()", 1, true) ~= nil)
-  check("l7board-pin: delete via core.scheduleRemove", src:find("core.scheduleRemove(FX.readSchedules()", 1, true) ~= nil)
-  check("l7board-pin: toggle via core.scheduleSetEnabled", src:find("core.scheduleSetEnabled(FX.readSchedules()", 1, true) ~= nil)
-  check("l7board-pin: board annotated via core.scheduleBoard", src:find("core.scheduleBoard(core.scheduleList(FX.readSchedules())", 1, true) ~= nil)
-  check("l7board-pin: ccSchedules reply carries enabled+live", src:find('wv:evaluateJavaScript("ccSchedules("', 1, true) ~= nil)
-  -- run-now: a separate handler that fires immediately, bypassing cron/enabled
-  check("l7board-pin: run-now handler", src:find('a == "schedule-run-now"', 1, true) ~= nil)
-  check("l7board-pin: run-now resolves via scheduleGet", src:find("core.scheduleGet(FX.readSchedules()", 1, true) ~= nil)
-  check("l7board-pin: run-now ledgers by manual", src:find('by = "manual"', 1, true) ~= nil)
-  -- panel JS: the board render + the cron-builder twin
-  check("l7board-pin: ccSchedules render fn", src:find("function ccSchedules(list, schedOn, live)", 1, true) ~= nil)
-  check("l7board-pin: cronBuildJS twin present", src:find("function cronBuildJS(spec)", 1, true) ~= nil)
-  check("l7board-pin: cronBuildJS noted as a twin of core.cronBuild",
-        src:find("HAND%-MIRRORED twin of core.cronBuild") ~= nil)
-  check("l7board-pin: drawer routines entry", src:find("menuPick('routines')", 1, true) ~= nil)
-  check("l7board-pin: routines overlay markup", src:find('<div id="routines">', 1, true) ~= nil)
-  -- review fixes (adversarial pass): edit must not drop non-form fields, rename
-  -- must keep lastFiredAt, and a name collision must confirm before clobbering.
-  check("l7board-pin: edit carries forward lastFiredAt",
-        src:find("if(prev.lastFiredAt != null) rec.lastFiredAt = prev.lastFiredAt", 1, true) ~= nil)
-  check("l7board-pin: edit carries forward model/refs/tags",
-        src:find('["model","templateRef","agentRef","tags"].forEach', 1, true) ~= nil)
-  check("l7board-pin: pushTopic editable in-panel", src:find('gv("rf-pushtopic")', 1, true) ~= nil)
-  check("l7board-pin: name-collision confirm",
-        src:find("already exists — overwrite it?", 1, true) ~= nil)
-  -- L3 templates editor (deferred polish): structured authoring + version/revert
-  check("l3ed-pin: editorTemplates structured reply", src:find("local function editorTemplates()", 1, true) ~= nil)
-  check("l3ed-pin: editor bridge handlers",
-        src:find('a == "template-editor-list" or a == "template-editor-save"', 1, true) ~= nil)
-  check("l3ed-pin: versioned save via templatePushVersioned", src:find("core.templatePushVersioned(stt, rec", 1, true) ~= nil)
-  check("l3ed-pin: rename preserves history via core.templateRename", src:find("core.templateRename(stt, oldName, rec.name)", 1, true) ~= nil)
-  check("l3ed-pin: carries forward vars schema", src:find("if prior and prior.vars then rec.vars = prior.vars end", 1, true) ~= nil)
-  check("l3ed-pin: versions reply", src:find("core.templateVersions(FX.readTemplates(), name)", 1, true) ~= nil)
-  check("l3ed-pin: revert via core.templateRevert", src:find("core.templateRevert(FX.readTemplates()", 1, true) ~= nil)
-  check("l3ed-pin: ccTplEditor render fn", src:find("function ccTplEditor(list)", 1, true) ~= nil)
-  check("l3ed-pin: ccTplVersions render fn", src:find("function ccTplVersions(name, versions)", 1, true) ~= nil)
-  check("l3ed-pin: drawer templates entry", src:find("menuPick('templates')", 1, true) ~= nil)
-  check("l3ed-pin: templates overlay markup", src:find('<div id="tpleditor">', 1, true) ~= nil)
-  -- L1 agents registry editor (deferred polish): full-field authoring + attach + MCP surface
-  check("l1ed-pin: editor bridge handlers",
-        src:find('a == "open-agents-editor" or a == "agent-ed-save"', 1, true) ~= nil)
-  check("l1ed-pin: save via core.agentPush", src:find("core.agentPush(st0, p)", 1, true) ~= nil)
-  check("l1ed-pin: carries forward non-form fields", src:find('"modelByMode", "requiredEnv", "versions", "forkedFrom"', 1, true) ~= nil)
-  check("l1ed-pin: rename removes old record first", src:find("st0 = core.agentRemove(st0, oldName)", 1, true) ~= nil)
-  check("l1ed-pin: flag toggle via core.agentSetFlag", src:find("core.agentSetFlag(FX.readAgents()", 1, true) ~= nil)
-  check("l1ed-pin: fork via core.agentFork", src:find("core.agentFork(FX.readAgents()", 1, true) ~= nil)
-  check("l1ed-pin: MCP registry save via core.mcpPush in editor", src:find('a == "mcp-ed-save"', 1, true) ~= nil)
-  check("l1ed-pin: editor bundle reply", src:find('wv:evaluateJavaScript("ccAgentEd("', 1, true) ~= nil)
-  check("l1ed-pin: bundle carries skills+providers+bundles",
-        src:find("skills = FX.listSkills(), providers = core.config(lc", 1, true) ~= nil)
-  check("l1ed-pin: ccAgentEd render fn", src:find("function ccAgentEd(b)", 1, true) ~= nil)
-  check("l1ed-pin: attach chips union (no silent drop)", src:find("Object.keys(afSkills).forEach", 1, true) ~= nil)
-  check("l1ed-pin: drawer agents entry", src:find("menuPick('agents')", 1, true) ~= nil)
-  check("l1ed-pin: agents overlay markup", src:find('<div id="agented">', 1, true) ~= nil)
-  -- review fix: MCP form pre-validates the transport requirement before the
-  -- optimistic reset (else a server-side reject wipes the typed input).
-  check("l1ed-pin: MCP form pre-validates transport",
-        src:find('alert("stdio transport needs a command.")', 1, true) ~= nil)
+  -- L7 routines: the firing engine and the board's pins went with routines (2026-11-19, requirement
+  -- change; see "Routines are gone").
+  -- L3 templates editor: gone with prompt templates (2026-11-19, requirement change)
+  -- L1 agents registry editor: gone with agent profiles (2026-11-19, requirement change)
   -- L2 policy bundle/attachment editor (deferred polish): edits cc-config.json policies
-  check("l2ed-pin: policy editor bridge handlers",
-        src:find('a == "open-policy-editor" or a == "policy-bundle-save"', 1, true) ~= nil)
-  check("l2ed-pin: reads RAW config file", src:find("local raw = FX.readFile(CONFIG_FILE)", 1, true) ~= nil)
-  check("l2ed-pin: bundle save via core.policySetBundle", src:find("core.policySetBundle(policies, name, p)", 1, true) ~= nil)
-  check("l2ed-pin: bundle rename removes old key", src:find("policies = core.policyRemoveBundle(policies, oldName)", 1, true) ~= nil)
-  check("l2ed-pin: attachment add/move/remove",
-        src:find("core.policyAddAttachment(policies", 1, true) ~= nil
-        and src:find("core.policyMoveAttachment(policies, p.index, p.dir)", 1, true) ~= nil)
-  check("l2ed-pin: writes cfg.policies back", src:find("cfg.policies = policies", 1, true) ~= nil)
-  check("l2ed-pin: reply carries starters + armed",
-        src:find("hs.json.encode(core.DEFAULT_POLICY_BUNDLES)", 1, true) ~= nil
-        and src:find("FX.readFile(GATE_FLAG) ~= nil) and \"true\" or \"false\"", 1, true) ~= nil)
-  check("l2ed-pin: ccPolicyEd render fn", src:find("function ccPolicyEd(o)", 1, true) ~= nil)
-  check("l2ed-pin: drawer policies entry", src:find("menuPick('policies')", 1, true) ~= nil)
-  check("l2ed-pin: policy overlay markup", src:find('<div id="policyed">', 1, true) ~= nil)
-  -- L6 rules editor + new triggers/processors (deferred polish)
-  check("l6ed-pin: FX.writeRules", src:find("function FX.writeRules(state)", 1, true) ~= nil)
-  check("l6ed-pin: editor bridge handlers",
-        src:find('a == "open-rules-editor" or a == "rule-ed-save"', 1, true) ~= nil)
-  check("l6ed-pin: save via core.rulePush", src:find("core.rulePush(st0, p)", 1, true) ~= nil)
-  check("l6ed-pin: toggle via core.ruleSetEnabled", src:find("core.ruleSetEnabled(FX.readRules()", 1, true) ~= nil)
-  check("l6ed-pin: ccRuleEd render fn", src:find("function ccRuleEd(list, on)", 1, true) ~= nil)
-  check("l6ed-pin: drawer rules entry", src:find("menuPick('rules')", 1, true) ~= nil)
-  check("l6ed-pin: rules overlay markup", src:find('<div id="ruleed">', 1, true) ~= nil)
-  -- new triggers fired at their detection sites + new processors in the engine
-  check("l6trig-pin: loop trigger fired on rising edge", src:find('runRules(ruleSet, it, "loop")', 1, true) ~= nil)
-  check("l6trig-pin: hung trigger fired on rising edge", src:find('runRules(ruleSet, it, "hung")', 1, true) ~= nil)
-  -- 2026-11-19, REQUIREMENT CHANGE: the starved trigger and the feed processor went with the task queue
-  -- 2026-09-28 requirement change: the continue now carries Shepherd's mark; same delivery-gated path.
-  check("l6proc-pin: continue processor delivery-gated",
-        src:find('core.handleAction(FX, target, "continue", core.shepherdSays("continue"))', 1, true) ~= nil)
+  -- (the L2 policy editor's pins went with policy bundles, 2026-11-19 -- requirement change)
+  -- L6 rules editor, triggers and processors: gone with automation rules (2026-11-19, requirement change)
   -- L5 observability batch: Settings toggles (autoTitle/loop/banner) + hooks inspector
   check("l5b-pin: autoTitle toggle populated", src:find('cv(cfg,"autoTitle.enabled",false)', 1, true) ~= nil)
   check("l5b-pin: loop toggle populated", src:find('cv(cfg,"escalation.loop.enabled",false)', 1, true) ~= nil)
@@ -1872,32 +1650,11 @@ do
 
   -- DR3 Rewind tab: removed 2026-11-17 (Adam pruned it); its absence is pinned under "Pruned detail tabs".
 
-  -- ---- DR6: per-session model auto-routing (opt-in, off by default) -----------
-  -- The model switch + the task feed are ONE atomic delivery via pasteIntoWindow's
-  -- preface (so the pop/commit can't race a 2nd tick); the switch is local-native only
-  -- and ledgered ONLY on a delivered feed.
-  -- 2026-11-19, REQUIREMENT CHANGE: the task queue went, and with it the feed this switch rode on --
-  -- FX.feedTask, FX.autoModelPreface and both feed sites' pins below are gone.
-  check("dr6-pin: pasteIntoWindow submits the preface then settles before the main text",
-        src:find("local preface =", 1, true) ~= nil
-        and src:find("after(0.5, function() runFrom(1) end)", 1, true) ~= nil)
-  check("dr6-pin: per-session opt-in file (presence=on), off by default, NEVER fleet-wide",
-        src:find("function FX.autoModelOn(key)", 1, true) ~= nil
-        and src:find("function FX.setAutoModel(key, on)", 1, true) ~= nil
-        and src:find('a == "set-automodel"', 1, true) ~= nil)
-  check("dr6-pin: set-automodel rejects remote/gateway sessions",
-        src:find("it.remote or not core.isAnthropicSession(it.model, it.base_url)", 1, true) ~= nil)
-  -- R1-31: the gate must ALSO exclude kitty/terminal (the effect no-ops for them) at
-  -- all 3 opt-in sites, so the checkbox can't advertise a setting the delivery ignores.
-  check("r1-31-pin: set-automodel rejects kitty/terminal too",
-        src:find('it.editor == "kitty" or it.editor == "terminal") then', 1, true) ~= nil)
-  check("dr6-pin: detail toggle wired + gated to local-native (checkbox disabled otherwise)",
-        src:find('id="d-automodel"', 1, true) ~= nil
-        and src:find("function onAutoModelChange()", 1, true) ~= nil
-        and src:find("var ok = !it.remote && !!it.anthropic && it.editor !== 'kitty' && it.editor !== 'terminal';", 1, true) ~= nil)
-  check("dr6-pin: per-tile auto_model/anthropic decoration is local-native short-circuited",
-        src:find("it.anthropic = core.isAnthropicSession(it.model, it.base_url)", 1, true) ~= nil
-        and src:find('it.auto_model = (not it.remote) and it.anthropic and it.editor ~= "kitty" and it.editor ~= "terminal"', 1, true) ~= nil)
+  -- ---- DR6: per-session model auto-routing -- removed 2026-11-19 -----------------------------
+  -- 2026-11-19, REQUIREMENT CHANGE: the task queue went first, and with it the feed this switch rode
+  -- on (FX.feedTask, FX.autoModelPreface); then model auto-routing itself -- the preface, the
+  -- cc-automodel opt-in, set-automodel and its gates, the Auto-model checkbox and the tile's
+  -- auto_model / anthropic fields. See "Model auto-routing is gone".
   -- (2026-11-19: the delivered-feed half went with the queue; the manual switch still persists)
   check("r3-03-pin: a manual model switch is persisted via patchStatus(model)",
         src:find("FX.patchStatus(item.key, { model = item.model })", 1, true) ~= nil)
@@ -1905,46 +1662,12 @@ do
         src:find("function dispatchSerialized(item, action, fn, extraStagger)", 1, true) ~= nil
         and src:find("BULK_STAGGER + (tonumber(extraStagger) or 0)", 1, true) ~= nil)
 
-  -- ---- DR7: A/B fork-to-compare (panel flow, worktree isolation) --------------
-  -- A/B is now a PER-PROJECT action (tile right-click menu), not a global header button.
-  check("dr7-pin: A/B modal + open-ab bridge still wired",
-        src:find('id="abmodal"', 1, true) ~= nil
-        and src:find('a == "open-ab"', 1, true) ~= nil)
-  check("abproj-pin: the global header A/B button is GONE",
-        src:find('id="b-ab"', 1, true) == nil
-        and src:find('onclick="openAb()"', 1, true) == nil)
-  check("abproj-pin: A/B lives in the tile right-click context menu, scoped to its folder",
-        src:find("A/B fork-to-compare", 1, true) ~= nil
-        and src:find('openAb(" .. jsString(item.cwd or "")', 1, true) ~= nil)
-  check("abproj-pin: openAb(repo) pre-fills the (still-editable) repo field",
-        src:find("function openAb(repo){ AB_PREFILL", 1, true) ~= nil
-        and src:find('rp.value = AB_PREFILL', 1, true) ~= nil)
-  check("dr7-pin: launch creates a worktree per variant then spawns into it (cold-start)",
-        src:find("function FX.abLaunch(spec)", 1, true) ~= nil
-        and src:find("core.abCohortPlan(spec)", 1, true) ~= nil
-        and src:find("core.gitWorktreeAddCmd(plan.repoRoot", 1, true) ~= nil
-        and src:find('FX.spawnSession("vscode", v.worktreePath, v.task, spec.mode, v.provider or "", nil, true, v.model)', 1, true) ~= nil)
-  check("dr7-pin: launch rolls back created worktrees + branches on a failed add",
-        src:find("core.gitWorktreeRemoveCmd(plan.repoRoot, c.path)", 1, true) ~= nil
-        and src:find("core.gitBranchDeleteCmd(plan.repoRoot, c.branch)", 1, true) ~= nil
-        and src:find("FX.gitRoot(plan.repoRoot)", 1, true) ~= nil)
-  check("dr7-pin: a raw per-variant model rides ANTHROPIC_MODEL (no provider needed)",
+  -- ---- DR7: A/B fork-to-compare -- removed 2026-11-19 ----------------------------------------
+  -- 2026-11-19, REQUIREMENT CHANGE: the modal, the tile-menu entry, launch / keep / judge and their
+  -- worktree pins went with A/B compare; see "A/B compare is gone". The raw model override stays
+  -- (respawn relaunches a session on the model it ran).
+  check("dr7-pin: a raw model override rides ANTHROPIC_MODEL (no provider needed)",
         src:find('{ name = "ANTHROPIC_MODEL", value = modelOverride, secret = false }', 1, true) ~= nil)
-  check("dr7-pin: keep-winner closes losers + removes their worktrees, behind a confirm",
-        src:find("function FX.abKeep(cohort, winnerLabel)", 1, true) ~= nil
-        and src:find("core.gitWorktreeRemoveCmd(c.repoRoot, v.worktreePath)", 1, true) ~= nil
-        and src:find('hs.dialog.blockAlert("Keep \\"" .. tostring(req.winner)', 1, true) ~= nil)
-  check("dr7-pin: compare uses DR4 runScore + core.abCompare for the winner",
-        src:find("core.runScore(led.events, sid, scoreOpts)", 1, true) ~= nil   -- 2026-09-30: with score.weights
-        and src:find("core.abCompare(c.variants, scores)", 1, true) ~= nil)
-  check("dr7-pin: optional LLM-judge pastes core.abJudgePrompt, delivery-gated",
-        src:find("function FX.abJudge(cohort)", 1, true) ~= nil
-        and src:find("core.abJudgePrompt(c.task, entries)", 1, true) ~= nil
-        and src:find('FX.pasteIntoWindow(winTarget(firstTile)', 1, true) ~= nil)
-  check("dr7-pin: cohort keys read RAW from esc'd data- attrs (no JS-string interpolation)",
-        src:find("function keepAbBtn(el)", 1, true) ~= nil
-        and src:find('data-cohort="\'+esc(c.cohort)+\'"', 1, true) ~= nil
-        and src:find("el.getAttribute(\"data-cohort\")", 1, true) ~= nil)
 end
 
 -- ---- Appearance: token layer + injection + tabbed settings -----------------
@@ -2042,7 +1765,7 @@ do
   check("detail chrome: the body class hides the bottom rows",
         src:find("body.nochrome #d-controls", 1, true) ~= nil
         and src:find("body.nochrome #nudge-row", 1, true) ~= nil
-        and src:find("body.nochrome #tpl-menu", 1, true) ~= nil
+        -- (2026-11-19: #tpl-menu went with prompt templates)
         and src:find("body.nochrome #nudge-chip", 1, true) ~= nil
         and src:find("body.nochrome #d-actions { display:none", 1, true) ~= nil)
   -- The trap: `body.mctl #d-controls { display:flex }` has EQUAL specificity, so only source
@@ -2584,10 +2307,7 @@ do
         src:find("if a == \"nudge\" and not FX.nudgeSafeNow(item) then", 1, true) ~= nil)
   check("#27-pin: per-tile skip is ledgered",
         src:find('type = "nudge_skipped", reason = "approval"', 1, true) ~= nil)
-  check("#27-pin: rule-nudge slot re-checks at fire time",
-        src:find("if not FX.nudgeSafeNow(target) then", 1, true) ~= nil)
-  check("#27-pin: rule-nudge skip is ledgered as processor=nudge_skipped",
-        src:find('processor = "nudge_skipped", reason = "approval"', 1, true) ~= nil)
+  -- (#27's rule-nudge pins went with automation rules, 2026-11-19 -- requirement change)
 
   -- #9: ledgerSnapshot's one-shot `changed` edge is latched (ledgerCache.dirty)
   -- so non-refresh callers (decision log, shift report, digest, per-tile banner)
@@ -2614,11 +2334,10 @@ do
     check("#13-pin: sweeps decision claim files (incl. .parked)",
           body:find('key .. ".decision.claim."', 1, true) ~= nil)
     check("#13-pin: removes the gate-tools override", body:find("GATE_TOOLS_DIR", 1, true) ~= nil)
-    check("#13-pin: removes the autopilot expiry", body:find("AUTOPILOT_DIR", 1, true) ~= nil)
-    check("#13-pin: removes the resolved policy", body:find("POLICY_DIR", 1, true) ~= nil)
-    check("#13-pin: removes the policy override", body:find("POLICY_OVERRIDE_DIR", 1, true) ~= nil)
+    -- (2026-11-19, requirement change: the autopilot expiry and the two policy files went with
+    -- autopilot and policy bundles)
     check("#13-pin: removes the approveRepeats memo", body:find("cc-approved", 1, true) ~= nil)
-    check("#13-pin: removes the automodel marker", body:find("cc-automodel", 1, true) ~= nil)
+    -- (2026-11-19, requirement change: the automodel marker went with model auto-routing)
 
     -- #13-drift (review q87): the per-key file family is encoded TWICE -- here and
     -- in cc_remove (cc-lib.sh) -- bound only by a "KEEP IN SYNC" comment. The
@@ -2721,9 +2440,7 @@ do
   check("#22-pin: heartbeat written atomically",
         src:find("FX.writeFileAtomic(HEARTBEAT, tostring(now))", 1, true) ~= nil
         and src:find("FX.writeFile(HEARTBEAT", 1, true) == nil)
-  check("#22-pin: autopilot expiry written atomically",
-        src:find("FX.writeFileAtomic(AUTOPILOT_DIR", 1, true) ~= nil
-        and src:find("FX.writeFile(AUTOPILOT_DIR", 1, true) == nil)
+  -- (2026-11-19, requirement change: the autopilot expiry went with autopilot)
   check("#22-pin: gate-tools override written atomically",
         src:find("FX.writeFileAtomic(GATE_TOOLS_DIR", 1, true) ~= nil
         and src:find("FX.writeFile(GATE_TOOLS_DIR", 1, true) == nil)
@@ -3088,12 +2805,9 @@ do
   check("#23-pin: JS renders the timeout instead of pinning 'searching…'",
         src:find('res.timedOut ? "search timed out (30s)', 1, true) ~= nil)
 
-  -- #29: FX.abKeep closes each loser through the serialized injection tail (a
-  -- captured per-loser target), not a direct synchronous loop whose overdue
-  -- ⌘⇧W beats fired back-to-back into whatever was frontmost -- including the
-  -- WINNER's window.
-  check("#29-pin: abKeep loser close rides the injection tail",
-        src:find('dispatchSerialized(tile, "close", function() FX.closeWindow(target) end)', 1, true) ~= nil)
+  -- #29: FX.abKeep closed each loser through the serialized injection tail, not a direct
+  -- synchronous loop whose overdue ⌘⇧W beats fired back-to-back into whatever was frontmost.
+  -- 2026-11-19, REQUIREMENT CHANGE: abKeep went with A/B compare; the direct close stays gone.
   check("#29-pin: the direct un-serialized close is gone",
         src:find("FX.closeWindow({ name = tile.name", 1, true) == nil)
 
@@ -3187,8 +2901,8 @@ do
   check("sharedwin-pin: every target comes from FX.targetFor (the shared count rides along)",
         src:find("local function winTarget(it) return FX.targetFor(it) end", 1, true) ~= nil
         and body("function FX.targetFor(it)", 400):find("shared = it.sharedWindow", 1, true) ~= nil
-        and body("function FX.runImprove(item)", 3000):find("local target = FX.targetFor(item)", 1, true) ~= nil
-        and body("function FX.abKeep(", 1200):find("local target = FX.targetFor(tile)", 1, true) ~= nil)
+        and body("function FX.runImprove(item)", 3000):find("local target = FX.targetFor(item)", 1, true) ~= nil)
+  -- (2026-11-19, requirement change: FX.abKeep's clause went with A/B compare)
   do
     local s = body("local function sendToWindow(target, sendFn)", 600)
     check("sharedwin-pin: sendToWindow (Stop, key approvals, Close) refuses before focusing",
@@ -3801,16 +3515,7 @@ do
         and twr:find("FX.liveStatusFor(", 1, true) ~= nil)
   check("readiness: FX.kittyScreen reads get-text", src:find('core.kittyCmd("get-text", kittyItem(target))', 1, true) ~= nil)
 
-  local rules = src:match("local function runRules%(ruleSet, it, edgeKind%)(.-)\nend\n") or ""
-  check("readiness: a rule's nudge asks first", rules:find('FX.typeWhenReady(target, "rule-nudge", function(', 1, true) ~= nil)
-  -- 2026-09-28 (requirement changed, feat/no-progress-backoff): a rule's continue is held by
-  -- auto-continue's back-off (core.queueRuleContinue in runRules) and typed from the tick once due,
-  -- so it asks first there now; still never dispatched around readiness in either place.
-  local tick = src:match("function FX%._refreshBody%(%)(.-)\nend\n") or ""
-  check("readiness: a rule's continue asks first", tick:find('FX.typeWhenReady(target, "rule-continue", function(', 1, true) ~= nil)
-  check("readiness: ...and neither dispatches around it",
-        not rules:find('dispatchSerialized(target, "rule-nudge"', 1, true) and not rules:find('dispatchSerialized(target, "rule-continue"', 1, true)
-        and not tick:find('dispatchSerialized(target, "rule-continue"', 1, true))
+  -- (a rule's nudge and continue asked first too; they went with automation rules, 2026-11-19)
   local body = src:match("function FX%._refreshBody%(%)(.-)\nend\n") or ""
   -- (2026-11-19, requirement change: auto-feed and the router went with the task queue)
   check("readiness: auto-continue asks first", body:find('FX.typeWhenReady(ct, "auto-continue", function(', 1, true) ~= nil)
@@ -3849,16 +3554,10 @@ do
   check("backoff: ...and autoContinue.backoff.maxSeconds (default 1800)",
         src:find('backoffMax = tonumber(core.config(cfg, "autoContinue.backoff.maxSeconds", 1800))', 1, true) ~= nil)
   check("backoff: the tile carries how long it still waits", src:find("it.backoffSeconds = cstep.backoff", 1, true) ~= nil)
-  check("backoff: a rule's continue is held by the same back-off, not typed on the edge",
-        src:find("core.queueRuleContinue(autoContinueState, it, r.name, edgeKind, FX.now())", 1, true) ~= nil)
-  check("backoff: ...and typed from the tick once it's due",
-        src:find('if cstep.rule then', 1, true) ~= nil
-        and src:find('FX.typeWhenReady(target, "rule-continue", function()', 1, true) ~= nil)
-  check("backoff: a rule's held continue is dropped when the rules engine is off",
-        src:find("rulesOn = ruleSet ~= nil", 1, true) ~= nil)
+  -- 2026-11-19, REQUIREMENT CHANGE: a rule's held continue went with automation rules -- its three
+  -- pins, and the autoContinueState.rule reap, are gone; the per-tile turn state is still reaped.
   check("backoff: per-tile state is reaped with the tile",
-        src:find("core.reapUnbacked(autoContinueState.rule, newPrev)", 1, true) ~= nil
-        and src:find("core.reapUnbacked(autoContinueState.turnSeen, newPrev)", 1, true) ~= nil)
+        src:find("core.reapUnbacked(autoContinueState.turnSeen, newPrev)", 1, true) ~= nil)
   check("backoff: the streak is reaped against the live budget keys",
         src:find("core.reapUnbacked(autoContinueState.streak, liveBudgetKeys)", 1, true) ~= nil
         and src:find("or next(autoContinueState.streak) then", 1, true) ~= nil)
@@ -4250,7 +3949,7 @@ do
     if not core.AUTOMATION_TYPISTS[typist] then unknown[#unknown + 1] = typist end
   end
   check("trace: every FX.typeWhenReady sender has a kind  (" .. typists .. " senders; unknown: "
-        .. table.concat(unknown, ",") .. ")", typists >= 9 and #unknown == 0)
+        .. table.concat(unknown, ",") .. ")", typists >= 5 and #unknown == 0)   -- 2026-11-19: 9 -> 5, the queue's and rules' senders went
   -- the direct effects: each sits inside FX.automationAct(<kind>, ...) and appears once
   local function wrapped(kind, needle)
     local count, pos = 0, 0
@@ -4275,8 +3974,7 @@ do
   end
   wrapped("tabless_end", "FX.endSession(it.key, { auto = true")
   wrapped("respawn", "local launched = FX.spawnSession(rs.editor, rs.project, nil, rs.permissionMode,")
-  wrapped("rule", 'processor = "log", note = p.text')
-  wrapped("rule", 'processor = "relabel", to = p.label')
+  -- (a rule's log and relabel went with automation rules, 2026-11-19)
   -- (2026-11-19: the rule's feed processor went with the task queue -- requirement change)
   wrapped("mailbox", "FX.writeFileAtomic(path, m.body)")
   -- 2026-11-19: the two "resume" effects went with resume at the limit reset (REQUIREMENT CHANGE)
@@ -4814,15 +4512,12 @@ do
   local src = f and f:read("*a") or ""
   if f then f:close() end
   -- 2026-09-30: no tile carried providerId, so a rule's provider match never matched
-  local stamp, rules = src:find("core.stampProviders(list, cfg)", 1, true), src:find("local ruleSet     = rulesOn and", 1, true)
-  check("rule provider: the tick stamps every tile's provider id before the rules are loaded and run",
-        stamp ~= nil and rules ~= nil and stamp < rules)
+  -- (2026-11-19, requirement change: the stamp went with automation rules, its only reader)
   -- 2026-09-30: both callers scored with no opts, so score.weights was read by nothing
   check("score weights: the Score button scores and trends with score.weights",
         src:find("local r = core.runScore(res.events, target.session_id, scoreOpts)", 1, true) ~= nil
         and src:find("local trend = core.scoreTrend(res.events, scoreOpts)", 1, true) ~= nil)
-  check("score weights: the A/B compare scores with them too",
-        src:find("local scoreOpts = core.scoreOpts(loadConfig())   -- 2026-09-30: score.weights reaches the compare", 1, true) ~= nil)
+  -- (2026-11-19, requirement change: the A/B compare's scoring went with A/B compare)
   check("score weights: no caller is left scoring without them",
         not src:find("core.runScore(led.events, sid)", 1, true) and not src:find("core.runScore(res.events, target.session_id)", 1, true))
   -- 2026-09-30: Shepherd's two tab limits are core's, which cc-fleet.sh's default is held above
@@ -4892,14 +4587,7 @@ do
   local f = io.open(ROOT .. "claude-dashboard.lua", "r")
   local src = f and f:read("*a") or ""
   if f then f:close() end
-  -- 2026-09-30: the Routines banner sent Adam to ⚙ Settings for schedules.enabled, which has no
-  -- control there (it is a file-only switch, docs/configuration.md)
-  local banner = src:match('if%(!SCHED_ON%) notes%.push%("([^"\n]*)"%);') or ""
-  check("routines banner: says scheduling is off", banner:find("Scheduling is OFF", 1, true) ~= nil)
-  check("routines banner: names the switch and the file it is in",
-        banner:find("schedules.enabled", 1, true) ~= nil and banner:find("cc-config.json", 1, true) ~= nil)
-  check("routines banner: doesn't point at a Settings control that doesn't exist  (" .. banner .. ")",
-        banner ~= "" and (not banner:find("Settings", 1, true) or src:find('id="s-schedules', 1, true) ~= nil))
+  -- 2026-09-30: the Routines banner's pins went with routines (2026-11-19, requirement change)
   -- 2026-09-30: the help under the auto-approve banner switch still said it can lag ~30s, from
   -- when the ledger cache had a 30s backstop. The snapshot is checked against the files' size and
   -- mtime on every call, so the banner follows the decision by a tick.
@@ -5117,11 +4805,8 @@ do
         (src:find("FX.annotateStacks(list, labels, cfg)", 1, true) or 1e9) < (src:find("pcall(FX.stepMainGreen, list, cfg)", 1, true) or 0))
   check("main green: its runs go in the gate lane as `low`",
         src:find("slot = FX._mainGreenRuns, gkey = gkey, g = g, low = true", 1, true) ~= nil)
-  check("main green: the routine form offers the gate action",
-        src:find('<option value="gate">', 1, true) ~= nil)
-  local runNow = src:match('if a == "schedule%-run%-now" then.-\n    return\n  end') or ""
-  check("main green: Run on a gate routine runs the check, never a spawn",
-        runNow:find('r.action == "gate"', 1, true) ~= nil and runNow:find("FX.mainGreenFire(", 1, true) ~= nil)
+  -- 2026-11-19, REQUIREMENT CHANGE: the routine form's gate action and Run on a gate routine went with
+  -- routines; a check is now asked for on FX._mainGreen.due (see "Routines are gone")
 end
 
 -- ---- Run selected: the checklist runner in My List (2026-10-03, mining round 2 D3b) ----
@@ -5131,8 +4816,10 @@ do
   if f then f:close() end
   local block = src:match("\n%-%- %-%-%-%- Run selected: the checklist runner in My List.-\nfunction FX%.runTick%(list%).-\nend\n") or ""
   check("runner: the FX block is found", block ~= "")
-  check("runner: the tick moves the runs, after the playbook sync",
-        (src:find("pcall(FX.playbookSyncTick)", 1, true) or math.huge) < (src:find("pcall(FX.runTick, list)", 1, true) or 0))
+  -- 2026-11-19, REQUIREMENT CHANGE: the playbook sync this ran after went with playbooks; the
+  -- TODO.md sync it also follows is the one left
+  check("runner: the tick moves the runs, after the TODO.md sync",
+        (src:find("FX.todoAutoSyncTick(list)", 1, true) or math.huge) < (src:find("pcall(FX.runTick, list)", 1, true) or 0))
   check("runner: an item's tab opens through FX.openClaudeTab, quiet, its brief typed in",
         block:find("FX.openClaudeTab({ root = run.root, editor = editor, prompt = core.runBrief(run, item)", 1, true) ~= nil
         and block:find("quiet = true", 1, true) ~= nil)
@@ -5150,8 +4837,9 @@ do
         and block:find("core.worklistRunCheck(st, run.key, item.id, run, now)", 1, true) ~= nil)
   -- 2026-11-19: "a hold or a freeze holds the run" went with the hands-off hold (REQUIREMENT CHANGE)
   check("runner: no hold is asked of a run", not block:find("FX.holdOf", 1, true) and not block:find("FX._run.held", 1, true))
+  -- 2026-11-19: the helper is FX.tabTodoRoots now (it was FX.playbookTodoRoots; playbooks went)
   check("runner: the start message carries no path: the folder is the tab's own",
-        block:find("FX.playbookTodoRoots(key, st)[1]", 1, true) ~= nil)
+        block:find("FX.tabTodoRoots(key, st)[1]", 1, true) ~= nil)
 end
 
 -- ---- Grey cards: a live session with no status file is shown, never acted on (2026-10-03, mining round 2 F1) ----
@@ -5709,6 +5397,380 @@ do
   check("kept: graceful drain", src:find("core.shouldDrainClose(draining[it.key], pv and pv.status, it.status)", 1, true) ~= nil)
   check("kept: FX.typeWhenReady", src:find("\nfunction FX.typeWhenReady(", 1, true) ~= nil)
   check("kept: uninstall --purge still clears an old cc-queue", slurp("uninstall.sh"):find(" cc-queue ", 1, true) ~= nil)
+end
+
+-- ---- Automation rules are gone (2026-11-19) ----
+-- Adam, 2026-11-19: "prune features I have no use for". REQUIREMENT CHANGE: the L6 pins asserted
+-- ~/.claude/cc-rules.json rules fired on session edges, and ☰ → Automation rules edited them. Gone:
+-- the engine, its triggers in the tick, a rule's held continue in auto-continue, the editor, the
+-- rules.* config keys and dry-run switch, and it.providerId (only a rule's match read it). Kept:
+-- auto-continue itself (Adam uses it), the loop and hung watchdogs, and the Automation trace.
+do
+  local function slurp(name)
+    local f = io.open(ROOT .. name, "r")
+    local s = f and f:read("*a") or ""
+    if f then f:close() end
+    return s
+  end
+  local src = slurp("claude-dashboard.lua")
+  local okCore, c = pcall(dofile, ROOT .. "cc-core.lua")
+  check("no rules: no engine in the tick", not src:find("runRules", 1, true) and not src:find("ruleSet", 1, true)
+        and not src:find("ruleFired", 1, true) and not src:find('"rules.enabled"', 1, true))
+  check("no rules: no cc-rules.json I/O", not src:find("RULES_FILE", 1, true) and not src:find("FX.readRules", 1, true)
+        and not src:find("FX.writeRules", 1, true))
+  check("no rules: no ☰ → Automation rules or its editor", not src:find("menuPick('rules')", 1, true)
+        and not src:find('<div id="ruleed">', 1, true) and not src:find("#ruleed{", 1, true)
+        and not src:find("function ccRuleEd(", 1, true) and not src:find('a == "open-rules-editor"', 1, true))
+  check("no rules: auto-continue holds no rule continue", not src:find("cstep.rule", 1, true)
+        and not src:find('"rule-continue"', 1, true) and not src:find('"rule-nudge"', 1, true))
+  check("no rules: core keeps none of it", okCore and c.ruleList == nil and c.rulesForEdge == nil and c.rulePush == nil
+        and c.RULE_TRIGGERS == nil and c.queueRuleContinue == nil and c.stampProviders == nil)
+  local dry = {}
+  for _, f in ipairs(okCore and c.DRY_RUN_FEATURES or {}) do dry[f.feature] = true end
+  check("no rules: no dry-run switch or Trace kind for it", okCore and not dry.rules and c.AUTOMATION_TYPISTS["rule-nudge"] == nil)
+  local keys = {}
+  for _, f in ipairs(okCore and c.FEATURES or {}) do keys[f.key] = true end
+  check("no rules: not in the feature list", okCore and not keys.rules)
+  -- what stays
+  local okStep, step = pcall(c.stepAutoContinue, {}, { key = "k", projectKey = "p", status = "error" },
+    { enabled = true, now = 100, minSeconds = 0, maxAttempts = 3, statusKnown = true })
+  check("kept: auto-continue still fires on an error", okStep and type(step) == "table" and step.fire == true)
+  check("kept: auto-continue in the tick", src:find('FX.typeWhenReady(ct, "auto-continue", function()', 1, true) ~= nil)
+  check("kept: the loop and hung watchdogs still ledger", src:find('ledgerFor(it, { type = "loop", repeats = loopRepeats })', 1, true) ~= nil
+        and src:find('ledgerFor(it, { type = "hung", minutes = hungMin })', 1, true) ~= nil)
+  check("kept: uninstall --purge still clears an old cc-rules.json", slurp("uninstall.sh"):find(" cc-rules.json ", 1, true) ~= nil)
+end
+
+-- ---- Routines are gone (2026-11-19) ----
+-- Adam, 2026-11-19: "prune features I have no use for". REQUIREMENT CHANGE: the L7 pins asserted
+-- ~/.claude/cc-schedules.json routines fired on a cron (a spawn, a shift-report digest, a main-green
+-- check) and ☰ → Routines edited and ran them. Gone: the routine tick, the board and its bridge
+-- actions, schedules.* and core's cron/schedule layer. Kept: the main-green engine (Adam kept it) --
+-- a check is still started by putting a { name, folder } record on FX._mainGreen.due, which
+-- FX.stepMainGreen takes each tick -- and the scheduled-tasks lock check, a different thing.
+do
+  local function slurp(name)
+    local f = io.open(ROOT .. name, "r")
+    local s = f and f:read("*a") or ""
+    if f then f:close() end
+    return s
+  end
+  local src = slurp("claude-dashboard.lua")
+  local okCore, c = pcall(dofile, ROOT .. "cc-core.lua")
+  check("no routines: no cc-schedules.json I/O", not src:find("SCHEDULES_FILE", 1, true) and not src:find("FX.readSchedules", 1, true)
+        and not src:find("FX.writeSchedules", 1, true))
+  check("no routines: nothing fires on a schedule", not src:find("schedulesOn", 1, true) and not src:find("core.dueSchedules", 1, true)
+        and not src:find('"schedules.enabled"', 1, true) and not src:find("schedule_fire", 1, true))
+  check("no routines: no ☰ → Routines or its board", not src:find("menuPick('routines')", 1, true)
+        and not src:find('<div id="routines">', 1, true) and not src:find("#routines{", 1, true)
+        and not src:find("function ccSchedules(", 1, true) and not src:find('a == "open-routines"', 1, true)
+        and not src:find('a == "schedule-run-now"', 1, true))
+  check("no routines: core keeps none of it", okCore and c.dueSchedules == nil and c.scheduleList == nil
+        and c.schedulePush == nil and c.cronMatches == nil and c.cronBuild == nil and c.scheduleBoard == nil)
+  local keys = {}
+  for _, f in ipairs(okCore and c.FEATURES or {}) do keys[f.key] = true end
+  check("no routines: not in the feature list", okCore and not keys.routines)
+  -- what stays
+  check("kept: the main-green engine and its intake", src:find("\nfunction FX.mainGreenFire(r, cfg, ident)", 1, true) ~= nil
+        and src:find("\nfunction FX.stepMainGreen(list, cfg)", 1, true) ~= nil and src:find("local due = FX._mainGreen.due", 1, true) ~= nil
+        and src:find("pcall(FX.stepMainGreen, list, cfg)", 1, true) ~= nil)
+  check("kept: main-green in the feature list", keys.maingreen == true)
+  check("kept: the scheduled-tasks lock check", okCore and type(c.SCHED_LOCK_SH) == "string" and keys.schedlock == true)
+  -- 2026-11-19: the shared editor helpers (mkRBtn, gv, .r-btn) went later with the ✦ Agents editor, their
+  -- last user; the Agent profiles block below pins that they're gone.
+  check("kept: uninstall --purge still clears an old cc-schedules.json", slurp("uninstall.sh"):find(" cc-schedules.json ", 1, true) ~= nil)
+end
+
+-- ---- Prompt templates are gone (2026-11-19) ----
+-- Adam, 2026-11-19: "prune features I have no use for". REQUIREMENT CHANGE: the L3 pins asserted saved
+-- task templates (~/.claude/cc-templates.json, imported from ~/.claude/cc-prompts/) with {{vars}},
+-- versions and an editor. Gone: Tpl ▾ by the message box, the New session dialog's Templates picker,
+-- ☰ → Templates with its editor, every template-* bridge action and core's template layer. Kept: the
+-- New session dialog's initial task, and Send by the message box.
+do
+  local function slurp(name)
+    local f = io.open(ROOT .. name, "r")
+    local s = f and f:read("*a") or ""
+    if f then f:close() end
+    return s
+  end
+  local src = slurp("claude-dashboard.lua")
+  local okCore, c = pcall(dofile, ROOT .. "cc-core.lua")
+  check("no templates: no cc-templates.json or cc-prompts I/O", not src:find("TEMPLATE_FILE", 1, true)
+        and not src:find("PROMPTS_DIR", 1, true) and not src:find("FX.readTemplates", 1, true) and not src:find("FX.listPromptFiles", 1, true))
+  check("no templates: no Tpl ▾ menu by the message box", not src:find('id="b-tpl"', 1, true) and not src:find('id="tpl-menu"', 1, true)
+        and not src:find("function toggleTemplates(", 1, true))
+  check("no templates: no Templates picker in the New session dialog", not src:find('id="n-templates"', 1, true)
+        and not src:find("function ccModalTemplates(", 1, true) and not src:find("enrichedTemplates", 1, true))
+  check("no templates: no ☰ → Templates or its editor", not src:find("menuPick('templates')", 1, true)
+        and not src:find('<div id="tpleditor">', 1, true) and not src:find("#tpleditor{", 1, true))
+  check("no templates: the bridge has no template actions", not src:find('a == "template-', 1, true))
+  check("no templates: core keeps none of it", okCore and c.renderTemplate == nil and c.templateList == nil
+        and c.promptImport == nil and c.templatePushVersioned == nil and c.effectiveVars == nil)
+  local keys = {}
+  for _, f in ipairs(okCore and c.FEATURES or {}) do keys[f.key] = true end
+  check("no templates: not in the feature list", okCore and not keys.templates)
+  -- what stays
+  check("kept: the New session dialog's initial task", src:find('<textarea id="n-task" class="s-area"></textarea>', 1, true) ~= nil)
+  check("kept: Send by the message box", src:find('<button id="b-nudge" onclick="sendNudge()">Send</button>', 1, true) ~= nil)
+  check("kept: uninstall --purge still clears old templates", slurp("uninstall.sh"):find(" cc-templates.json ", 1, true) ~= nil
+        and slurp("uninstall.sh"):find(" cc-prompts ", 1, true) ~= nil)
+end
+
+-- ---- Policy bundles and autopilot are gone (2026-11-19) ----
+-- Adam, 2026-11-19: "prune features I have no use for". REQUIREMENT CHANGE: the L2 and Phase 4c-C pins
+-- asserted named policy bundles (policies.bundles / attachments, core.resolvePolicy, the per-session
+-- ~/.claude/cc-policy/<key> file the gate read, the card's Policy dropdown, ☰ → Policy bundles) and
+-- autopilot (cc-autopilot/<key>, the Autopilot button, a bundle's autopilot). Gone, and the gate never
+-- reads a leftover file. Kept, and Adam answers them daily: always-ask commands (the built-ins plus
+-- policies.alwaysAsk.patterns), the approval gate, its fleet autoAllow / autoDeny patterns and
+-- approveRepeats.
+do
+  local function slurp(name)
+    local f = io.open(ROOT .. name, "r")
+    local s = f and f:read("*a") or ""
+    if f then f:close() end
+    return s
+  end
+  local src, gate, lib = slurp("claude-dashboard.lua"), slurp("cc-approve.sh"), slurp("cc-lib.sh")
+  local okCore, c = pcall(dofile, ROOT .. "cc-core.lua")
+  check("no policies: the gate reads no policy or autopilot file", not gate:find("POLICY_DIR", 1, true)
+        and not gate:find("POLICY_FILE", 1, true) and not gate:find("AUTOPILOT_DIR", 1, true) and not gate:find("autopilot.enabled", 1, true))
+  check("no policies: the hooks keep no policy or autopilot folder", not lib:find("CC_POLICY_DIR", 1, true)
+        and not lib:find("CC_AUTOPILOT_DIR", 1, true) and not lib:find("cc_take_pending_policy", 1, true)
+        and not slurp("cc-status.sh"):find("cc_take_pending_policy", 1, true))
+  check("no policies: the panel resolves and writes no bundle", not src:find("POLICY_DIR", 1, true)
+        and not src:find("core.resolvePolicy", 1, true) and not src:find("FX.writePendingPolicy", 1, true)
+        and not src:find('a == "set-policy"', 1, true))
+  check("no policies: no Policy dropdown, Autopilot button or ☰ → Policy bundles", not src:find('id="d-policy"', 1, true)
+        and not src:find('id="b-auto"', 1, true) and not src:find("menuPick('policies')", 1, true)
+        and not src:find('<div id="policyed">', 1, true) and not src:find('a == "open-policy-editor"', 1, true))
+  check("no policies: no autopilot anywhere in the panel", not src:find('a == "autopilot"', 1, true)
+        and not src:find("FX.autopilotActive", 1, true) and not src:find('id="s-ap-en"', 1, true))
+  check("no policies: core keeps none of it", okCore and c.resolvePolicy == nil and c.policyBundles == nil
+        and c.pendingPolicy == nil and c.DEFAULT_POLICY_BUNDLES == nil and c.policySetBundle == nil)
+  local keys = {}
+  for _, f in ipairs(okCore and c.FEATURES or {}) do keys[f.key] = true end
+  check("no policies: not in the feature list", okCore and not keys.policies)
+  -- what stays
+  check("kept: always-ask in the gate, before the gate-flag exit", gate:find("cc_always_ask_match \"$SUMMARY\" \"$AA_EXTRAS\"", 1, true) ~= nil
+        and gate:find("AA_EXTRAS=\"$(cc_config_array '.policies.alwaysAsk.patterns')\"", 1, true) ~= nil)
+  check("kept: the fleet autoDeny / autoAllow patterns and approveRepeats", gate:find("match_patterns autoDeny deny autoDeny", 1, true) ~= nil
+        and gate:find("match_patterns autoAllow allow autoAllow", 1, true) ~= nil and gate:find(".policies.approveRepeats", 1, true) ~= nil)
+  check("kept: the built-in always-ask list Settings shows", okCore and type(c.ALWAYS_ASK_BUILTINS) == "table" and #c.ALWAYS_ASK_BUILTINS >= 12)
+  check("kept: the merge gates' glob match", okCore and type(c.globEq) == "function" and c.globEq("*api*", "/x/api/y"))
+  check("kept: Settings' always-ask extras", src:find('id="s-aa-extra"', 1, true) ~= nil)
+  check("kept: uninstall --purge still clears old policy and autopilot files", slurp("uninstall.sh"):find(" cc-autopilot ", 1, true) ~= nil
+        and slurp("uninstall.sh"):find(" cc-policy cc-policy-override ", 1, true) ~= nil)
+end
+
+-- ---- Agent profiles are gone (2026-11-19) ----
+-- Adam, 2026-11-19: "prune features I have no use for". REQUIREMENT CHANGE: the L1 pins asserted saved
+-- agent profiles (~/.claude/cc-agents.json) with an MCP server registry (~/.claude/cc-mcp.json), spawn
+-- from a saved agent, Save as agent, the ✦ Agents editor and the New session dialog's agent chips and
+-- skills card. Gone. Kept: the New session dialog spawns a session in the folder you pick, the 🔍 Audit
+-- chip (its own launch files), and ☰ → MCPs & Skills -- its "N runs · x% ok" is How often each skill
+-- works, which isn't being removed, so the viewer stays until Adam decides.
+do
+  local function slurp(name)
+    local f = io.open(ROOT .. name, "r")
+    local s = f and f:read("*a") or ""
+    if f then f:close() end
+    return s
+  end
+  local src = slurp("claude-dashboard.lua")
+  local okCore, c = pcall(dofile, ROOT .. "cc-core.lua")
+  check("no agents: no cc-agents.json or cc-mcp.json I/O", not src:find("AGENT_FILE", 1, true) and not src:find("MCP_FILE", 1, true)
+        and not src:find("FX.readAgents", 1, true) and not src:find("FX.readMcp", 1, true) and not src:find("FX.writeMcpConfig", 1, true))
+  check("no agents: the bridge has no agent or MCP-registry actions", not src:find('a == "agent-save"', 1, true)
+        and not src:find('a == "open-agents-editor"', 1, true) and not src:find('a == "mcp-save"', 1, true)
+        and not src:find('a == "mcp-ed-save"', 1, true))
+  check("no agents: a spawn resolves no saved agent", not src:find("core.resolveAgent", 1, true) and not src:find("payload.agent", 1, true))
+  check("no agents: no ☰ → Agents or its editor", not src:find("menuPick('agents')", 1, true)
+        and not src:find('<div id="agented">', 1, true) and not src:find("#agented{", 1, true))
+  check("no agents: the New session dialog has no agent chips, Save as agent or skills card",
+        not src:find('id="n-agents"', 1, true) and not src:find("function saveAgent()", 1, true)
+        and not src:find('id="n-skills"', 1, true) and not src:find("function agentSpawn(", 1, true))
+  check("no agents: core keeps none of it", okCore and c.agentList == nil and c.resolveAgent == nil and c.mcpList == nil
+        and c.validateAgent == nil and c.profilesForFolder == nil and c.mcpConfig == nil)
+  check("no agents: the editor helpers went with their last user", not src:find("function mkRBtn(", 1, true)
+        and not src:find("function gv(id){", 1, true) and not src:find(".r-btn{", 1, true) and not src:find("#r-foot{", 1, true))
+  local keys = {}
+  for _, f in ipairs(okCore and c.FEATURES or {}) do keys[f.key] = true end
+  check("no agents: not in the feature list", okCore and not keys.agents)
+  -- what stays
+  check("kept: the New session dialog spawns in the picked folder", src:find("function submitNew()", 1, true) ~= nil
+        and src:find("FX.spawnSession(editor, dir, task,", 1, true) ~= nil)
+  check("kept: the 🔍 Audit chip", src:find("function auditSpawn(){", 1, true) ~= nil and src:find("core.auditLaunchOpts(plan", 1, true) ~= nil)
+  check("kept: ☰ → MCPs & Skills and its skill runs", src:find("menuPick('mcpskills')", 1, true) ~= nil
+        and src:find("runs = FX.skillRunsPayload()", 1, true) ~= nil and keys.mcp == true and keys.skillruns == true)
+  check("kept: the launch flags the audit and restart use", okCore and type(c.spawnExtraFlags) == "function"
+        and type(c.personaPrompt) == "function")
+  check("kept: uninstall --purge still clears old agent files", slurp("uninstall.sh"):find(" cc-agents.json ", 1, true) ~= nil
+        and slurp("uninstall.sh"):find(" cc-mcp.json ", 1, true) ~= nil and slurp("uninstall.sh"):find(" cc-mcp-configs ", 1, true) ~= nil)
+end
+
+-- ---- Provider choice is gone (2026-11-19) ----
+-- Adam, 2026-11-19: "prune features I have no use for". REQUIREMENT CHANGE: ⚙ Settings → Spawn's
+-- Providers editor and Default provider, and the New session dialog's Provider choice (with a preset's
+-- and a folder's remembered provider), are gone, and so is the "providers" entry in the features list.
+-- Kept: a `providers` list kept by hand in cc-config.json still feeds what reads it -- the SSH status
+-- bridge's hosts, respawn and restart rebuilding a gateway session, the Model dropdown, a provider's
+-- contextLimit and the spawn.provider default -- and a Settings Save no longer drops either of them.
+do
+  local function slurp(name)
+    local f = io.open(ROOT .. name, "r")
+    local s = f and f:read("*a") or ""
+    if f then f:close() end
+    return s
+  end
+  local src = slurp("claude-dashboard.lua")
+  local okCore, c = pcall(dofile, ROOT .. "cc-core.lua")
+  check("no providers: no Providers editor or Default provider in Settings", not src:find('id="s-providers"', 1, true)
+        and not src:find('id="s-spawn-provider"', 1, true) and not src:find("function renderProviders(", 1, true)
+        and not src:find("function addProvider(", 1, true) and not src:find(".prov-head", 1, true))
+  check("no providers: a Settings Save writes neither providers nor spawn.provider",
+        not src:find("providers: nonBlankProviders()", 1, true) and not src:find('provider: txt("s-spawn-provider")', 1, true))
+  check("no providers: the New session dialog has no Provider choice", not src:find('id="n-provider"', 1, true)
+        and not src:find("function fillProviderSelect(", 1, true))
+  check("no providers: the dialog's spawn carries no provider", not src:find("payload.provider", 1, true))
+  local keys = {}
+  for _, f in ipairs(okCore and c.FEATURES or {}) do keys[f.key] = true end
+  check("no providers: not in the feature list", okCore and not keys.providers)
+  -- what stays
+  check("kept: the spawn.provider default and a provider's launch env", okCore and type(c.spawnProviderKey) == "function"
+        and type(c.providerEnv) == "function" and type(c.providerById) == "function"
+        and src:find("core.providerById(cfg, core.spawnProviderKey(cfg, providerId))", 1, true) ~= nil)
+  -- 2026-11-19, REQUIREMENT CHANGE: restart in place was removed in the same prune (its half of this
+  -- pin read rs.providerId), so only respawn's rebuild of a gateway session is pinned now.
+  local gw = { providers = { { id = "gw", kind = "gateway", model = "m1", baseUrl = "https://gw.example" } } }
+  local rsg = okCore and c.respawnSpec({ cwd = "/r", editor = "kitty", model = "m1", base_url = "https://gw.example" }, gw) or {}
+  check("kept: respawn rebuilds a gateway session from the hand-kept providers list",
+        rsg.canRespawn == true and rsg.providerId == "gw"
+        and src:find("local profile = core.providerById(cfg, core.spawnProviderKey(cfg, providerId))", 1, true) ~= nil)
+  check("kept: the SSH status bridge reads its hosts from providers", okCore and type(c.sshHosts) == "function"
+        and #c.sshHosts({ bridge = { enabled = true }, providers = { { id = "r", ssh = { host = "h", user = "u" } } } }) == 1
+        and src:find('id="s-br-en"', 1, true) ~= nil)
+  check("kept: the Model dropdown lists the hand-kept providers' models", src:find('local provs = core.config(cfg, "providers", nil)', 1, true) ~= nil
+        and src:find("(PANEL_PROVIDERS||[]).forEach", 1, true) ~= nil)
+  local merged = okCore and c.overlayConfig({ spawn = { provider = "gw" }, providers = { { id = "gw" } } },
+                                            { spawn = { editor = "kitty" } }) or {}
+  check("kept: a Settings Save keeps a hand-kept spawn.provider and providers list",
+        merged.spawn ~= nil and merged.spawn.provider == "gw" and merged.spawn.editor == "kitty"
+        and type(merged.providers) == "table" and merged.providers[1] ~= nil and merged.providers[1].id == "gw")
+end
+
+-- ---- A/B compare is gone (2026-11-19) ----
+-- Adam, 2026-11-19: "prune features I have no use for". REQUIREMENT CHANGE: the DR7 pins asserted
+-- ⚖ A/B fork-to-compare -- the tile menu's entry, the modal, a cohort of variants each in its own
+-- worktree under .cc-ab/ (cc-ab.json), the side-by-side compare, Keep this and the LLM judge. Gone,
+-- with its stacking exception for .cc-ab/ folders. Kept: the run score it read, the per-spawn model
+-- override respawn relaunches with, and the per-window cold-start ladder.
+do
+  local function slurp(name)
+    local f = io.open(ROOT .. name, "r")
+    local s = f and f:read("*a") or ""
+    if f then f:close() end
+    return s
+  end
+  local src = slurp("claude-dashboard.lua")
+  local okCore, c = pcall(dofile, ROOT .. "cc-core.lua")
+  check("no ab: no cohort registry or effects", not src:find("cc-ab.json", 1, true) and not src:find("function FX.abLaunch(", 1, true)
+        and not src:find("function FX.abKeep(", 1, true) and not src:find("function FX.abJudge(", 1, true)
+        and not src:find("function FX.abData(", 1, true))
+  check("no ab: the bridge has no A/B actions", not src:find('a == "open-ab"', 1, true) and not src:find('a == "ab-launch"', 1, true)
+        and not src:find('a == "ab-keep"', 1, true) and not src:find('a == "ab-judge"', 1, true))
+  check("no ab: no tile-menu entry, modal or panel code", not src:find("A/B fork-to-compare", 1, true)
+        and not src:find('id="abmodal"', 1, true) and not src:find("#abmodal", 1, true) and not src:find("function openAb(", 1, true)
+        and not src:find("window.ccAb", 1, true))
+  check("no ab: core keeps none of it", okCore and c.abCohortPlan == nil and c.abCompare == nil and c.abJudgePrompt == nil
+        and c.abSlug == nil and c.gitWorktreeAddCmd == nil and c.gitBranchDeleteCmd == nil)
+  local keys = {}
+  for _, f in ipairs(okCore and c.FEATURES or {}) do keys[f.key] = true end
+  check("no ab: not in the feature list", okCore and not keys.ab)
+  -- what stays
+  check("kept: the run score", okCore and type(c.runScore) == "function" and type(c.scoreOpts) == "function")
+  check("kept: respawn's model override", src:find("function FX.spawnSession(editor, project, task, permissionMode, providerId, agentOpts, isNew, modelOverride)", 1, true) ~= nil
+        and src:find("if (not env) and type(modelOverride) == \"string\" and modelOverride ~= \"\" then", 1, true) ~= nil)
+  check("kept: the per-window cold-start ladder", okCore and type(c.spawnLadderKey) == "function")
+  check("kept: uninstall --purge still clears an old cc-ab.json", slurp("uninstall.sh"):find('STATE="cc-ab.json ', 1, true) ~= nil)
+end
+
+-- ---- Model auto-routing is gone (2026-11-19) ----
+-- Adam, 2026-11-19: "prune features I have no use for". REQUIREMENT CHANGE: the DR6 pins asserted
+-- per-session model auto-routing -- the detail panel's Auto-model checkbox (set-automodel, the
+-- cc-automodel/<key> opt-in), core.suggestModel's difficulty tiers and the /model preface
+-- FX.pasteIntoWindow typed before a fed task. Its only feeder, the task queue, went earlier today.
+-- Kept: the Model dropdown's live /model switch, core.isAnthropicSession (Remote Control's
+-- eligibility reads it) and dispatchSerialized's extra-stagger slot.
+do
+  local function slurp(name)
+    local f = io.open(ROOT .. name, "r")
+    local s = f and f:read("*a") or ""
+    if f then f:close() end
+    return s
+  end
+  local src = slurp("claude-dashboard.lua")
+  local lib = slurp("cc-lib.sh")
+  local okCore, c = pcall(dofile, ROOT .. "cc-core.lua")
+  check("no automodel: no opt-in files or bridge action", not src:find("cc-automodel", 1, true)
+        and not src:find("function FX.setAutoModel(", 1, true) and not src:find('a == "set-automodel"', 1, true)
+        and not lib:find("CC_AUTOMODEL_DIR", 1, true))
+  check("no automodel: no Auto-model checkbox or its tile fields", not src:find('id="d-automodel"', 1, true)
+        and not src:find("function syncAutoModel(", 1, true) and not src:find("it.auto_model", 1, true))
+  check("no automodel: pasteIntoWindow types no /model preface", not src:find("payload.preface", 1, true))
+  check("no automodel: core keeps no difficulty tiers", okCore and c.suggestModel == nil and c.AUTOMODEL_DEFAULTS == nil)
+  local keys = {}
+  for _, f in ipairs(okCore and c.FEATURES or {}) do keys[f.key] = true end
+  check("no automodel: not in the feature list", okCore and not keys.automodel)
+  -- what stays
+  check("kept: the Model dropdown's live /model switch", okCore and type(c.modelCommand) == "function"
+        and src:find('id="d-model"', 1, true) ~= nil)
+  check("kept: Remote Control's native-Anthropic check", okCore and type(c.isAnthropicSession) == "function")
+  check("kept: dispatchSerialized's extra-stagger slot", src:find("function dispatchSerialized(item, action, fn, extraStagger)", 1, true) ~= nil)
+  check("kept: uninstall --purge still clears an old cc-automodel", slurp("uninstall.sh"):find(" cc-automodel ", 1, true) ~= nil)
+end
+
+-- ---- Playbooks in My List are gone (2026-11-19) ----
+-- Adam, 2026-11-19: "prune features I have no use for". REQUIREMENT CHANGE: 📘 Add a playbook…
+-- picked a markdown checklist through a native chooser and imported its lines into a project's My List
+-- tab like TODO.md's (state.playbooks in cc-worklist.json, a per-tick watch, Remove playbook). Gone.
+-- Kept, and Adam's global CLAUDE.md relies on them: the TODO.md import and auto-sync, and ▶ Run
+-- selected with cc-run.sh. A Run selected item from a playbook line can't arise any more; a leftover
+-- one runs like Adam's own item (its session reports done).
+do
+  local function slurp(name)
+    local f = io.open(ROOT .. name, "r")
+    local s = f and f:read("*a") or ""
+    if f then f:close() end
+    return s
+  end
+  local src = slurp("claude-dashboard.lua")
+  local okCore, c = pcall(dofile, ROOT .. "cc-core.lua")
+  check("no playbooks: no Add a playbook button or its panel code", not src:find('id="wl-pbadd"', 1, true)
+        and not src:find("function playbookAdd(", 1, true) and not src:find("window.ccPlaybookResult", 1, true)
+        and not src:find('id="wl-pbrow"', 1, true))
+  check("no playbooks: no bridge actions, chooser, import or watch", not src:find('a == "worklist-playbook-add"', 1, true)
+        and not src:find("function FX.choosePlaybookFile(", 1, true) and not src:find("function FX.playbookImport(", 1, true)
+        and not src:find("FX.playbookSyncTick", 1, true) and not src:find("FX.playbookList(", 1, true))
+  check("no playbooks: core keeps no playbook sources", okCore and c.worklistPlaybookAdd == nil and c.worklistPlaybooks == nil
+        and c.worklistImportPlaybook == nil and c.worklistPlaybookRefusal == nil)
+  check("no playbooks: a store's leftover playbooks list is dropped on read",
+        okCore and c.worklistNormalize({ playbooks = { shop = { { id = "a", path = "/x/a.md" } } } }).playbooks == nil)
+  check("no playbooks: a leftover playbook item runs like Adam's own", okCore
+        and c.runItemKind({ id = "p1", text = "x", src = "playbook", srcFile = "/n/r.md" }) == "report")
+  local keys = {}
+  for _, f in ipairs(okCore and c.FEATURES or {}) do keys[f.key] = true end
+  check("no playbooks: not in the feature list", okCore and not keys.playbooks)
+  -- what stays
+  check("kept: the TODO.md import and its auto-sync", src:find("FX.todoAutoSyncTick(list)", 1, true) ~= nil
+        and okCore and type(c.worklistImportTodoRoots) == "function" and type(c.parseTodoFile) == "function")
+  check("kept: Run selected, its tick after the TODO.md sync", src:find('a == "worklist-run"', 1, true) ~= nil
+        and (src:find("FX.todoAutoSyncTick(list)", 1, true) or math.huge) < (src:find("pcall(FX.runTick, list)", 1, true) or 0)
+        and keys.runner == true)
+  check("kept: Run selected finds the tab's folder from Shepherd's records", src:find("function FX.tabTodoRoots(scope, st)", 1, true) ~= nil
+        and src:find("root = FX.tabTodoRoots(key, st)[1]", 1, true) ~= nil)
+  check("kept: cc-run.sh ships", slurp("SHIPPED"):find("cc-run.sh", 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

@@ -952,209 +952,6 @@ do
   eq("notify: wrong toggle -> nil", core.notifyDecision("working", appItem, onDone), nil)
 end
 
--- ---- L6 rule engine: validate / fail-safe load / matcher -------------------
-do
-  local goodLog = { name = "log-done", trigger = { kind = "done" }, processor = { kind = "log", text = "finished" } }
-  local goodNudge = { name = "nudge-err", trigger = { kind = "error", match = { group = "build*" } },
-                      processor = { kind = "nudge", text = "continue" }, once = true }
-  eq("rule: valid log", core.validateRule(goodLog).ok, true)
-  eq("rule: valid nudge w/ scope", core.validateRule(goodNudge).ok, true)
-  eq("rule: missing name", core.validateRule({ trigger = { kind = "done" }, processor = { kind = "log" } }).ok, false)
-  eq("rule: bad trigger kind", core.validateRule({ name = "x", trigger = { kind = "boom" }, processor = { kind = "log" } }).ok, false)
-  eq("rule: bad processor kind", core.validateRule({ name = "x", trigger = { kind = "done" }, processor = { kind = "explode" } }).ok, false)
-  eq("rule: nudge needs text", core.validateRule({ name = "x", trigger = { kind = "done" }, processor = { kind = "nudge" } }).ok, false)
-  eq("rule: relabel needs label", core.validateRule({ name = "x", trigger = { kind = "done" }, processor = { kind = "relabel" } }).ok, false)
-  eq("rule: unknown field", core.validateRule({ name = "x", trigger = { kind = "done" }, processor = { kind = "log" }, bogus = 1 }).ok, false)
-  -- fail-safe load: keep valid, drop bad, dedupe by name
-  local ld = core.ruleLoad({ rules = { goodLog, { name = "" }, goodLog, goodNudge } })
-  eq("rule-load: keeps valid", #ld.valid, 2)
-  eq("rule-load: drops bad + dup", #ld.errors, 2)
-  -- ruleFires: kind + scope
-  local item = { projectKey = "/p", group = "build", key = "k1", providerId = "anthropic" }
-  local lrule = core.ruleList({ rules = { goodLog } })[1]
-  eq("rule-fires: kind match", core.ruleFires(lrule, "done", item), true)
-  eq("rule-fires: wrong edge", core.ruleFires(lrule, "error", item), false)
-  local nrule = core.ruleList({ rules = { goodNudge } })[1]
-  eq("rule-fires: scope group glob", core.ruleFires(nrule, "error", item), true)
-  eq("rule-fires: scope mismatch",
-     core.ruleFires(nrule, "error", { group = "review", key = "k", projectKey = "/p" }), false)
-  eq("rule-fires: disabled -> false",
-     core.ruleFires({ enabled = false, trigger = { kind = "done" } }, "done", item), false)
-  -- rulesForEdge ordered
-  local rs = core.ruleList({ rules = { goodLog, goodNudge } })
-  eq("rules-for-edge: done -> 1", #core.rulesForEdge(rs, "done", item), 1)
-  eq("rules-for-edge: error -> 1 (scoped)", #core.rulesForEdge(rs, "error", item), 1)
-  eq("rules-for-edge: matched scope on hung", #core.rulesForEdge(rs, "hung", item), 0)
-
-  -- L6 NEW triggers (hung/loop/starved) + processors (feed/continue) now valid
-  eq("rule: hung trigger valid",
-     core.validateRule({ name = "h", trigger = { kind = "hung" }, processor = { kind = "log" } }).ok, true)
-  eq("rule: loop trigger valid",
-     core.validateRule({ name = "l", trigger = { kind = "loop" }, processor = { kind = "nudge", text = "try again" } }).ok, true)
-  eq("rule: starved trigger valid",
-     core.validateRule({ name = "s", trigger = { kind = "starved" }, processor = { kind = "log" } }).ok, true)
-  eq("rule: feed processor needs text",
-     core.validateRule({ name = "f", trigger = { kind = "done" }, processor = { kind = "feed" } }).ok, false)
-  eq("rule: feed processor valid w/ text",
-     core.validateRule({ name = "f", trigger = { kind = "done" }, processor = { kind = "feed", text = "next task" } }).ok, true)
-  eq("rule: continue processor valid (no text)",
-     core.validateRule({ name = "c", trigger = { kind = "error" }, processor = { kind = "continue" } }).ok, true)
-  local hrule = core.ruleList({ rules = { { name = "h", trigger = { kind = "hung" }, processor = { kind = "log" } } } })[1]
-  eq("rule-fires: hung edge", core.ruleFires(hrule, "hung", item), true)
-
-  -- L6 rule CRUD (editor): push / replace / remove / get / setEnabled
-  local rst = { rules = {} }
-  local rst1, rok = core.rulePush(rst, goodLog)
-  eq("rulePush: saved", rok, true)
-  eq("rulePush: count 1", #core.ruleList(rst1), 1)
-  local _, rbad, rerrs = core.rulePush(rst, { name = "x", trigger = { kind = "boom" }, processor = { kind = "log" } })
-  eq("rulePush: invalid rejected", rbad, false)
-  check("rulePush: errors returned", type(rerrs) == "table" and #rerrs > 0)
-  local rst2 = core.rulePush(rst1, { name = goodLog.name, trigger = { kind = "error" }, processor = { kind = "log" } })
-  eq("rulePush: replace in place", #core.ruleList(rst2), 1)
-  eq("rulePush: replaced trigger", core.ruleGet(rst2, goodLog.name).trigger.kind, "error")
-  check("ruleGet: finds", core.ruleGet(rst1, goodLog.name) ~= nil)
-  eq("ruleGet: miss -> nil", core.ruleGet(rst1, "nope"), nil)
-  eq("ruleRemove: deletes", #core.ruleList(core.ruleRemove(rst1, goodLog.name)), 0)
-  -- setEnabled preserves the rest of the record (RAW state)
-  local rEn = core.ruleSetEnabled({ rules = { { name = "r", enabled = true, trigger = { kind = "done" },
-    processor = { kind = "nudge", text = "hi" } } } }, "r", false)
-  eq("ruleSetEnabled: disabled", core.ruleList(rEn)[1].enabled, false)
-  eq("ruleSetEnabled: preserves processor text", core.ruleList(rEn)[1].processor.text, "hi")
-end
-
--- ---- L7 cron / schedule layer ----------------------------------------------
-do
-  local t = { min = 30, hour = 9, day = 15, month = 6, wday = 2 }  -- Mon (os.date wday 2)
-  eq("cron: exact match", core.cronMatches("30 9 15 6 *", t), true)
-  eq("cron: wildcard all", core.cronMatches("* * * * *", t), true)
-  eq("cron: minute mismatch", core.cronMatches("31 9 15 6 *", t), false)
-  eq("cron: step */15 at :30", core.cronMatches("*/15 * * * *", t), true)
-  eq("cron: step */15 at :31", core.cronMatches("*/15 * * * *", { min = 31, hour = 9, day = 1, month = 1, wday = 1 }), false)
-  eq("cron: hour range 8-17", core.cronMatches("0 8-17 * * *", { min = 0, hour = 9, day = 1, month = 1, wday = 1 }), true)
-  eq("cron: day list 1,15", core.cronMatches("0 0 1,15 * *", { min = 0, hour = 0, day = 15, month = 3, wday = 1 }), true)
-  eq("cron: dow Monday", core.cronMatches("30 9 * * 1", t), true)
-  eq("cron: dow Sunday via 0", core.cronMatches("0 9 * * 0", { min = 0, hour = 9, day = 1, month = 1, wday = 1 }), true)
-  eq("cron: dow Sunday via 7", core.cronMatches("0 9 * * 7", { min = 0, hour = 9, day = 1, month = 1, wday = 1 }), true)
-  eq("cron: dom-OR-dow when both set", core.cronMatches("30 9 15 * 5", t), true)  -- dom 15 matches even though dow != Fri
-  eq("cron: bad field count", core.cronMatches("* * *", t), false)
-  -- nextRunAt: future + satisfies the cron
-  local n0 = 1700000000
-  local nr = core.nextRunAt("*/15 * * * *", n0)
-  check("nextrun: in the future", nr ~= nil and nr > n0)
-  check("nextrun: minute is a /15", nr ~= nil and (tonumber(os.date("%M", nr)) % 15) == 0)
-  eq("nextrun: nil now -> nil", core.nextRunAt("* * * * *", nil), nil)
-  -- dueSchedules: a cron matching now's minute fires once; lastFiredAt gates it
-  local now = 1700000000
-  local d = os.date("*t", now)
-  local matching = string.format("%d %d * * *", d.min, d.hour)
-  local sCron = { name = "c", kind = "cron", cron = matching, folder = "/p", enabled = true }
-  eq("due: cron matches this minute", #core.dueSchedules({ sCron }, now), 1)
-  eq("due: not refired same minute",
-     #core.dueSchedules({ { name = "c", kind = "cron", cron = matching, folder = "/p", enabled = true, lastFiredAt = now } }, now), 0)
-  eq("due: disabled never fires",
-     #core.dueSchedules({ { name = "c", kind = "cron", cron = matching, folder = "/p", enabled = false } }, now), 0)
-  eq("due: oneShot past fires",
-     #core.dueSchedules({ { name = "o", kind = "oneShot", at = now - 10, folder = "/p", enabled = true } }, now), 1)
-  eq("due: oneShot future skipped",
-     #core.dueSchedules({ { name = "o", kind = "oneShot", at = now + 1000, folder = "/p", enabled = true } }, now), 0)
-  eq("due: oneShot already fired",
-     #core.dueSchedules({ { name = "o", kind = "oneShot", at = now - 10, folder = "/p", enabled = true, lastFiredAt = now - 5 } }, now), 0)
-  -- humanizeCron
-  eq("human: daily", core.humanizeCron("30 9 * * *"), "daily at 09:30")
-  eq("human: every 15", core.humanizeCron("*/15 * * * *"), "every 15 min")
-  eq("human: weekly Mon", core.humanizeCron("0 9 * * 1"), "Mon at 09:00")
-  eq("human: hourly", core.humanizeCron("0 * * * *"), "hourly")
-  -- validate / load / backpressure
-  eq("vsched: valid", core.validateSchedule(sCron).ok, true)
-  eq("vsched: missing folder", core.validateSchedule({ name = "x", kind = "cron", cron = "* * * * *" }).ok, false)
-  eq("vsched: bad cron fields", core.validateSchedule({ name = "x", kind = "cron", cron = "* *", folder = "/p" }).ok, false)
-  eq("vsched: oneShot needs at", core.validateSchedule({ name = "x", kind = "oneShot", folder = "/p" }).ok, false)
-  eq("vsched: unknown field", core.validateSchedule({ name = "x", kind = "cron", cron = "* * * * *", folder = "/p", bogus = 1 }).ok, false)
-  local sl = core.scheduleLoad({ schedules = { sCron, { name = "" }, sCron } })
-  eq("sload: keeps valid", #sl.valid, 1)
-  eq("sload: drops bad + dup", #sl.errors, 2)
-  eq("sload: enabled normalized", core.scheduleList({ schedules = { sCron } })[1].enabled, true)
-  eq("backpressure: over cap", core.scheduleBackpressure(10, 8), true)
-  eq("backpressure: under cap", core.scheduleBackpressure(5, 8), false)
-  eq("backpressure: disabled (cap 0)", core.scheduleBackpressure(100, 0), false)
-  -- scheduleMarkFired: cron stamps lastFiredAt; oneShot self-deletes
-  local st = { schedules = { sCron, { name = "o", kind = "oneShot", at = 1, folder = "/p", enabled = true } } }
-  local after = core.scheduleMarkFired(st, "c", 555)
-  eq("markfired: cron count unchanged", #after.schedules, 2)
-  eq("markfired: cron stamped", core.scheduleList(after)[1].lastFiredAt, 555)
-  local after2 = core.scheduleMarkFired(st, "o", 555)
-  eq("markfired: oneShot removed", #after2.schedules, 1)
-  eq("markfired: unknown name no-op", #core.scheduleMarkFired(st, "nope", 555).schedules, 2)
-  -- L7 digest action: a digest routine needs no folder; action validated + normalized
-  eq("vsched: digest needs no folder",
-     core.validateSchedule({ name = "d", kind = "cron", cron = "0 9 * * *", action = "digest" }).ok, true)
-  eq("vsched: bad action", core.validateSchedule({ name = "d", kind = "cron", cron = "0 9 * * *", folder = "/p", action = "boom" }).ok, false)
-  eq("sched: action defaults to spawn", core.scheduleList({ schedules = { sCron } })[1].action, "spawn")
-  eq("sched: digest action normalized",
-     core.scheduleList({ schedules = { { name = "d", kind = "cron", cron = "0 9 * * *", action = "digest", digestHours = 8 } } })[1].action, "digest")
-end
-
--- ---- L7 routine-board CRUD + cron builder ----------------------------------
-do
-  -- cronBuild: each freq -> a valid 5-field cron the matcher accepts
-  eq("cronBuild: minute", core.cronBuild({ freq = "minute", every = 10 }), "*/10 * * * *")
-  eq("cronBuild: minute clamps", core.cronBuild({ freq = "minute", every = 0 }), "*/1 * * * *")
-  eq("cronBuild: minute default", core.cronBuild({ freq = "minute" }), "*/5 * * * *")
-  eq("cronBuild: hourly at :15", core.cronBuild({ freq = "hour", minute = 15 }), "15 * * * *")
-  eq("cronBuild: daily", core.cronBuild({ freq = "day", minute = 30, hour = 9 }), "30 9 * * *")
-  eq("cronBuild: day default 09:00", core.cronBuild({ freq = "day" }), "0 9 * * *")
-  eq("cronBuild: weekly sorted+dedup", core.cronBuild({ freq = "week", minute = 0, hour = 8, weekdays = { 5, 1, 1, 3 } }), "0 8 * * 1,3,5")
-  eq("cronBuild: weekly none -> *", core.cronBuild({ freq = "week", minute = 0, hour = 8, weekdays = {} }), "0 8 * * *")
-  eq("cronBuild: weekly drops out-of-range", core.cronBuild({ freq = "week", weekdays = { 9, 2 } }), "0 9 * * 2")
-  eq("cronBuild: monthly", core.cronBuild({ freq = "month", minute = 0, hour = 6, dom = 15 }), "0 6 15 * *")
-  eq("cronBuild: hour clamps", core.cronBuild({ freq = "day", hour = 99 }), "0 23 * * *")
-  eq("cronBuild: empty -> daily default", core.cronBuild(nil), "0 9 * * *")
-  check("cronBuild output is a valid 5-field cron", core.validateSchedule({
-    name = "x", kind = "cron", cron = core.cronBuild({ freq = "week", weekdays = { 2 } }), folder = "/p" }).ok)
-  -- schedulePush: validate, replace-in-place, prepend, cap
-  local s0 = { schedules = {} }
-  local s1, ok1 = core.schedulePush(s0, { name = "a", kind = "cron", cron = "0 9 * * *", folder = "/p" })
-  eq("schedPush: saved", ok1, true)
-  eq("schedPush: count 1", #s1.schedules, 1)
-  local _, ok2, errs2 = core.schedulePush(s0, { name = "", kind = "cron", cron = "0 9 * * *", folder = "/p" })
-  eq("schedPush: invalid rejected", ok2, false)
-  check("schedPush: returns errors", type(errs2) == "table" and #errs2 > 0)
-  -- replace-in-place carries forward lastFiredAt
-  local sFired = { schedules = { { name = "a", kind = "cron", cron = "0 9 * * *", folder = "/p", enabled = true, lastFiredAt = 999 } } }
-  local sRepl = core.schedulePush(sFired, { name = "a", kind = "cron", cron = "0 10 * * *", folder = "/p", enabled = true })
-  eq("schedPush: replace same name (no dup)", #sRepl.schedules, 1)
-  eq("schedPush: replace updates cron", core.scheduleList(sRepl)[1].cron, "0 10 * * *")
-  eq("schedPush: replace keeps lastFiredAt", core.scheduleList(sRepl)[1].lastFiredAt, 999)
-  -- prepend (new name goes to front)
-  local sPre = core.schedulePush(s1, { name = "b", kind = "cron", cron = "0 8 * * *", folder = "/p" })
-  eq("schedPush: prepend to front", core.scheduleList(sPre)[1].name, "b")
-  -- cap drops the oldest
-  local capState = { schedules = {} }
-  for i = 1, 5 do capState = core.schedulePush(capState, { name = "r" .. i, kind = "cron", cron = "0 9 * * *", folder = "/p" }, 3) end
-  eq("schedPush: cap honored", #capState.schedules, 3)
-  -- scheduleRemove / scheduleGet
-  eq("schedRemove: deletes by name", #core.scheduleRemove(sRepl, "a").schedules, 0)
-  eq("schedRemove: miss is no-op", #core.scheduleRemove(sRepl, "nope").schedules, 1)
-  check("schedGet: finds", core.scheduleGet(sRepl, "a") ~= nil)
-  eq("schedGet: miss -> nil", core.scheduleGet(sRepl, "nope"), nil)
-  -- scheduleSetEnabled toggles + preserves extra fields (raw state)
-  local sToggle = core.scheduleSetEnabled(sFired, "a", false)
-  eq("schedSetEnabled: paused", core.scheduleList(sToggle)[1].enabled, false)
-  eq("schedSetEnabled: preserves lastFiredAt", core.scheduleList(sToggle)[1].lastFiredAt, 999)
-  eq("schedSetEnabled: resume", core.scheduleList(core.scheduleSetEnabled(sToggle, "a", true))[1].enabled, true)
-  -- scheduleBoard: human + nextRunAt annotations
-  local now = 1700000000
-  local board = core.scheduleBoard(core.scheduleList({ schedules = {
-    { name = "c", kind = "cron", cron = "0 9 * * *", folder = "/p", enabled = true },
-    { name = "o", kind = "oneShot", at = now + 1000, folder = "/p", enabled = true },
-  } }), now)
-  eq("schedBoard: cron human", board[1].human, "daily at 09:00")
-  check("schedBoard: cron nextRunAt set", type(board[1].nextRunAt) == "number" and board[1].nextRunAt > now)
-  eq("schedBoard: oneShot human", board[2].human, "once")
-  eq("schedBoard: oneShot nextRunAt = at", board[2].nextRunAt, now + 1000)
-end
-
 -- ---- runSequence: beat-list scheduling (injected scheduler) ----------------
 do
   -- Cumulative offsets: delays are RELATIVE to the previous beat, so the
@@ -1216,227 +1013,6 @@ do
   local d5, t5 = core.staggerSlot("junk", "junk", 5)
   eq("stagger: garbage strings coerce", d5, 0)
   eq("stagger: garbage tail = gap", t5, 5)
-end
-
--- ---- Saved task templates (roadmap #5c) -------------------------------------
-do
-  local st, ok1 = core.templatePush(nil, "deploy", "run make deploy")
-  eq("tpl: push onto nil state", ok1, true)
-  eq("tpl: list after push", #core.templateList(st), 1)
-  eq("tpl: get by name", core.templateGet(st, "deploy"), "run make deploy")
-  -- replace-by-name updates in place (no duplicate)
-  local st2 = core.templatePush(st, "deploy", "make deploy && make test")
-  eq("tpl: replace keeps one entry", #core.templateList(st2), 1)
-  eq("tpl: replace updates text", core.templateGet(st2, "deploy"), "make deploy && make test")
-  -- prepend order: newest first
-  local st3 = core.templatePush(st2, "lint", "run the linter")
-  eq("tpl: newest first", core.templateList(st3)[1].name, "lint")
-  -- blank name/text rejected
-  local _, okBlank = core.templatePush(st3, "  ", "x")
-  eq("tpl: blank name rejected", okBlank, false)
-  local _, okNoText = core.templatePush(st3, "x", "")
-  eq("tpl: blank text rejected", okNoText, false)
-  -- trim both fields
-  local st4 = core.templatePush(nil, "  padded  ", "  body  ")
-  eq("tpl: name trimmed", core.templateList(st4)[1].name, "padded")
-  eq("tpl: text trimmed", core.templateGet(st4, "padded"), "body")
-  -- remove: hit + miss
-  eq("tpl: remove", #core.templateList(core.templateRemove(st3, "lint")), 1)
-  eq("tpl: remove miss is no-op", #core.templateList(core.templateRemove(st3, "nope")), 2)
-  eq("tpl: get miss -> nil", core.templateGet(st3, "nope"), nil)
-  -- cap drops the oldest
-  local big = nil
-  for i = 1, 5 do big = core.templatePush(big, "t" .. i, "x" .. i, 3) end
-  eq("tpl: cap size", #core.templateList(big), 3)
-  eq("tpl: cap keeps newest", core.templateList(big)[1].name, "t5")
-  eq("tpl: cap dropped oldest", core.templateGet(big, "t1"), nil)
-  -- garbage state tolerated; malformed entries dropped
-  eq("tpl: garbage state -> empty", #core.templateList("nonsense"), 0)
-  eq("tpl: malformed entries dropped",
-     #core.templateList({ templates = { { name = "ok", text = "t" }, { name = "" }, "junk" } }), 1)
-end
-
--- ---- L3: template validate / fail-safe load --------------------------------
-do
-  eq("vtpl: not a table", core.validateTemplate("x").ok, false)
-  eq("vtpl: blank name invalid", core.validateTemplate({ name = "", text = "t" }).ok, false)
-  eq("vtpl: needs text or description",
-     core.validateTemplate({ name = "n" }).ok, false)
-  eq("vtpl: text-only valid", core.validateTemplate({ name = "n", text = "t" }).ok, true)
-  eq("vtpl: description-only valid", core.validateTemplate({ name = "n", description = "d" }).ok, true)
-  eq("vtpl: non-string text invalid", core.validateTemplate({ name = "n", text = 5 }).ok, false)
-  eq("vtpl: non-list vars invalid", core.validateTemplate({ name = "n", text = "t", vars = "x" }).ok, false)
-  eq("vtpl: unknown field flagged", core.validateTemplate({ name = "n", text = "t", bogus = 1 }).ok, false)
-  -- fail-safe load keeps valid, drops bad with reasons; dup keeps first
-  local ld = core.templateLoad({ templates = {
-    { name = "a", text = "t" }, { name = "", text = "x" },
-    { name = "a", text = "dup" }, { name = "c", description = "d" } } })
-  eq("ltpl: keeps the valid", #ld.valid, 2)
-  eq("ltpl: drops the bad + dup", #ld.errors, 2)
-  eq("ltpl: dup keeps first text", core.templateGet({ templates = ld.valid }, "a"), "t")
-  -- legacy round-trips byte-identically (no spurious fields)
-  local leg = core.templateList({ templates = { { name = "L", text = "body" } } })[1]
-  eq("ltpl: legacy keeps text", leg.text, "body")
-  eq("ltpl: legacy has no version", leg.version, nil)
-end
-
--- ---- L3: compose / vars / render -------------------------------------------
-do
-  eq("compose: legacy text", core.composeTemplate({ name = "n", text = "hi" }), "hi")
-  eq("compose: structured w/ expected",
-     core.composeTemplate({ name = "n", description = "Do X", expected_output = "A diff" }),
-     "Do X\n\nExpected output:\nA diff")
-  eq("compose: description only", core.composeTemplate({ name = "n", description = "Do X" }), "Do X")
-  eq("compose: nil -> nil", core.composeTemplate(nil), nil)
-  eq("compose: contentless -> nil", core.composeTemplate({ name = "n" }), nil)
-
-  local vs = core.templateVars("Fix {{bug}} in {{file}}, note {{ctx?}}, on {{today}}")
-  eq("vars: count excludes builtins", #vs, 3)
-  eq("vars: first name", vs[1].name, "bug")
-  eq("vars: required default", vs[1].required, true)
-  eq("vars: optional marker", vs[3].required, false)
-  -- a name required if ANY occurrence is required
-  local vs2 = core.templateVars("{{x?}} then {{x}}")
-  eq("vars: dedup", #vs2, 1)
-  eq("vars: any-required wins", vs2[1].required, true)
-
-  -- render: required-missing refuses
-  local r1, miss = core.renderTemplate("Hi {{name}}", {})
-  eq("render: refuses on missing required", r1, nil)
-  eq("render: reports the missing name", miss[1], "name")
-  -- render: filled + optional blanks
-  eq("render: substitutes", core.renderTemplate("Hi {{name}}", { name = "Sam" }), "Hi Sam")
-  eq("render: optional blanks out", core.renderTemplate("a{{x?}}b", {}), "ab")
-  -- render: blank value counts as missing for required
-  eq("render: blank required missing", core.renderTemplate("{{a}}", { a = "  " }), nil)
-  -- render: built-ins from injected now (TZ-agnostic: same os.date both sides)
-  local T = 1700000000
-  eq("render: today", core.renderTemplate("{{today}}", {}, { now = T }), os.date("%Y-%m-%d", T))
-  eq("render: now", core.renderTemplate("{{now}}", {}, { now = T }), os.date("%Y-%m-%d %H:%M", T))
-  eq("render: no clock -> blank date", core.renderTemplate("[{{date}}]", {}, {}), "[]")
-  eq("render: prev_output", core.renderTemplate("<{{prev_output}}>", {}, { prevOutput = "OUT" }), "<OUT>")
-  eq("render: prev_output default blank", core.renderTemplate("<{{prev_output}}>", {}, {}), "<>")
-  -- keepMissing (autonomous feed): builtins/prev_output resolve, user vars stay verbatim, never refuses
-  local rk, mk = core.renderTemplate("do {{thing}} on {{today}}", {}, { now = T, keepMissing = true })
-  eq("render: keepMissing fills builtins, keeps user var", rk, "do {{thing}} on " .. os.date("%Y-%m-%d", T))
-  eq("render: keepMissing never refuses", #mk, 0)
-  eq("render: keepMissing fills prev_output",
-     core.renderTemplate("from {{prev_output}}", {}, { prevOutput = "RESULT", keepMissing = true }), "from RESULT")
-  eq("render: keepMissing blanks optional", core.renderTemplate("a{{x?}}b", {}, { keepMissing = true }), "ab")
-  eq("render: keepMissing plain task unchanged",
-     core.renderTemplate("just do the thing", {}, { keepMissing = true }), "just do the thing")
-
-  -- effectiveVars merges declared schema + parsed body
-  local ev = core.effectiveVars({ name = "n", description = "use {{repo}} and {{extra}}",
-    vars = { { name = "repo", label = "Repository", required = true },
-             { name = "branch", required = false, default = "main" } } })
-  eq("effvars: declared first", ev[1].name, "repo")
-  eq("effvars: carries label", ev[1].label, "Repository")
-  eq("effvars: declared-only kept", ev[2].name, "branch")
-  eq("effvars: parsed-only appended", ev[3].name, "extra")
-  -- fillDefaults applies a default only when missing/blank
-  local fd = core.fillDefaults({ { name = "branch", default = "main" } }, { repo = "r" })
-  eq("filld: keeps existing", fd.repo, "r")
-  eq("filld: applies default", fd.branch, "main")
-  eq("filld: no override of set",
-     core.fillDefaults({ { name = "branch", default = "main" } }, { branch = "dev" }).branch, "dev")
-end
-
--- ---- L3: versioning + revert ----------------------------------------------
-do
-  -- new template starts at version 1, empty history
-  local s1 = core.templatePushVersioned(nil, { name = "T", text = "v one" }, { now = 100 })
-  local r1 = core.templateGetRecord(s1, "T")
-  eq("ver: new starts at 1", r1.version, 1)
-  eq("ver: new empty history", #r1.versions, 0)
-  -- editing snapshots the previous head and bumps
-  local s2 = core.templatePushVersioned(s1, { name = "T", text = "v two" }, { now = 200 })
-  local r2 = core.templateGetRecord(s2, "T")
-  eq("ver: edit bumps to 2", r2.version, 2)
-  eq("ver: edit keeps one snapshot", #r2.versions, 1)
-  eq("ver: snapshot holds old body", r2.versions[1].text, "v one")
-  eq("ver: head is new body", core.templateGet(s2, "T"), "v two")
-  -- an unchanged push is a no-op (no churn)
-  local s3 = core.templatePushVersioned(s2, { name = "T", text = "v two" }, { now = 300 })
-  eq("ver: unchanged no churn", core.templateGetRecord(s3, "T").version, 2)
-  -- version history list: current first, newest-first
-  local vh = core.templateVersions(s2, "T")
-  eq("ver: history length", #vh, 2)
-  eq("ver: current first", vh[1].current, true)
-  eq("ver: current version num", vh[1].version, 2)
-  eq("ver: prior version num", vh[2].version, 1)
-  eq("ver: unknown -> empty", #core.templateVersions(s2, "nope"), 0)
-  -- revert is non-destructive: restores old content, bumps forward
-  local s4, ok = core.templateRevert(s2, "T", 1, { now = 400 })
-  eq("ver: revert ok", ok, true)
-  eq("ver: revert restores body", core.templateGet(s4, "T"), "v one")
-  eq("ver: revert bumps to 3", core.templateGetRecord(s4, "T").version, 3)
-  eq("ver: revert unknown version -> false", select(2, core.templateRevert(s2, "T", 99)), false)
-  eq("ver: revert unknown name -> false", select(2, core.templateRevert(s2, "nope", 1)), false)
-  -- version history capped
-  local big = core.templatePushVersioned(nil, { name = "C", text = "x0" }, { now = 0, versionCap = 2 })
-  for i = 1, 5 do
-    big = core.templatePushVersioned(big, { name = "C", text = "x" .. i }, { now = i, versionCap = 2 })
-  end
-  eq("ver: history capped", #core.templateGetRecord(big, "C").versions, 2)
-  -- templateRename (editor rename) preserves the full record incl. version history
-  local rnOk, ok2 = core.templateRename(s2, "T", "T2")
-  eq("rename: ok", ok2, true)
-  eq("rename: old gone", core.templateGetRecord(rnOk, "T"), nil)
-  eq("rename: new present", core.templateGetRecord(rnOk, "T2").name, "T2")
-  eq("rename: keeps version", core.templateGetRecord(rnOk, "T2").version, 2)
-  eq("rename: keeps history", #core.templateGetRecord(rnOk, "T2").versions, 1)
-  eq("rename: unknown old -> false", select(2, core.templateRename(s2, "nope", "X")), false)
-  eq("rename: blank new -> false", select(2, core.templateRename(s2, "T", "  ")), false)
-  eq("rename: same name -> false", select(2, core.templateRename(s2, "T", "T")), false)
-  -- rename ONTO an existing different template overwrites it (caller confirms)
-  local two = core.templatePushVersioned(core.templatePushVersioned(nil,
-    { name = "A", text = "aa" }, { now = 1 }), { name = "B", text = "bb" }, { now = 2 })
-  local merged = core.templateRename(two, "A", "B")
-  eq("rename: collision overwrites", #core.templateList(merged), 1)
-  eq("rename: collision keeps renamed body", core.templateGet(merged, "B"), "aa")
-  -- review-fix: "edit" is measured on the COMPOSED body, not raw shadowed fields.
-  -- description shadows text -> changing text alone is a no-op (no version bump).
-  local sv = core.templatePushVersioned(nil, { name = "S", text = "a", description = "D" }, { now = 1 })
-  local sv2 = core.templatePushVersioned(sv, { name = "S", text = "b", description = "D" }, { now = 2 })
-  eq("ver: shadowed text edit no-op", core.templateGetRecord(sv2, "S").version, 1)
-  -- expected_output without a description isn't rendered -> changing it is a no-op
-  local se = core.templatePushVersioned(nil, { name = "E", text = "body", expected_output = "x" }, { now = 1 })
-  local se2 = core.templatePushVersioned(se, { name = "E", text = "body", expected_output = "y" }, { now = 2 })
-  eq("ver: unrendered expected_output edit no-op", core.templateGetRecord(se2, "E").version, 1)
-  -- but a real change to the rendered body DOES bump (expected_output WITH a description)
-  local sr = core.templatePushVersioned(nil, { name = "R", description = "d", expected_output = "x" }, { now = 1 })
-  local sr2 = core.templatePushVersioned(sr, { name = "R", description = "d", expected_output = "y" }, { now = 2 })
-  eq("ver: rendered-body edit bumps", core.templateGetRecord(sr2, "R").version, 2)
-end
-
--- ---- L3: prompt-file import (definition source) ----------------------------
-do
-  -- frontmatter name + body (vars derived from the body at render time)
-  local rec = core.parsePromptFile("---\nname: Reviewer\n---\nReview {{file}} now", "fallback")
-  eq("prompt: frontmatter name", rec.name, "Reviewer")
-  eq("prompt: body is the text", rec.text, "Review {{file}} now")
-  -- no frontmatter -> stem is the name, whole (trimmed) text is the body
-  local rec2 = core.parsePromptFile("  just do {{x}}  ", "do-it")
-  eq("prompt: stem fallback name", rec2.name, "do-it")
-  eq("prompt: whole text body trimmed", rec2.text, "just do {{x}}")
-  -- import folds files into the store (versioned); bad ones skipped with reasons
-  local st, sum = core.promptImport(nil, {
-    { stem = "a", text = "---\nname: Alpha\n---\nbody A" },
-    { stem = "b", text = "do {{thing}}" },
-    { stem = "empty", text = "---\nname: E\n---\n   " } }, { now = 10 })
-  eq("import: imported count", sum.imported, 2)
-  eq("import: skipped the empty", sum.skipped, 1)
-  eq("import: error carries a name", sum.errors[1].name, "E")
-  eq("import: stored Alpha body", core.templateGet(st, "Alpha"), "body A")
-  eq("import: stored stem-named", core.templateGet(st, "b"), "do {{thing}}")
-  eq("import: vars parse from imported body", core.templateVars(core.templateGet(st, "b"))[1].name, "thing")
-  -- re-import of a changed body versions (duplicate-on-edit)
-  local st2 = core.promptImport(st, { { stem = "a", text = "---\nname: Alpha\n---\nbody A v2" } }, { now = 20 })
-  eq("import: re-import bumps version", core.templateGetRecord(st2, "Alpha").version, 2)
-  -- garbage tolerated
-  local _, sum2 = core.promptImport(nil, "nonsense", { now = 1 })
-  eq("import: garbage files -> nothing", sum2.imported, 0)
 end
 
 -- ---- Spawn presets (roadmap #4a) --------------------------------------------
@@ -5051,96 +4627,10 @@ do
   check("standupMarkdown: empty window explains the ledger", mdEmpty:find("ledger must be enabled", 1, true) ~= nil)
 end
 
--- ---- L1: Agent Profiles registry -------------------------------------------
-do
-  -- validateAgent: required + shape + unknown-field + cross-refs
-  check("validateAgent: missing name", core.validateAgent({}).ok == false)
-  check("validateAgent: ok minimal", core.validateAgent({ name = "rev" }).ok == true)
-  check("validateAgent: relative folder rejected",
-    core.validateAgent({ name = "a", folder = "rel/path" }).ok == false)
-  check("validateAgent: absolute folder ok",
-    core.validateAgent({ name = "a", folder = "/abs" }).ok == true)
-  check("validateAgent: array field must be a list",
-    core.validateAgent({ name = "a", skills = "nope" }).ok == false)
-  check("validateAgent: unknown field flagged",
-    core.validateAgent({ name = "a", bogus = 1 }).ok == false)
-  local xref = core.validateAgent({ name = "a", provider = "missing", mcpServers = { "x" } },
-    { providers = {}, mcp = {} })
-  check("validateAgent: cross-ref provider not found", xref.ok == false and #xref.errors == 2)
-
-  -- agentPush/List/Get/Remove: strict save, replace-in-place, drop malformed
-  local st = { agents = {} }
-  local saved
-  st, saved = core.agentPush(st, { name = "reviewer", role = "a senior reviewer",
-    provider = "claude", skills = { "code-review" } })
-  check("agentPush: saved valid", saved == true)
-  st = (core.agentPush(st, { name = "builder", folder = "/work" }))
-  eq("agentList: two agents", #core.agentList(st), 2)
-  check("agentGet: by name", core.agentGet(st, "reviewer").role == "a senior reviewer")
-  local _, bad = core.agentPush(st, { name = "" })
-  check("agentPush: rejects invalid (no name)", bad == false)
-  st = (core.agentPush(st, { name = "reviewer", role = "updated" }))
-  eq("agentPush: replace-in-place (still 2)", #core.agentList(st), 2)
-  check("agentPush: in-place updated value", core.agentGet(st, "reviewer").role == "updated")
-  st = core.agentRemove(st, "builder")
-  eq("agentRemove: one left", #core.agentList(st), 1)
-
-  -- agentLoad fail-safe: drop the bad, keep the good, report the drop
-  local rep = core.agentLoad({ agents = { { name = "good" }, { name = "" }, { name = "good" } } })
-  eq("agentLoad: one valid kept", #rep.valid, 1)
-  eq("agentLoad: two errors (blank + dup)", #rep.errors, 2)
-
-  -- agentFork: unique name + lineage stamp
-  local fk = (core.agentFork(st, "reviewer"))
-  check("agentFork: copy exists", core.agentGet(fk, "reviewer (copy)") ~= nil)
-  check("agentFork: lineage stamped", core.agentGet(fk, "reviewer (copy)").forkedFrom == "reviewer")
-
-  -- agentSort: favorite-first then name
-  local list = { { name = "zed" }, { name = "amy", favorite = true }, { name = "bob" } }
-  local sorted = core.agentSort(list, "favorite")
-  eq("agentSort: favorite first", sorted[1].name, "amy")
-  eq("agentSort: name order", core.agentSort(list, "name")[1].name, "amy")
-
-  -- agentSetFlag: toggles favorite/hidden/archived, preserving every other field
-  local fstate = { agents = { { name = "rev", role = "r", skills = { "a", "b" },
-    mcpServers = { "linear" }, knowledge = { "/k" }, provider = "p" } } }
-  local fav = core.agentSetFlag(fstate, "rev", "favorite", true)
-  eq("agentSetFlag: favorite set", core.agentGet(fav, "rev").favorite, true)
-  eq("agentSetFlag: preserves skills", #core.agentGet(fav, "rev").skills, 2)
-  eq("agentSetFlag: preserves mcp", core.agentGet(fav, "rev").mcpServers[1], "linear")
-  eq("agentSetFlag: archive toggles independently",
-     core.agentGet(core.agentSetFlag(fav, "rev", "archived", true), "rev").archived, true)
-  eq("agentSetFlag: unfavorite", core.agentGet(core.agentSetFlag(fav, "rev", "favorite", false), "rev").favorite, false)
-  eq("agentSetFlag: unknown flag no-op", #core.agentList(core.agentSetFlag(fstate, "rev", "bogus", true)), 1)
-  check("agentSetFlag: unknown flag leaves record unchanged",
-     core.agentGet(core.agentSetFlag(fstate, "rev", "bogus", true), "rev").favorite ~= true)
-  eq("agentSetFlag: missing name no-op", #core.agentList(core.agentSetFlag(fstate, "nope", "favorite", true)), 1)
-end
-
--- ---- L1: MCP registry + mcp-config -----------------------------------------
-do
-  check("validateMcp: stdio needs command",
-    core.validateMcp({ id = "x", transport = "stdio" }).ok == false)
-  check("validateMcp: stdio ok",
-    core.validateMcp({ id = "x", transport = "stdio", command = "npx" }).ok == true)
-  check("validateMcp: http needs url",
-    core.validateMcp({ id = "x", transport = "http" }).ok == false)
-  check("validateMcp: bad transport",
-    core.validateMcp({ id = "x", transport = "carrier-pigeon", command = "x" }).ok == false)
-
-  local m = { servers = {} }
-  m = (core.mcpPush(m, { id = "linear", transport = "sse", url = "https://mcp.linear.app/sse" }))
-  m = (core.mcpPush(m, { id = "local", transport = "stdio", command = "npx",
-    args = { "-y", "srv" }, authTokenEnv = "MY_TOKEN" }))
-  eq("mcpList: two servers", #core.mcpList(m), 2)
-  check("mcpGet: by id", core.mcpGet(m, "linear").transport == "sse")
-
-  local cfg = core.mcpConfig(core.mcpList(m))
-  check("mcpConfig: stdio command", cfg.mcpServers["local"].command == "npx")
-  check("mcpConfig: stdio env ref", cfg.mcpServers["local"].env.MY_TOKEN == "${MY_TOKEN}")
-  check("mcpConfig: sse type+url", cfg.mcpServers["linear"].type == "sse"
-    and cfg.mcpServers["linear"].url == "https://mcp.linear.app/sse")
-end
+-- ---- L1: Agent Profiles registry + MCP registry (removed 2026-11-19) ----------------------
+-- 2026-11-19, REQUIREMENT CHANGE: saved agent profiles (cc-agents.json) and the MCP server registry
+-- (cc-mcp.json) were removed, and with them validateAgent / agentPush..agentSetFlag and validateMcp /
+-- mcpPush / mcpConfig and their checks. The read-only 🔌 inventory below stays.
 
 -- ---- Installed MCP + skills INVENTORY (read-only 🔌 viewer) -----------------
 do
@@ -6219,7 +5709,7 @@ do
         core.storiesSaveDecision("", core.cheapHash(""), {}).ok == true)
 end
 
--- ---- L1: persona / extra flags / resolver / env ----------------------------
+-- ---- L1: persona / extra flags ----------------------------------------------
 do
   eq("personaPrompt: nil when empty", core.personaPrompt({ name = "x" }), nil)
   local pp = core.personaPrompt({ role = "a reviewer", goal = "find bugs", backstory = "Be terse." })
@@ -6238,24 +5728,8 @@ do
   check("spawnExtraFlags: --add-dir", joined:find("--add-dir=/k", 1, true) ~= nil)
   check("spawnExtraFlags: --plugin-dir", joined:find("--plugin-dir /p", 1, true) ~= nil)
 
-  -- resolveAgent dereferences MCP names; reports a missing one
-  local mcpState = (core.mcpPush({ servers = {} }, { id = "linear", transport = "sse", url = "u" }))
-  local res = core.resolveAgent({ name = "r", provider = "claude", seedPrompt = "go",
-    role = "a reviewer", knowledge = { "/docs" }, mcpServers = { "linear", "ghost" } },
-    { mcpState = mcpState })
-  eq("resolveAgent: providerId", res.providerId, "claude")
-  eq("resolveAgent: seedPrompt", res.seedPrompt, "go")
-  check("resolveAgent: persona built", res.appendSystemPrompt ~= nil)
-  eq("resolveAgent: addDirs from knowledge", res.addDirs[1], "/docs")
-  eq("resolveAgent: one MCP resolved", #res.mcpServers, 1)
-  check("resolveAgent: mcpConfig built", res.mcpConfig ~= nil)
-  check("resolveAgent: missing MCP reported", #res.errors == 1)
-
-  -- missingEnv
-  local miss = core.missingEnv({ requiredEnv = { "PRESENT", { name = "ABSENT" }, { name = "OPT", required = false } } },
-    { PRESENT = "1" })
-  eq("missingEnv: only the absent required one", #miss, 1)
-  eq("missingEnv: it is ABSENT", miss[1], "ABSENT")
+  -- 2026-11-19, REQUIREMENT CHANGE: resolveAgent and missingEnv went with saved agent profiles;
+  -- personaPrompt (the audit preset's persona) and spawnExtraFlags (the audit, restart) stay.
 end
 
 -- ---- L1: spawn integration (flags flow through; non-agent unchanged) --------
@@ -6287,24 +5761,13 @@ do
   eq("skillCommand: nil on blank", core.skillCommand("  "), nil)
 end
 
--- ---- L1: folder-scoped profile matching ------------------------------------
-do
-  local profs = {
-    { name = "fe", folderGlobs = { "/work/frontend/**" } },
-    { name = "any", folderGlobs = { "/work/*" } },
-    { name = "none" },
-  }
-  local m1 = core.profilesForFolder(profs, "/work/frontend/app/sub")
-  local names = {}; for _, p in ipairs(m1) do names[p.name] = true end
-  check("profilesForFolder: ** matches deep", names.fe == true)
-  check("profilesForFolder: single * matches one segment", core.profilesForFolder(profs, "/work/api")[1] ~= nil)
-  check("profilesForFolder: no-glob profile never matches",
-    (function() for _, p in ipairs(core.profilesForFolder(profs, "/work/api")) do
-       if p.name == "none" then return false end end; return true end)())
-  eq("profilesForFolder: empty dir -> none", #core.profilesForFolder(profs, ""), 0)
-end
+-- ---- L1: folder-scoped profile matching (removed 2026-11-19) -------------------------------
+-- 2026-11-19, REQUIREMENT CHANGE: profilesForFolder matched a saved agent's folderGlobs; it went
+-- with agent profiles.
 
--- ---- L2: named policy / guardrail bundles + attachments --------------------
+-- ---- globEq (it lived with named policy bundles, removed 2026-11-19) -------------------
+-- 2026-11-19, REQUIREMENT CHANGE: the L2 bundle / attachment / resolvePolicy / editor checks went
+-- with policy bundles; the glob matcher the merge gates use stays.
 do
   -- globEq: wildcard, glob, exact
   check("globEq: empty pattern is wildcard", core.globEq("", "anything") == true)
@@ -6313,114 +5776,6 @@ do
   check("globEq: star match", core.globEq("my-*", "my-repo") == true)
   check("globEq: no match", core.globEq("my-*", "other") == false)
 
-  local cfg = core.json.decode([[{
-    "gate": { "tools": "Bash" },
-    "policies": {
-      "patterns": { "autoAllow": ["Read"], "autoDeny": ["Bash(rm*)"] },
-      "bundles": {
-        "read-only": { "autoDeny": ["Write","Edit"], "gateTools": "Bash Write Edit" },
-        "tight": { "autoDeny": ["Bash(curl*)"], "disableGlobal": true, "toolLimits": {"Bash": 3} },
-        "trusted": { "autopilot": true }
-      },
-      "attachments": [
-        { "match": { "project": "secure-*" }, "bundle": "read-only" },
-        { "match": { "group": "prod" }, "bundle": "tight" }
-      ]
-    }
-  }]])
-
-  -- matchAttachment: project glob, group, no-match
-  eq("matchAttachment: project glob -> read-only",
-     core.matchAttachment(cfg, { project = "secure-api" }), "read-only")
-  eq("matchAttachment: group -> tight",
-     core.matchAttachment(cfg, { group = "prod" }), "tight")
-  eq("matchAttachment: no match -> nil",
-     core.matchAttachment(cfg, { project = "scratch", group = "dev" }), nil)
-
-  -- resolvePolicy: fleet default (no override, no attachment)
-  local fleet = core.resolvePolicy(cfg, { project = "scratch" })
-  eq("resolvePolicy: fleet source", fleet.source, "fleet")
-  eq("resolvePolicy: fleet autoDeny is the patterns list", fleet.autoDeny[1], "Bash(rm*)")
-  eq("resolvePolicy: fleet gateTools", fleet.gateTools, "Bash")
-
-  -- attachment-matched bundle UNIONS the fleet lists
-  local att = core.resolvePolicy(cfg, { project = "secure-api" })
-  eq("resolvePolicy: attachment source", att.source, "attachment")
-  eq("resolvePolicy: attachment bundle name", att.bundle, "read-only")
-  check("resolvePolicy: union keeps fleet deny",
-        (function() for _, d in ipairs(att.autoDeny) do if d == "Bash(rm*)" then return true end end return false end)())
-  check("resolvePolicy: union adds bundle deny",
-        (function() for _, d in ipairs(att.autoDeny) do if d == "Write" then return true end end return false end)())
-  eq("resolvePolicy: bundle gateTools wins over fleet", att.gateTools, "Bash Write Edit")
-
-  -- R1-04: a bundle with autopilot:true surfaces autopilot=true (so the panel can
-  -- persist it into the resolved-policy file the gate reads).
-  local ap = core.resolvePolicy(cfg, { project = "scratch" }, { bundle = "trusted" })
-  eq("resolvePolicy: bundle autopilot surfaced", ap.autopilot, true)
-  eq("resolvePolicy: non-autopilot bundle -> false", att.autopilot, false)
-
-  -- disableGlobal drops the fleet lists; explicit override beats attachment
-  local ov = core.resolvePolicy(cfg, { project = "secure-api" }, { bundle = "tight" })
-  eq("resolvePolicy: override source", ov.source, "session")
-  eq("resolvePolicy: override bundle", ov.bundle, "tight")
-  check("resolvePolicy: disableGlobal drops fleet deny",
-        (function() for _, d in ipairs(ov.autoDeny) do if d == "Bash(rm*)" then return false end end return true end)())
-  eq("resolvePolicy: only the bundle deny survives", ov.autoDeny[1], "Bash(curl*)")
-  check("resolvePolicy: toolLimits carried", ov.toolLimits ~= nil and ov.toolLimits.Bash == 3)
-
-  -- starter bundles + overToolLimit
-  check("DEFAULT_POLICY_BUNDLES: read-only gates Bash",
-        (function() for _, d in ipairs(core.DEFAULT_POLICY_BUNDLES["read-only"].autoDeny) do
-           if d == "Bash" then return true end end return false end)())
-  local over = core.overToolLimit({ Bash = 3, Write = 5 }, { Bash = 3, Write = 1 })
-  eq("overToolLimit: one tool over", #over, 1)
-  eq("overToolLimit: it is Bash", over[1].tool, "Bash")
-
-  -- L2 editor CRUD: bundles (map) + attachments (ordered array) on the policies subtree
-  local pol = { patterns = { autoAllow = { "Read" } } }
-  local p1, ok1, errs1 = core.policySetBundle(pol, "tight", { autoDeny = { "Bash", "Write" }, gateTools = "Bash Edit" })
-  eq("polBundle: saved", ok1, true)
-  eq("polBundle: stored under name", #p1.bundles.tight.autoDeny, 2)
-  eq("polBundle: gateTools normalized string", p1.bundles.tight.gateTools, "Bash Edit")
-  eq("polBundle: patterns ride through", p1.patterns.autoAllow[1], "Read")
-  local _, okBad, errsBad = core.policySetBundle(pol, "", { autoDeny = {} })
-  eq("polBundle: blank name rejected", okBad, false)
-  check("polBundle: returns errors", type(errsBad) == "table" and #errsBad > 0)
-  eq("polBundle: bad lockedPermMode rejected",
-     select(2, core.policySetBundle(pol, "x", { lockedPermMode = "nope" })), false)
-  -- empty fields are dropped on normalize
-  local p2 = core.policySetBundle(pol, "empty", { autoAllow = {}, autopilot = false })
-  eq("polBundle: empty autoAllow dropped", p2.bundles.empty.autoAllow, nil)
-  eq("polBundle: autopilot false dropped", p2.bundles.empty.autopilot, nil)
-  -- toolLimits normalized to numbers
-  local p3 = core.policySetBundle(pol, "lim", { toolLimits = { Bash = "5", Junk = "x" } })
-  eq("polBundle: toolLimit number kept", p3.bundles.lim.toolLimits.Bash, 5)
-  eq("polBundle: toolLimit non-number dropped", p3.bundles.lim.toolLimits.Junk, nil)
-  -- remove
-  local p4 = core.policyRemoveBundle(p1, "tight")
-  eq("polBundle: removed", p4.bundles.tight, nil)
-  -- attachments: add / order / move / remove
-  local a1 = core.policyAddAttachment(pol, { match = { project = "shep*" }, bundle = "tight" })
-  eq("polAtt: added", #a1.attachments, 1)
-  eq("polAtt: match normalized", a1.attachments[1].match.project, "shep*")
-  local a2 = core.policyAddAttachment(a1, { match = {}, bundle = "read-only" })
-  eq("polAtt: second appended", #a2.attachments, 2)
-  eq("polAtt: blank match = wildcard (empty match table)", next(a2.attachments[2].match), nil)
-  local _, okA, errsA = core.policyAddAttachment(pol, { match = {} })
-  eq("polAtt: missing bundle rejected", okA, false)
-  -- move down then back up
-  local a3 = core.policyMoveAttachment(a2, 1, 1)
-  eq("polAtt: moved to second", a3.attachments[2].bundle, "tight")
-  eq("polAtt: other moved to first", a3.attachments[1].bundle, "read-only")
-  eq("polAtt: move out of range no-op", core.policyMoveAttachment(a2, 2, 1).attachments[2].bundle, "read-only")
-  -- set (replace at index)
-  local a4 = core.policySetAttachment(a2, 1, { match = { group = "g" }, bundle = "no-bash" })
-  eq("polAtt: replaced bundle", a4.attachments[1].bundle, "no-bash")
-  eq("polAtt: set bad index rejected", select(2, core.policySetAttachment(a2, 9, { bundle = "x" })), false)
-  -- remove by index
-  local a5 = core.policyRemoveAttachment(a2, 1)
-  eq("polAtt: removed one", #a5.attachments, 1)
-  eq("polAtt: remaining is the second", a5.attachments[1].bundle, "read-only")
 end
 
 -- ---- L5: detail-panel tab strip state normalizer --------------------------
@@ -7236,38 +6591,8 @@ do
   eq("estimateCost: gateway listed as unpriced", mixed.unpriced[1], "gemini-2.5-pro")
   check("estimateCost: empty -> not priced", core.estimateCost({}).priced == false)
 
-  -- DR6: per-session model auto-routing heuristic (pure; enable is per-session elsewhere)
-  eq("suggestModel: empty -> nil", core.suggestModel("", {}), nil)
-  eq("suggestModel: whitespace -> nil", core.suggestModel("   \n ", {}), nil)
-  local sh = core.suggestModel("refactor the auth module", {})
-  eq("suggestModel: hard keyword -> hard/opus", sh.tier, "hard"); eq("suggestModel: hard model", sh.model, "opus")
-  check("suggestModel: keyword beats short length", core.suggestModel("debug it", {}).tier == "hard")
-  local sc = core.suggestModel("fix a typo in the readme", {})
-  eq("suggestModel: cheap keyword -> cheap/haiku", sc.tier, "cheap"); eq("suggestModel: cheap model", sc.model, "haiku")
-  eq("suggestModel: short no-keyword -> cheap", core.suggestModel("update the header", {}).tier, "cheap")
-  eq("suggestModel: mid-length no-keyword -> standard",
-     core.suggestModel("please add a new endpoint that returns the list of active users for the dashboard view today", {}).tier, "standard")
-  local longTask = string.rep("word ", 45)
-  eq("suggestModel: long no-keyword -> hard", core.suggestModel(longTask, {}).tier, "hard")
-  check("suggestModel: reason carries the keyword", core.suggestModel("optimize the query", {}).reason == "keyword: optimize")
-  -- config overrides: remap the tier->model + thresholds
-  local cfgOv = core.json.decode('{"automodel":{"models":{"cheap":"haiku-lite","standard":"sonnet","hard":"opus-max"},"cheapMax":2}}')
-  eq("suggestModel: model map override", core.suggestModel("rename foo", cfgOv).model, "haiku-lite")
-  eq("suggestModel: cheapMax override pushes 3-word to standard", core.suggestModel("add new feature", cfgOv).tier, "standard")
-  -- R1-33: a PARTIAL models override (only cheap) must keep standard/hard working via
-  -- the defaults (was: M.config returns the node as-is, so standard/hard went nil ->
-  -- suggestModel returned nil for those tiers -- silent routing loss).
-  local cfgPartial = core.json.decode('{"automodel":{"models":{"cheap":"haiku-lite"}}}')
-  eq("suggestModel: partial override keeps cheap tier", core.suggestModel("fix a typo", cfgPartial).model, "haiku-lite")
-  eq("suggestModel: partial override falls back to default hard model",
-     core.suggestModel("refactor the auth module", cfgPartial).model, "opus")
-  eq("suggestModel: partial override falls back to default standard model",
-     core.suggestModel("please add a new endpoint that returns the list of active users for the dashboard view today", cfgPartial).model, "sonnet")
-  -- R2-28: an inverted/overlapping threshold config (cheapMax >= hardMin) must NOT
-  -- silently classify a long task as cheap -- the bad pair falls back to the defaults.
-  local cfgBad = core.json.decode('{"automodel":{"cheapMax":50,"hardMin":10}}')
-  eq("suggestModel: inverted thresholds -> long task still hard",
-     core.suggestModel(string.rep("word ", 45), cfgBad).tier, "hard")
+  -- DR6: model auto-routing's difficulty heuristic (core.suggestModel) -- 2026-11-19, REQUIREMENT
+  -- CHANGE: removed with model auto-routing, and its checks with it.
 
   -- spawn: a brand-new project (opts.isNew) marks the extension spec coldStart, and the
   -- open args gain --disable-workspace-trust so the trust modal can't swallow the prompt.
@@ -7601,61 +6926,12 @@ do
   eq("lock: saltedInput format", core.lockSaltedInput("s", "p"), "s:p")
 end
 
--- ---- DR7: A/B fork-to-compare (plan / worktree cmds / compare / judge) -----
+-- ---- DR7: A/B fork-to-compare -- removed 2026-11-19 -----------------------------------------
+-- 2026-11-19, REQUIREMENT CHANGE: abSlug / abBranchName / abWorktreePath / abCohortPlan, the git
+-- worktree command builders, abCompare and abJudgePrompt went with A/B compare. The spawnSpec checks
+-- below stay: a model env on a fresh folder still forces the terminal flavor with a cold start.
 do
-  eq("abSlug: sanitizes + caps", core.abSlug("My Cohort #1!!"), "my-cohort-1")
-  eq("abSlug: trims dashes", core.abSlug("--a/b--"), "a-b")
-  eq("abBranchName", core.abBranchName("Run 1", "Opus"), "ab/run-1/opus")
-  eq("abWorktreePath: sibling .cc-ab dir",
-     core.abWorktreePath("/Users/x/Programming/repo", "c1", "a"), "/Users/x/Programming/.cc-ab/repo-c1-a")
-
-  local plan = core.abCohortPlan({
-    cohort = "c1", repoRoot = "/p/repo", task = "build the feature",
-    variants = { { label = "Sonnet", model = "sonnet" }, { label = "Opus", model = "opus", prompt = "build it carefully" } },
-  })
-  check("abCohortPlan: ok", plan.ok == true)
-  eq("abCohortPlan: 2 variants", #plan.variants, 2)
-  eq("abCohortPlan: branch", plan.variants[1].branch, "ab/c1/sonnet")
-  eq("abCohortPlan: worktree", plan.variants[2].worktreePath, "/p/.cc-ab/repo-c1-opus")
-  eq("abCohortPlan: base task inherited", plan.variants[1].task, "build the feature")
-  eq("abCohortPlan: per-variant prompt overrides task", plan.variants[2].task, "build it carefully")
-  eq("abCohortPlan: model carried", plan.variants[2].model, "opus")
-  eq("abCohortPlan: base defaults to HEAD", plan.base, "HEAD")
-  check("abCohortPlan: rejects <2 variants",
-        core.abCohortPlan({ cohort = "c", repoRoot = "/p", task = "t", variants = { { label = "a" } } }).ok == false)
-  check("abCohortPlan: rejects no repo",
-        core.abCohortPlan({ cohort = "c", task = "t", variants = { { label = "a" }, { label = "b" } } }).ok == false)
-  check("abCohortPlan: rejects dup labels",
-        core.abCohortPlan({ cohort = "c", repoRoot = "/p", task = "t", variants = { { label = "A" }, { label = "a" } } }).ok == false)
-  check("abCohortPlan: rejects a variant with no task at all",
-        core.abCohortPlan({ cohort = "c", repoRoot = "/p", variants = { { label = "a" }, { label = "b" } } }).ok == false)
-
-  -- git command builders (quoted; run via /bin/sh by the dashboard). 2026-10-15: every git the
-  -- panel runs carries GIT_OPTIONAL_LOCKS=0 (core.GIT), so the shape now starts with it.
-  check("gitWorktreeAddCmd: shape",
-        core.gitWorktreeAddCmd("/p/repo", "/p/.cc-ab/repo-c1-a", "ab/c1/a", "HEAD")
-        == "GIT_OPTIONAL_LOCKS=0 git -C /p/repo worktree add -b ab/c1/a /p/.cc-ab/repo-c1-a HEAD")
-  check("gitWorktreeRemoveCmd: shape",
-        core.gitWorktreeRemoveCmd("/p/repo", "/p/.cc-ab/repo-c1-a")
-        == "GIT_OPTIONAL_LOCKS=0 git -C /p/repo worktree remove --force /p/.cc-ab/repo-c1-a")
-  check("gitBranchDeleteCmd: shape",
-        core.gitBranchDeleteCmd("/p/repo", "ab/c1/a") == "GIT_OPTIONAL_LOCKS=0 git -C /p/repo branch -D ab/c1/a")
-  check("gitWorktreeAddCmd: quotes a spacey path",
-        core.gitWorktreeAddCmd("/p/my repo", "/p/wt a", "ab/c/a", "HEAD"):find("'/p/my repo'", 1, true) ~= nil)
-
-  -- compare: rank by score (scored first, highest wins, stable ties)
-  local cmp = core.abCompare(plan.variants, { Sonnet = { score = 70, hadData = true }, Opus = { score = 92, hadData = true } })
-  eq("abCompare: winner is highest score", cmp.winner, "Opus")
-  eq("abCompare: rank 1 = winner", cmp.rows[1].label, "Opus")
-  eq("abCompare: rank 2", cmp.rows[2].label, "Sonnet")
-  local cmp2 = core.abCompare(plan.variants, { Sonnet = { score = 80, hadData = true } })  -- Opus unscored
-  eq("abCompare: scored before unscored", cmp2.rows[1].label, "Sonnet")
-  check("abCompare: winner is the scored one", cmp2.winner == "Sonnet")
-  local cmp3 = core.abCompare(plan.variants, {})   -- none scored
-  check("abCompare: no scores -> no winner", cmp3.winner == nil)
-  check("abCompare: stable order when no data", cmp3.rows[1].label == "Sonnet" and cmp3.rows[2].label == "Opus")
-
-  -- A/B model variant on a fresh worktree: env forces the terminal flavor, which must
+  -- A model env on a fresh folder (A/B's model variants were the first) forces the terminal flavor, which must
   -- ALSO carry coldStart so vscodeOpenArgs adds --disable-workspace-trust (else the trust
   -- modal blocks the integrated-terminal launch line).
   local abSpec = core.spawnSpec("vscode", "/p/.cc-ab/repo-c1-a", "build it",
@@ -7667,11 +6943,6 @@ do
         hasArg2(core.vscodeOpenArgs(abSpec), "--disable-workspace-trust"))
   check("ab spawn: ANTHROPIC_MODEL rides the typed line", (abSpec.postType or ""):find("ANTHROPIC_MODEL", 1, true) ~= nil)
 
-  -- judge prompt
-  local jp = core.abJudgePrompt("do X", { { label = "A", model = "opus", output = "did X via foo" }, { label = "B", output = "did X via bar" } })
-  check("abJudgePrompt: includes task", jp:find("do X", 1, true) ~= nil)
-  check("abJudgePrompt: includes both variants + a winner ask",
-        jp:find("Variant A", 1, true) ~= nil and jp:find("Variant B", 1, true) ~= nil and jp:find("WINNING variant", 1, true) ~= nil)
 end
 
 -- ---- Appearance: token themes + overrides + CSS render ---------------------
@@ -8065,8 +7336,14 @@ do
   local keys = {}; for _, f in ipairs(core.FEATURES) do keys[f.key] = true end
   check("FEATURES: covers the new features (theme/transcript/doctor/cost/render)",
         keys.theme and keys.transcript and keys.doctor and keys.cost and keys.render)
+  -- 2026-11-19, REQUIREMENT CHANGE: policy bundles ("policies"), agent profiles ("agents"), A/B
+  -- compare ("ab") and model auto-routing ("automodel") were removed
   check("FEATURES: covers major existing flows too",
-        keys.search and keys.policies and keys.automodel and keys.bridge and keys.agents and keys.ab and keys.usage)
+        keys.search and keys.bridge and keys.usage)
+  check("FEATURES: no model auto-routing (removed 2026-11-19)", not keys.automodel)
+  check("FEATURES: no A/B compare (removed 2026-11-19)", not keys.ab)
+  check("FEATURES: no policy bundles (removed 2026-11-19)", not keys.policies)
+  check("FEATURES: no agent profiles (removed 2026-11-19)", not keys.agents)
   check("FEATURES: no Rewind entry (the tab was pruned 2026-11-17)", not keys.rewind)
   check("FEATURES: lists the user-stories tab", keys.stories == true)
   local newCount = 0; for _, f in ipairs(core.FEATURES) do if f.new then newCount = newCount + 1 end end
@@ -8138,7 +7415,8 @@ do
   -- 2026-11-19: 55 -> 54, REQUIREMENT CHANGE: kept transcripts ("keeper", flagged new) were removed.
   -- 2026-11-19: 54 -> 53, REQUIREMENT CHANGE: queue hold and the Queues view ("queuehold", flagged new) were removed.
   -- 2026-11-19: 53 -> 52, REQUIREMENT CHANGE: task packets ("packets", flagged new) were removed.
-  eq("FEATURES: the 52 new features are flagged", newCount, 52)
+  -- 2026-11-19: 52 -> 51, REQUIREMENT CHANGE: playbooks in My List ("playbooks", flagged new) were removed.
+  eq("FEATURES: the 51 new features are flagged", newCount, 51)
   check("FEATURES: lists the Compare tab", keys.compare == true)
   check("FEATURES: lists crossings", keys.crossings == true)
   check("FEATURES: no queue hold (removed 2026-11-19)", not keys.queuehold)
@@ -8553,9 +7831,11 @@ do
   local sub = core.applyStackIdentity(mkIt("x", "/r/main/server", "/r/main"), "/r/main",
     { toplevel = "/r/main", commonDir = "/r/main/.git", gitDir = "/r/main/.git" }, nil, {})
   eq("stack: a session that cd'd into a subfolder stays on its repo card", sub.stackKey, "repo:/r/main/.git")
+  -- 2026-11-19, REQUIREMENT CHANGE: A/B compare's .cc-ab/ variants kept their own cards; with A/B
+  -- removed, a worktree there is just a worktree and stacks with its repo.
   local ab = core.applyStackIdentity(mkIt("a", "/r/.cc-ab/main-c1-opus"), "/r/.cc-ab/main-c1-opus",
     { toplevel = "/r/.cc-ab/main-c1-opus", commonDir = "/r/main/.git", gitDir = "/r/main/.git/worktrees/x" }, nil, {})
-  eq("stack: A/B fork-to-compare worktrees keep their own cards", ab.stackKey, ab.projectKey)
+  eq("stack: a worktree under .cc-ab/ stacks with its repo (A/B removed 2026-11-19)", ab.stackKey, "repo:/r/main/.git")
   local rem = core.applyStackIdentity({ key = "r", name = "p", cwd = "/r/main", projectKey = "-r-main",
     remote = { host = "box" } }, "/r/main", { toplevel = "/r/main", commonDir = "/r/main/.git", gitDir = "/r/main/.git" }, nil, {})
   eq("stack: a remote tile never shares a stack with a local one", rem.stackKey, "remote:box|-r-main")
@@ -11612,16 +10892,7 @@ do
     { policies = { alwaysAsk = { patterns = {} } } })
   eq("always-ask: ...while the form's own (emptied) list replaces them", #out2.policies.alwaysAsk.patterns, 0)
 
-  -- a bundle's alwaysAsk reaches the resolved policy file; a bundle can only add to the list
-  local cfg = { policies = { bundles = {
-    k8s = { alwaysAsk = { "kubectl delete", "helm uninstall" } },
-    loose = { autopilot = true } } } }
-  local r = core.resolvePolicy(cfg, { project = "x" }, { bundle = "k8s" })
-  eq("always-ask: resolvePolicy carries the bundle's alwaysAsk", r.alwaysAsk and table.concat(r.alwaysAsk, ","), "kubectl delete,helm uninstall")
-  eq("always-ask: a bundle without one leaves it out of the file", core.resolvePolicy(cfg, {}, { bundle = "loose" }).alwaysAsk, nil)
-  eq("always-ask: the bundle editor keeps alwaysAsk", core.policyBundleNorm({ alwaysAsk = { " kubectl delete ", "" } }).alwaysAsk[1], "kubectl delete")
-  eq("always-ask: an empty alwaysAsk is dropped on normalize", core.policyBundleNorm({ alwaysAsk = {} }).alwaysAsk, nil)
-  eq("always-ask: a non-list alwaysAsk is refused", core.validatePolicyBundle({ alwaysAsk = "git push" }).ok, false)
+  -- (2026-11-19, requirement change: a bundle's alwaysAsk went with policy bundles)
 end
 
 -- ---- handoff notes (2026-09-28) ----
@@ -11982,42 +11253,6 @@ do
   eq("seq: ...the back-off does", fired(tile("error"), 300).fire, true)
   eq("seq: the budget kept counting through the empty turns", sn.attempts.p, 3)
 
-  -- the rule path: a rule's continue waits the same back-off
-  local sr = { streak = { p = 1 } }
-  core.queueRuleContinue(sr, tile("done", "did nothing"), "keep-going", "done", 500)
-  local q1 = step(sr, tile("done", "did nothing"), 500)
-  eq("rule: the turn is counted before the rule's continue is judged", sr.streak.p, 2)
-  eq("rule: ...so the second empty turn in a row holds the continue", q1.rule, nil)
-  eq("rule: ...and the tile says for how long", q1.backoff, 120)
-  eq("rule: still held a minute later", step(sr, tile("done", "did nothing"), 560).rule, nil)
-  local q2 = step(sr, tile("done", "did nothing"), 620)
-  eq("rule: at 2 minutes the rule's continue goes", (q2.rule or {}).name, "keep-going")
-  eq("rule: ...naming its edge", (q2.rule or {}).edge, "done")
-  eq("rule: ...once", step(sr, tile("done", "did nothing"), 621).rule, nil)
-  local sr0 = {}
-  core.queueRuleContinue(sr0, tile("done", "made progress"), "keep-going", "done", 10)
-  eq("rule: after a turn that made progress it goes the same tick",
-     (step(sr0, tile("done", "made progress"), 10).rule or {}).name, "keep-going")
-  local srp = { streak = { p = 1 } }
-  core.queueRuleContinue(srp, tile("done", nil, { turnLabelPending = true }), "keep-going", "done", 10)
-  eq("rule: waits while the turn's label is still coming",
-     step(srp, tile("done", nil, { turnLabelPending = true }), 10).rule, nil)
-  local srm = { streak = { p = 3 } }
-  core.queueRuleContinue(srm, tile("done", "did nothing"), "keep-going", "done", 10)
-  step(srm, tile("done", "did nothing"), 10)
-  step(srm, tile("working"), 20)
-  eq("rule: a session that started a turn meanwhile drops the held continue", (srm.rule or {}).k, nil)
-  local sro = {}
-  core.queueRuleContinue(sro, tile("error"), "r", "error", 10)
-  eq("rule: nothing fires once the rules engine is off", step(sro, tile("error"), 10, { rulesOn = false }).rule, nil)
-  local sre = {}
-  core.queueRuleContinue(sre, tile("error"), "r", "error", 10)
-  eq("rule: a rule's continue doesn't need autoContinue.enabled",
-     (step(sre, tile("error"), 10, { enabled = false }).rule or {}).name, "r")
-  local srh = { streak = { p = 2 } }
-  core.queueRuleContinue(srh, tile("working"), "unstick", "hung", 0)
-  eq("rule: a hung-edge continue waits too", step(srh, tile("working"), 119).rule, nil)
-  eq("rule: ...until the back-off is over", (step(srh, tile("working"), 120).rule or {}).edge, "hung")
 
   -- Settings Save keeps the hand-edited back-off
   local keeps = false
@@ -12754,7 +11989,8 @@ do
   for _, k in ipairs(core.AUTOMATION_KINDS or {}) do byKind[k.kind] = k end
   -- 2026-11-19, REQUIREMENT CHANGE: auto-feed ("feed") and routing ("route"), queue.dryRun's kinds, went
   -- with the task queue, and the queue's typists and switch below are gone.
-  for _, want in ipairs({ { "continue", "autoContinue" }, { "rule", "rules" },
+  -- 2026-11-19, REQUIREMENT CHANGE: and a rule ("rule", rules.dryRun) with automation rules.
+  for _, want in ipairs({ { "continue", "autoContinue" },
                           { "respawn", "respawn" }, { "summary", "summary" },
                           { "tabless_end", "tabless" }, { "mailbox", "mailbox" }, { "rc", "remoteControl" } }) do
     eq("dry run: " .. want[1] .. " is switched by " .. want[2] .. ".dryRun", byKind[want[1]] and byKind[want[1]].feature, want[2])
@@ -12765,7 +12001,8 @@ do
   -- 2026-11-19: 11 -> 10, REQUIREMENT CHANGE: restart in place was removed, and its kind with it
   -- 2026-11-19: 10 -> 9, REQUIREMENT CHANGE: resume at the limit reset was removed, and its kind with it
   -- 2026-11-19: 9 -> 7, REQUIREMENT CHANGE: auto-feed and routing were removed with the task queue
-  check("dry run: every kind has a label for the Trace", labelled and #(core.AUTOMATION_KINDS or {}) == 7)
+  -- 2026-11-19: 7 -> 6, REQUIREMENT CHANGE: a rule ("rule") went with automation rules
+  check("dry run: every kind has a label for the Trace", labelled and #(core.AUTOMATION_KINDS or {}) == 6)
   check("dry run: no restart kind or typist (restart in place was removed 2026-11-19)",
         byKind.restart == nil and (core.AUTOMATION_TYPISTS or {}).restart == nil)
   check("dry run: no resume kind or typist (resume at the limit reset was removed 2026-11-19)",
@@ -12774,15 +12011,14 @@ do
         byKind.feed == nil and byKind.route == nil and (core.AUTOMATION_TYPISTS or {}).autofeed == nil
         and (core.AUTOMATION_TYPISTS or {}).router == nil)
   -- every automated typist maps to its kind
-  for typist, kind in pairs({ ["rule-nudge"] = "rule", ["rule-continue"] = "rule",
-                              ["auto-continue"] = "continue", summary = "summary", mailbox = "mailbox",
+  for typist, kind in pairs({ ["auto-continue"] = "continue", summary = "summary", mailbox = "mailbox",
                               ["rc-sweep"] = "rc" }) do
     eq("dry run: typist " .. typist .. " is kind " .. kind, (core.AUTOMATION_TYPISTS or {})[typist], kind)
   end
 
   local dry = core.automationDryRun
   eq("dry run: no config -> live", dry and dry(nil, "continue"), false)
-  eq("dry run: an empty config -> live", dry and dry({}, "rule"), false)
+  eq("dry run: an empty config -> live", dry and dry({}, "respawn"), false)
   local all = { automation = { dryRun = true } }
   local d1, s1 = dry(all, "respawn")
   check("dry run: automation.dryRun puts every kind in dry run  (" .. tostring(s1) .. ")", d1 == true and s1 == "all")
@@ -12790,39 +12026,41 @@ do
   local one = { autoContinue = { dryRun = true } }
   local d2, s2 = dry(one, "continue")
   check("dry run: autoContinue.dryRun -> auto-continue alone  (" .. tostring(s2) .. ")", d2 == true and s2 == "autoContinue")
-  eq("dry run: ...rules stay live", dry(one, "rule"), false)
-  eq("dry run: only true switches it (a string \"true\" is not)", dry({ automation = { dryRun = "true" } }, "rule"), false)
-  eq("dry run: a feature block that isn't a table", dry({ rules = true }, "rule"), false)
+  eq("dry run: ...respawn stays live", dry(one, "respawn"), false)
+  eq("dry run: only true switches it (a string \"true\" is not)", dry({ automation = { dryRun = "true" } }, "respawn"), false)
+  eq("dry run: a feature block that isn't a table", dry({ respawn = true }, "respawn"), false)
   eq("dry run: the queue's old switch does nothing now", dry({ queue = { dryRun = true } }, "feed"), false)
-  local st = core.dryRunState({ automation = { dryRun = false }, rules = { dryRun = true }, mailbox = { dryRun = true } })
+  eq("dry run: ...nor the rules' (2026-11-19)", dry({ rules = { dryRun = true } }, "rule"), false)
+  local st = core.dryRunState({ automation = { dryRun = false }, respawn = { dryRun = true }, mailbox = { dryRun = true } })
   check("dry run: the state lists the features switched on, in Settings order",
-        st and st.all == false and st.on == true and #st.features == 2 and st.features[1] == "rules" and st.features[2] == "mailbox")
+        st and st.all == false and st.on == true and #st.features == 2 and st.features[1] == "respawn" and st.features[2] == "mailbox")
   st = core.dryRunState({})
   check("dry run: ...nothing switched on", st and st.all == false and st.on == false and #st.features == 0)
   check("dry run: ...all of it", core.dryRunState(all).all == true and core.dryRunState(all).on == true)
 
   -- Settings sends the switches as a map; they land in their own blocks and nothing else moves
-  local cfg = { autoContinue = { enabled = true }, rules = { enabled = true }, automation = { dryRun = true } }
-  core.applyDryRunFlags(cfg, { automation = false, rules = true, autoContinue = true, tabless = false, bogus = true, queue = true })
+  local cfg = { autoContinue = { enabled = true }, respawn = { enabled = true }, automation = { dryRun = true } }
+  core.applyDryRunFlags(cfg, { automation = false, respawn = true, autoContinue = true, tabless = false, bogus = true,
+                               queue = true, rules = true })
   eq("dry run flags: automation.dryRun off", cfg.automation.dryRun, false)
-  eq("dry run flags: rules.dryRun on", cfg.rules.dryRun, true)
-  eq("dry run flags: ...rules.enabled untouched", cfg.rules.enabled, true)
+  eq("dry run flags: respawn.dryRun on", cfg.respawn.dryRun, true)
+  eq("dry run flags: ...respawn.enabled untouched", cfg.respawn.enabled, true)
   eq("dry run flags: autoContinue.dryRun on, enabled untouched", cfg.autoContinue.dryRun == true and cfg.autoContinue.enabled, true)
   eq("dry run flags: a block that wasn't there is made", type(cfg.tabless) == "table" and cfg.tabless.dryRun, false)
   eq("dry run flags: an unknown feature is ignored", cfg.bogus, nil)
-  eq("dry run flags: ...the removed queue too (2026-11-19)", cfg.queue, nil)
-  local same = { rules = { dryRun = true } }
+  eq("dry run flags: ...the removed queue and rules too (2026-11-19)", cfg.queue == nil and cfg.rules == nil, true)
+  local same = { respawn = { dryRun = true } }
   core.applyDryRunFlags(same, nil)
-  eq("dry run flags: no map leaves the config alone", same.rules.dryRun, true)
-  core.applyDryRunFlags(same, { rules = "yes" })
-  eq("dry run flags: a non-boolean is ignored", same.rules.dryRun, true)
+  eq("dry run flags: no map leaves the config alone", same.respawn.dryRun, true)
+  core.applyDryRunFlags(same, { respawn = "yes" })
+  eq("dry run flags: a non-boolean is ignored", same.respawn.dryRun, true)
 
   -- Settings Save keeps each switch (a form that doesn't send one never drops it)
   local keeps = function(block)
     for _, k in ipairs(core.SETTINGS_KEEP_SUBKEYS[block] or {}) do if k == "dryRun" then return true end end
     return false
   end
-  for _, block in ipairs({ "automation", "autoContinue", "rules", "respawn", "summary",
+  for _, block in ipairs({ "automation", "autoContinue", "respawn", "summary",
                            "tabless", "mailbox", "remoteControl" }) do
     check("dry run: " .. block .. ".dryRun is in SETTINGS_KEEP_SUBKEYS", keeps(block))
   end
@@ -13586,35 +12824,6 @@ local function bug(name, fn)
   if not ok then check(name .. " -- its fixture stopped: " .. tostring(err), false) end
 end
 
--- An automation rule's provider match never matches
-bug("rule provider match", function()
-  -- 2026-09-30: the rule matcher read item.providerId, but no tile ever carried one -- only the
-  -- policy resolver worked a session's provider out, into a local of its own.
-  local cfg = { providers = { { id = "glm", kind = "gateway", model = "glm-4.6", baseUrl = "https://gw.example/v1" },
-                              { id = "opus", kind = "anthropic", model = "opus[1m]" } } }
-  local tiles = { { key = "g1", statusModel = "glm-4.6", model = "glm-4.6", base_url = "https://gw.example/v1" },
-                  -- the usage pass has overwritten .model with the live one; the spawn's is in statusModel
-                  { key = "o1", statusModel = "opus[1m]", model = "claude-opus-5-5" },
-                  { key = "x1", model = "claude-haiku-4-5" },
-                  { key = "g2", statusModel = "glm-4.6", model = "glm-4.6" } }   -- same model, no gateway URL
-  core.stampProviders(tiles, cfg)
-  eq("a session on a gateway profile carries its provider id", tiles[1].providerId, "glm")
-  eq("...one on a native profile too, by the model it was spawned with", tiles[2].providerId, "opus")
-  eq("...a session on no profile carries none", tiles[3].providerId, nil)
-  eq("...and a gateway profile never matches a session without its base URL", tiles[4].providerId, nil)
-  local rule = core.ruleList({ rules = { { name = "glm-done", trigger = { kind = "done", match = { provider = "glm" } },
-                                           processor = { kind = "log", text = "glm finished" } } } })[1]
-  eq("a rule scoped to a provider fires for a session on it", core.ruleFires(rule, "done", tiles[1]), true)
-  eq("...not for a session on another provider", core.ruleFires(rule, "done", tiles[2]), false)
-  eq("...nor for one on none", core.ruleFires(rule, "done", tiles[3]), false)
-  eq("...and rulesForEdge finds it", #core.rulesForEdge({ rule }, "done", tiles[1]), 1)
-  -- a tile whose profile went away loses its id on the next tick
-  tiles[1].base_url = nil
-  core.stampProviders(tiles, cfg)
-  eq("a stale provider id is cleared when the session no longer matches", tiles[1].providerId, nil)
-  check("stampProviders tolerates no list and no config", pcall(core.stampProviders, nil, nil))
-end)
-
 -- score.weights in cc-config.json is ignored
 bug("score.weights", function()
   -- 2026-09-30: the Score button and the A/B compare called core.runScore(events, sid) with no
@@ -13842,22 +13051,7 @@ bug("features render claim", function()
   check("...it says the grid is rebuilt only when a card changed", what:find("rebuilt only when", 1, true) ~= nil)
 end)
 
--- cc-config.example.json's policy attachment example never matches a real project
-bug("attachment example", function()
-  -- 2026-09-30: the example matched project "secure-*", but a session's project is its launch
-  -- folder's path encoded with dashes (-Users-me-code-secure-api), which never starts with "secure-".
-  local fh = io.open(ROOT .. "cc-config.example.json", "r")
-  local ex = core.json.decode(fh and fh:read("*a") or "{}")
-  if fh then fh:close() end
-  local comment = type(ex.policies) == "table" and tostring(ex.policies._attachments_comment or "") or ""
-  local example = comment:match("e%.g%. (%b[])")
-  check("the example config shows an attachment  (" .. tostring(example) .. ")", example ~= nil)
-  local cfg = { policies = { attachments = core.json.decode(example or "[]") } }
-  eq("the example attaches its bundle to a project in a folder named secure-api",
-     core.matchAttachment(cfg, { project = core.encodeProjectPath("/Users/me/code/secure-api") }), "read-only")
-  eq("...and not to a project named otherwise",
-     core.matchAttachment(cfg, { project = core.encodeProjectPath("/Users/me/code/website") }), nil)
-end)
+-- (2026-11-19: the policy attachment example's fixture went with policy bundles -- requirement change)
 
 -- A turn that ticks its TODO lines with sed, or ends with cc-merge.sh done, reads "made progress"
 bug("turn label: sed ticks and a finished merge", function()
@@ -14213,150 +13407,17 @@ do
   check("no hold: FEATURES has no hands-off hold", fkeys.hold == nil)
 end
 
--- ---- My List: playbooks as sources (2026-10-03) ----
--- Mining round 2, unit D3a. A markdown checklist Adam picks in a project's My List tab becomes a
--- source: its `- [ ]` lines import exactly like TODO.md lines (core.parseTodoFile, then the
--- core.worklistImportTodoRoots merge), tagged src = "playbook" with the file's path and name, and
--- the ✓ auto / ▶ live run badges follow the file. The HARD RULE holds: importing never sets
--- done/doneTs. Removing a playbook stops the import and keeps its items to be verified. The
--- sources list lives in cc-worklist.json (state.playbooks[key]), beside the items.
+-- ---- My List: playbooks as sources (2026-10-03) -- removed 2026-11-19 ----
+-- 2026-11-19, REQUIREMENT CHANGE: a picked markdown checklist imported into a project's My List tab
+-- (worklistPlaybookAdd / Refusal / Remove / worklistImportPlaybook, state.playbooks, the `kind`
+-- argument of worklistImportTodoRoots) went with playbooks, and its checks with it. A store's leftover
+-- `playbooks` list is now dropped on read:
 do
-  local n = 0
-  local function idgen() n = n + 1; return "pb" .. n end
-  local st = { generic = {}, byProject = {}, todoMeta = {} }
-  local PATH = "/Users/adam/notes/release-checklist.md"
-
-  -- adding a source
-  local e, err = core.worklistPlaybookAdd(st, "shop", PATH, 100, idgen)
-  check("playbook add: a markdown file becomes a source", type(e) == "table" and err == nil)
-  eq("playbook add: ...it keeps the file's path", (e or {}).path, PATH)
-  eq("playbook add: ...and is named after the file", (e or {}).name, "release-checklist.md")
-  eq("playbook add: ...with an id of its own", (e or {}).id, "pb1")
-  eq("playbook add: ...listed on its tab", #core.worklistPlaybooks(st, "shop"), 1)
-  eq("playbook add: ...and only on its tab", #core.worklistPlaybooks(st, "other"), 0)
-  local again, aerr = core.worklistPlaybookAdd(st, "shop", PATH, 110, idgen)
-  check("playbook add: the same file twice on one tab is refused", again == nil and aerr == "already")
-  eq("playbook add: ...and still listed once", #core.worklistPlaybooks(st, "shop"), 1)
-  for _, bad in ipairs({ "generic", "master", "archive", "" }) do
-    check("playbook add: never on the '" .. bad .. "' tab", core.worklistPlaybookAdd(st, bad, PATH, 1, idgen) == nil)
-  end
-  check("playbook add: a relative path is refused", core.worklistPlaybookAdd(st, "shop", "notes/x.md", 1, idgen) == nil)
-  check("playbook add: a file that isn't markdown is refused",
-        core.worklistPlaybookAdd(st, "shop", "/Users/adam/notes/x.txt", 1, idgen) == nil)
-  check("playbook add: .markdown counts as markdown", core.worklistPlaybookAdd(st, "spare", "/tmp/Deploy.MARKDOWN", 1, idgen) ~= nil)
-
-  -- the refusal shown before adding: not markdown, or the project's own TODO.md (already imported)
-  eq("playbook refusal: a markdown file elsewhere is fine",
-     core.worklistPlaybookRefusal("/Users/adam/notes/run.md", { "/Users/adam/shop" }), nil)
-  check("playbook refusal: the tab's own TODO.md already imports",
-        core.worklistPlaybookRefusal("/Users/adam/shop/TODO.md", { "/Users/adam/shop" }) ~= nil)
-  check("playbook refusal: ...a worktree's TODO.md too",
-        core.worklistPlaybookRefusal("/Users/adam/shop-wt/TODO.md", { "/Users/adam/shop", "/Users/adam/shop-wt/" }) ~= nil)
-  eq("playbook refusal: another repo's TODO.md is just a markdown file",
-     core.worklistPlaybookRefusal("/Users/adam/other/TODO.md", { "/Users/adam/shop" }), nil)
-  check("playbook refusal: not markdown", core.worklistPlaybookRefusal("/Users/adam/notes/run.pdf", {}) ~= nil)
-
-  -- importing its lines: exactly like TODO.md's
-  local L = function() return st.byProject.shop or {} end
-  local c = core.worklistImportPlaybook(st, "shop", e.id,
-    core.parseTodoFile("# Release\n\nprose\n- [ ] tag the build\n- [x] write the notes\n- [~] look at the store page\n"),
-    200, idgen)
-  eq("playbook import: its checkbox lines arrive as items", #L(), 3)
-  eq("playbook import: ...counted as added", c.added, 3)
-  eq("playbook import: ...in file order", L()[1].text .. "|" .. L()[2].text, "tag the build|write the notes")
-  eq("playbook import: src is playbook", L()[1].src, "playbook")
-  eq("playbook import: ...the file's path is recorded", L()[1].srcFile, PATH)
-  eq("playbook import: ...and its name, to group under", L()[1].srcName, "release-checklist.md")
-  eq("playbook import: ...srcText is the file line", L()[2].srcText, "write the notes")
-  check("playbook import HARD RULE: [x] sets fileDone", L()[2].fileDone == true)
-  check("playbook import HARD RULE: [x] does NOT set done", L()[2].done == false)
-  check("playbook import HARD RULE: [x] does NOT stamp doneTs", L()[2].doneTs == nil)
-  check("playbook import: a [~] line needs a live run, and is never done", L()[3].liveRun == true and L()[3].done == false)
-  check("playbook import: the tab is NOT enrolled in TODO.md sync", st.todoMeta.shop == nil)
-  check("playbook import: the lines are tombstoned on the source", e.seen["tag the build"] == true)
-
-  -- badges follow the file
-  c = core.worklistImportPlaybook(st, "shop", e.id,
-    core.parseTodoFile("- [x] tag the build\n- [ ] write the notes\n- [x] look at the store page\n"), 300, idgen)
-  eq("playbook sync: nothing re-added", c.added, 0)
-  check("playbook sync: fileDone follows the file, on", L()[1].fileDone == true)
-  check("playbook sync: ...and off", L()[2].fileDone == nil)
-  check("playbook sync: liveRun follows the file", L()[3].liveRun == nil and L()[3].fileDone == true)
-  check("playbook sync HARD RULE: still nothing done", L()[1].done == false and L()[1].doneTs == nil)
-  -- Adam verifies one; later syncs never touch that
-  core.worklistToggle(st, "shop", L()[1].id, 400)
-  core.worklistImportPlaybook(st, "shop", e.id, core.parseTodoFile("- [ ] tag the build\n- [ ] write the notes\n"), 500, idgen)
-  check("playbook sync HARD RULE: Adam's tick survives a resync", L()[1].done == true and L()[1].doneTs == 400)
-  check("playbook sync: a line gone from the file is flagged, not removed", L()[3].fileMissing == true and #L() == 3)
-  -- an unreadable file (moved, deleted) is not every line vanishing
-  c = core.worklistImportPlaybook(st, "shop", e.id, nil, 600, idgen)
-  check("playbook sync: an unreadable file changes nothing", c.added == 0 and c.missing == 0 and L()[1].fileMissing == nil)
-
-  -- the same text in TODO.md and in the playbook: two items, each following its own file
-  core.worklistImportTodoRoots(st, "shop", { { root = "/Users/adam/shop", isMain = true,
-    parsed = core.parseTodoFile("- [x] tag the build\n") } }, 700, idgen)
-  local todoTwin, pbTwin
-  for _, it in ipairs(L()) do
-    if it.text == "tag the build" then if it.src == "todo" then todoTwin = it else pbTwin = it end end
-  end
-  check("playbook vs TODO.md: the same line is two items", todoTwin ~= nil and pbTwin ~= nil)
-  check("playbook vs TODO.md: ...each badge follows its own file", todoTwin.fileDone == true and pbTwin.fileDone == nil)
-  core.worklistImportPlaybook(st, "shop", e.id, core.parseTodoFile("- [ ] tag the build\n- [ ] write the notes\n"), 710, idgen)
-  check("playbook vs TODO.md: a playbook sync never touches the TODO.md item", todoTwin.fileDone == true and todoTwin.fileMissing == nil)
-  core.worklistImportTodoRoots(st, "shop", { { root = "/Users/adam/shop", isMain = true, parsed = {} } }, 720, idgen)
-  check("playbook vs TODO.md: ...nor a TODO.md sync the playbook's", pbTwin.fileMissing == nil and todoTwin.fileMissing == true)
-
-  -- two playbooks with a shared line: two items
-  local e2 = core.worklistPlaybookAdd(st, "shop", "/Users/adam/notes/hotfix.md", 800, idgen)
-  core.worklistImportPlaybook(st, "shop", e2.id, core.parseTodoFile("- [x] tag the build\n"), 800, idgen)
-  local fromHotfix
-  for _, it in ipairs(L()) do if it.srcFile == "/Users/adam/notes/hotfix.md" then fromHotfix = it end end
-  check("two playbooks: a shared line is its own item in each", fromHotfix ~= nil and fromHotfix ~= pbTwin
-        and fromHotfix.srcName == "hotfix.md" and fromHotfix.fileDone == true and pbTwin.fileDone == nil)
-
-  -- tombstones: an item Adam removed never comes back from the file
-  core.worklistRemove(st, "shop", L()[2].id)          -- "write the notes"
-  local before = #L()
-  c = core.worklistImportPlaybook(st, "shop", e.id, core.parseTodoFile("- [ ] tag the build\n- [ ] write the notes\n"), 900, idgen)
-  check("playbook tombstone: a removed item is not re-added", c.added == 0 and #L() == before)
-  c = core.worklistImportPlaybook(st, "shop", e.id, core.parseTodoFile("- [ ] tag the build\n- [ ] a new step\n"), 910, idgen)
-  check("playbook tombstone: a new line still imports", c.added == 1 and L()[#L()].text == "a new step")
-
-  -- Remove playbook: the import stops, the items stay
-  local keep = #L()
-  check("playbook remove: removes the source", core.worklistPlaybookRemove(st, "shop", e.id, 1000) == true)
-  eq("playbook remove: ...it is no longer listed", #core.worklistPlaybooks(st, "shop"), 1)
-  eq("playbook remove: ...the other playbook stays", (core.worklistPlaybooks(st, "shop")[1] or {}).name, "hotfix.md")
-  eq("playbook remove: ...and every item stays, to be verified", #L(), keep)
-  c = core.worklistImportPlaybook(st, "shop", e.id, core.parseTodoFile("- [x] tag the build\n- [ ] brand new\n"), 1100, idgen)
-  check("playbook remove: a removed source imports nothing", c.added == 0 and c.updated == 0 and #L() == keep)
-  check("playbook remove: an unknown id removes nothing", core.worklistPlaybookRemove(st, "shop", "nope", 1) == false)
-  -- adding the same file again revives it, tombstones and links intact
-  local back = core.worklistPlaybookAdd(st, "shop", PATH, 1200, idgen)
-  check("playbook re-add: the same source comes back", back ~= nil and back.id == e.id)
-  c = core.worklistImportPlaybook(st, "shop", back.id, core.parseTodoFile("- [x] tag the build\n- [ ] write the notes\n"), 1300, idgen)
-  check("playbook re-add: kept items link up again, removed ones stay gone", c.added == 0 and pbTwin.fileDone == true)
-
-  -- the store keeps the sources list: normalize rebuilds it (hs.json interns empty {}) and drops junk
   local norm = core.worklistNormalize({ generic = {}, byProject = {}, playbooks = {
-    shop = { { id = "a", path = "/x/a.md", name = "a.md", added = 5, mtime = 44, seen = { one = true } },
-             { id = "b", path = "/x/b.md", name = "b.md", added = 6, removed = 7, seen = {} },
-             { id = "c", path = "", name = "junk" }, "junk", { path = "/x/noid.md" } },
-    [1] = { { id = "z", path = "/z.md" } } } })
-  local np = norm.playbooks or {}
-  eq("normalize: playbooks survive a read", #(np.shop or {}), 2)
-  check("normalize: ...with their tombstones", np.shop and np.shop[1].seen.one == true)
-  eq("normalize: ...and the file's last-synced mtime (a change while Shepherd was down syncs once)",
-     np.shop and np.shop[1].mtime, 44)
-  check("normalize: ...and a removed one stays removed (it keeps its tombstones)", np.shop and np.shop[2].removed == 7)
-  check("normalize: ...a non-string tab key is dropped", np[1] == nil)
-  check("normalize: ...and each tombstone set is its own table",
-        np.shop and np.shop[1].seen ~= np.shop[2].seen)
-  eq("normalize: a store with no playbooks reads as none", next(core.worklistNormalize({}).playbooks or {}), nil)
-
+    shop = { { id = "a", path = "/x/a.md", name = "a.md", added = 5, mtime = 44, seen = { one = true } } } } })
+  eq("normalize: a leftover playbooks list is dropped (playbooks removed 2026-11-19)", norm.playbooks, nil)
   local fkeys = {}; for _, ft in ipairs(core.FEATURES) do fkeys[ft.key] = ft end
-  check("playbooks: FEATURES lists playbooks in My List, flagged new", fkeys.playbooks ~= nil and fkeys.playbooks.new == true
-        and fkeys.playbooks.title == "Playbooks in My List")
+  check("playbooks: not in FEATURES (removed 2026-11-19)", fkeys.playbooks == nil)
 end
 
 -- ---- Gate blame: whose failures a red gate's are (2026-10-03, mining round 2 unit E1a) ----
@@ -14478,24 +13539,9 @@ do
 end
 
 -- ---- Main is still green: a scheduled gate on main (2026-10-03, mining round 2 E1b) ----
+-- 2026-11-19, REQUIREMENT CHANGE: the gate routine's schedule checks (vsched / sched) went with
+-- routines; the engine's pure halves below stay.
 do
-  -- the schedule action
-  local g = { name = "main-green", kind = "cron", cron = "0 7 * * *", action = "gate", folder = "/r/A" }
-  eq("vsched: a gate routine with a folder is valid", core.validateSchedule(g).ok, true)
-  local noFolder = core.validateSchedule({ name = "g", kind = "cron", cron = "0 7 * * *", action = "gate" })
-  check("vsched: a gate routine needs the repo's folder", noFolder.ok == false
-        and table.concat(noFolder.errors, ";"):find("folder", 1, true) ~= nil)
-  local bad = core.validateSchedule({ name = "g", kind = "cron", cron = "0 7 * * *", folder = "/p", action = "boom" })
-  check("vsched: a bad action names gate among the choices", bad.ok == false
-        and table.concat(bad.errors, ";"):find("gate", 1, true) ~= nil)
-  eq("sched: a gate routine stays a gate routine (never normalized to a spawn)", core.scheduleList({ schedules = { g } })[1].action, "gate")
-  eq("vsched: a gate routine may name its branch",
-     core.validateSchedule({ name = "g", kind = "cron", cron = "0 7 * * *", action = "gate", folder = "/p", branch = "master" }).ok, true)
-  eq("sched: ...which rides through the load",
-     core.scheduleList({ schedules = { { name = "g", kind = "cron", cron = "0 7 * * *", action = "gate", folder = "/p", branch = "master" } } })[1].branch, "master")
-  eq("vsched: a branch that isn't a plain ref name is refused",
-     core.validateSchedule({ name = "g", kind = "cron", cron = "0 7 * * *", action = "gate", folder = "/p", branch = "main; rm x" }).ok, false)
-
   -- which gate: the repo's merge gate, matched like a main-checkout session's
   local cfg = { merge = { gates = {
     { match = { project = "*other*" }, command = "OTHER" },
@@ -14561,10 +13607,8 @@ do
   -- hands-off hold -- REQUIREMENT CHANGE
   check("mainGreenHeld is gone with the hold", core.mainGreenHeld == nil)
 
-  -- a repo whose gate routine is gone loses its flag
-  local st = { ["/r/A/.git"] = rec2, ["/r/Z/.git"] = { state = "red", folder = "/r/Z" } }
-  local pr = core.mainGreenPrune(st, { { name = "mg", action = "gate", folder = "/r/A" }, { name = "s", action = "spawn", folder = "/r/Z" } })
-  check("mainGreenPrune: keeps a repo a gate routine still checks, drops the rest", pr["/r/A/.git"] == rec2 and pr["/r/Z/.git"] == nil)
+  -- (2026-11-19, requirement change: mainGreenPrune -- a repo whose gate routine is gone loses its
+  -- flag -- went with routines)
 
   -- the coach hears about it
   local log = core.coachLogAdd({}, { kind = "mainred", id = "mainred|/r/A/.git|" .. SHA, branch = "main",
@@ -14581,7 +13625,7 @@ end
 -- ---- My List: Run selected, the checklist runner (2026-10-03) ----
 -- Mining round 2, unit D3b. Adam selects open items in a project's My List tab and clicks Run
 -- selected: they run one at a time, each in a fresh session in the repo's main checkout. A file line
--- (TODO.md or a playbook) is finished when its box is ticked in the file AND the turn wasn't "did
+-- (TODO.md; a playbook's too, until playbooks went 2026-11-19) is finished when its box is ticked in the file AND the turn wasn't "did
 -- nothing"; Adam's own item when its own session reports done through cc-run.sh. Then -- only for a
 -- run Adam started -- core.worklistRunCheck sets HIS checkmark (done, doneTs, doneBy = "run:<id>").
 -- Three items in a row that finish nothing stop the run; a live-run item or a blocked report pauses
@@ -14606,7 +13650,9 @@ do
   -- which items can run, and how each one is judged finished
   local I = items()
   eq("run kind: a TODO.md line ticks its box", core.runItemKind(I[1]), "file")
-  eq("run kind: a playbook line ticks its box", core.runItemKind(I[6]), "file")
+  -- 2026-11-19, REQUIREMENT CHANGE: playbooks were removed; a leftover playbook line (p1) is judged
+  -- like Adam's own item, by its session's report, and names no file
+  eq("run kind: a leftover playbook line reports done", core.runItemKind(I[6]), "report")
   eq("run kind: Adam's own item reports done", core.runItemKind(I[7]), "report")
   eq("run kind: an audit finding reports done (its file's [x] claims nothing)", core.runItemKind(I[9]), "report")
   eq("run kind: a live-run line is a file line (the run pauses on it)", core.runItemKind(I[8]), "file")
@@ -14630,8 +13676,8 @@ do
      (run.items[2] or {}).id or "?", (run.items[3] or {}).id or "?" }, ","), "t1,p1,o1")
   eq("run: ...the selection it couldn't run is counted", run.refused, 2)
   eq("run: a TODO.md line names the main checkout's TODO.md", (run.items[1] or {}).file, "/r/shop/TODO.md")
-  eq("run: a playbook line names its playbook", (run.items[2] or {}).file, "/n/release.md")
-  eq("run: ...and keeps the line it ticks", (run.items[2] or {}).srcText, "tag the build")
+  eq("run: a leftover playbook line names no file", (run.items[2] or {}).file, nil)
+  eq("run: ...and ticks no line", (run.items[2] or {}).srcText, nil)
   eq("run: Adam's own item names no file", (run.items[3] or {}).file, nil)
   eq("run: items are numbered from 1", (run.items[3] or {}).n, 3)
   eq("run: ...and start queued", (run.items[1] or {}).state, "queued")
@@ -15851,9 +14897,7 @@ do
   each("git-locks: mainGreenRun", mg)
   check("git-locks: ...the gate's own command never inherits it (no export)",
         mg ~= nil and not mg:find("export GIT_OPTIONAL_LOCKS", 1, true) and mg:sub(-#"; make test") == "; make test")
-  each("git-locks: gitWorktreeAddCmd", core.gitWorktreeAddCmd("/r/A", "/r/A-v1", "ab/v1", "main"))
-  each("git-locks: gitWorktreeRemoveCmd", core.gitWorktreeRemoveCmd("/r/A", "/r/A-v1"))
-  each("git-locks: gitBranchDeleteCmd", core.gitBranchDeleteCmd("/r/A", "ab/v1"))
+  -- 2026-11-19: gitWorktreeAddCmd / gitWorktreeRemoveCmd / gitBranchDeleteCmd went with A/B compare
   exported("git-locks: RADAR_SH (the overlap radar)", core.RADAR_SH)
   exported("git-locks: SCHED_LOCK_SH", core.SCHED_LOCK_SH)
   -- 2026-11-19: PACKET_READ_SH went with task packets
@@ -15861,58 +14905,6 @@ do
   check("git-locks: the matcher catches a bare git", not unlocked("echo @@x; git -C '/r' status"))
   check("git-locks: the matcher catches a bare git after the first", not unlocked("GIT_OPTIONAL_LOCKS=0 git log; { git status; }"))
   check("git-locks: the matcher needs a run to pass", not unlocked("echo nothing here --git-dir"))
-end
-
--- ---- An agent profile's policyBundle is applied at spawn (2026-10-15) ----
--- 2026-10-15: core.resolveAgent resolved profile.policyBundle, but nothing used it: a session spawned
--- from a profile naming a bundle started with none. The spawn now leaves core.pendingPolicy for the
--- session that starts (tests/profile-policy.test.lua); its rules are core.policyFileFor, the same
--- file the card's Policy dropdown and the tick write.
-do
-  local cfg = core.json.decode([[{
-    "policies": {
-      "patterns": { "autoAllow": ["Read"], "autoDeny": ["Bash(rm*)"] },
-      "bundles": { "trusted": { "autoDeny": ["Write"], "autopilot": true }, "plain": { "autoAllow": ["Grep"] } },
-      "attachments": [ { "match": { "project": "*" }, "bundle": "plain" } ]
-    }
-  }]])
-  eq("policyFileFor: the fleet's own rules write no file", core.policyFileFor(core.resolvePolicy({}, {}, nil)), nil)
-  local file = core.policyFileFor(core.resolvePolicy(cfg, { project = "x" }, "trusted"))
-  eq("policyFileFor: names the bundle", file and file.bundle, "trusted")
-  eq("policyFileFor: its deny rules first, then the fleet's", file and table.concat(file.autoDeny, "|"), "Write|Bash(rm*)")
-  eq("policyFileFor: the fleet's allow rules", file and table.concat(file.autoAllow, "|"), "Read")
-  eq("policyFileFor: autopilot when the bundle has it", file and file.autopilot, true)
-  local att = core.policyFileFor(core.resolvePolicy(cfg, { project = "x" }, nil))
-  eq("policyFileFor: an attachment's bundle writes a file too", att and att.bundle, "plain")
-  eq("policyFileFor: no autopilot key when the bundle hasn't one", att and att.autopilot, nil)
-  eq("policyFileFor: nothing resolved, nothing written", core.policyFileFor(nil), nil)
-
-  local pend = core.pendingPolicy(cfg, "trusted")
-  eq("pendingPolicy: carries the choice", pend and pend.bundle, "trusted")
-  check("pendingPolicy: and the rules the card would write for it",
-        pend and core.json.encode(pend.policy) == core.json.encode(core.policyFileFor(core.resolvePolicy(cfg, {}, "trusted"))))
-  eq("pendingPolicy: the choice wins over an attachment", pend and pend.policy.bundle, "trusted")
-  eq("pendingPolicy: trims the name", (core.pendingPolicy(cfg, "  trusted ") or {}).bundle, "trusted")
-  eq("pendingPolicy: no bundle named, nothing pending", core.pendingPolicy(cfg, nil), nil)
-  eq("pendingPolicy: a blank name is no bundle", core.pendingPolicy(cfg, "  "), nil)
-  eq("pendingPolicy: a bundle the config lacks is still the choice, as on a card",
-     (core.pendingPolicy(cfg, "gone") or {}).bundle, "gone")
-end
-
--- ---- A policy bundle's own alwaysAsk reaches the gate (2026-10-15) ----
-do
-  -- 2026-10-15: policyFileFor wrote autoAllow/autoDeny/bundle/autopilot but dropped resolvePolicy's
-  -- alwaysAsk, and cc-approve.sh reads the bundle's extra always-ask commands only from that file.
-  local cfg = core.json.decode([[{
-    "policies": { "bundles": { "k8s": { "alwaysAsk": ["kubectl delete", "terraform apply"] }, "plain": { "autoAllow": ["Grep"] } } }
-  }]])
-  local file = core.policyFileFor(core.resolvePolicy(cfg, {}, "k8s"))
-  eq("a bundle's alwaysAsk commands are in the file the gate reads",
-     file and type(file.alwaysAsk) == "table" and table.concat(file.alwaysAsk, "|") or nil, "kubectl delete|terraform apply")
-  eq("...and in what a spawn from a profile naming it leaves",
-     table.concat((((core.pendingPolicy(cfg, "k8s") or {}).policy or {}).alwaysAsk) or {}, "|"), "kubectl delete|terraform apply")
-  local plain = core.policyFileFor(core.resolvePolicy(cfg, {}, "plain"))
-  eq("a bundle with no alwaysAsk writes no alwaysAsk key", plain and plain.alwaysAsk, nil)
 end
 
 -- ---- Remote Control: which sessions are out, and which Shepherd may connect (2026-10-22) ----

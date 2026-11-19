@@ -15,16 +15,14 @@ How a session's requests reach you, what can answer them without you, and what n
   Every other tool goes through Claude Code's own permission flow, untouched. Policies apply only to
   gated tools too: an `autoDeny` rule for `WebFetch` fires only if `WebFetch` is in `gate.tools`.
 - **What can approve a gated tool without you**, and only while the gate is armed:
-  - an `autoAllow` pattern: the fleet `policies.patterns` when enabled, or an attached bundle (whose
-    list also carries the fleet `autoAllow` patterns),
-  - a bundle with `autopilot: true`, or the time-boxed **Autopilot** button,
+  - an `autoAllow` pattern: the fleet `policies.patterns` when enabled,
   - `policies.approveRepeats`: the exact same request was approved by you before in this session.
 
   `autoDeny` is checked first and always wins. All of these are **off by default**, and none of
   them can approve an [always-ask command](#always-ask-commands).
-  **Headless approvals** turns off approve-repeats, Autopilot and the fleet patterns, but an
-  attached policy bundle keeps working until you detach it. Policies apply whether or not the panel
-  is open.
+  **Headless approvals** turns off approve-repeats and the fleet patterns. Policies apply whether
+  or not the panel is open. (Named policy bundles and Autopilot were removed on 2026-11-19; a
+  `~/.claude/cc-policy/` or `cc-autopilot/` file an older Shepherd left is never read.)
 - **When the gate can't answer**, it steps aside and returns no decision: the gate is off, the tool
   isn't gated, Shepherd wasn't running when the request came in (its heartbeat was older than 5
   seconds; a hidden panel still counts as running), or you didn't answer within 120 seconds.
@@ -54,8 +52,7 @@ How a session's requests reach you, what can answer them without you, and what n
 
 Want to approve or deny from the panel with **no window switch** and still keep Claude fully gated?
 Flip **Headless approvals** in ⚙ Settings → Approvals. One click arms the gate and turns off
-approve-repeats, Autopilot and the fleet patterns (detach any policy bundle yourself, with the
-**Policy** dropdown or the 🛡 editor). A request for a *gated* tool then turns the tile red, and Approve / Deny answer
+approve-repeats and the fleet patterns. A request for a *gated* tool then turns the tile red, and Approve / Deny answer
 it through a decision file: **no window focus, no keystrokes**. Claude can't run a gated tool until
 you decide, or until the gate steps aside (above). This works for terminal *and* VS Code sessions.
 (By hand: `touch ~/.claude/cc-gate.enabled` to arm, `rm` it to disarm.)
@@ -103,8 +100,7 @@ Hook environment tunables: `CC_GATE_TOOLS` (overrides `gate.tools`), `CC_GATE_TI
 ## Always-ask commands
 
 Some commands can't be taken back. These Bash commands always wait for your click, **whatever the
-gate, `gate.tools`, a session's **None** gating, Autopilot, `autoAllow`, approve-repeats or a policy
-bundle says**:
+gate, `gate.tools`, a session's **None** gating, `autoAllow` or approve-repeats says**:
 
 - `git push`
 - `rm` with both `-r` and `-f`, in any spelling (`-rf`, `-fr`, `-Rf`, `-r -f`, `--recursive --force`)
@@ -144,13 +140,11 @@ It reads the command the way the shell does, so what counts is what actually run
 **Your own additions.** ⚙ Settings → Approvals → **Always ask** lists the built-ins (they can't be
 switched off) and takes more, one per line: a command name, then words it must contain in that
 order (`terraform apply`, `kubectl delete`, `docker push`; `*` and `?` work inside a word). They are
-saved as `policies.alwaysAsk.patterns`. A policy bundle can add its own with `"alwaysAsk": [...]`;
-a bundle only ever adds to the list, and `disableGlobal` doesn't drop the fleet's.
+saved as `policies.alwaysAsk.patterns`.
 
 ```json
 "policies": {
-  "alwaysAsk": { "patterns": ["terraform apply", "kubectl delete"] },
-  "bundles": { "k8s": { "alwaysAsk": ["helm uninstall"] } }
+  "alwaysAsk": { "patterns": ["terraform apply", "kubectl delete"] }
 }
 ```
 
@@ -193,7 +187,7 @@ While it is on, whether or not the gate is armed:
 
 The fence only ever refuses, before the [always-ask](#always-ask-commands) check and
 the gate. A command that is both, like `git -C <sibling> push`, is denied, not held, and no gate
-policy, Autopilot, bundle or permission mode can approve it.
+policy or permission mode can approve it.
 
 It guards against accidents; it isn't a sandbox. A folder named by a variable or a command
 (`git -C "$DIR" commit`, `cd $(…)`) can't be judged and goes on, `git worktree remove <path>` isn't
@@ -213,25 +207,20 @@ Policies let some gated requests decide themselves. They are all off by default,
 stderr and, when the audit ledger is on, to the ledger. The gate checks them in this order:
 
 1. **autoDeny** patterns: deny (safety first).
-2. **Bundle autopilot**: an attached bundle with `autopilot: true` allows everything it doesn't deny.
-3. **Autopilot**: the session's time-boxed window allows everything.
-4. **autoAllow** patterns: allow.
-5. **approveRepeats**: allow a request identical to one you approved before in this session.
-6. Otherwise the request goes to the panel. While approveRepeats is on, a human allow is
+2. **autoAllow** patterns: allow.
+3. **approveRepeats**: allow a request identical to one you approved before in this session.
+4. Otherwise the request goes to the panel. While approveRepeats is on, a human allow is
    remembered for it.
 
 ```json
 "policies": {
   "approveRepeats": false,
-  "autopilot": { "enabled": false, "minutes": 15 },
   "patterns":  { "enabled": false, "autoAllow": [], "autoDeny": [] }
 }
 ```
 
 - **`policies.approveRepeats`**: if you already approved the *exact* command in a session,
   auto-approve it next time. A multi-line command only matches the same multi-line command.
-- **`policies.autopilot`**: the detail panel's **Autopilot** button time-boxes a session to
-  auto-approve *all* its gated prompts (badge `🛫 autopilot`), expiring after `minutes`.
 - **`policies.patterns`**: `autoDeny` (wins) and `autoAllow` globs, written like
   `"Bash(npm test*)"` or `"Read"`. `Tool` matches by tool name; `Tool(glob)` also matches the
   command or path against a shell glob.
@@ -239,42 +228,6 @@ stderr and, when the audit ledger is on, to the ledger. The gate checks them in 
 > **Keep `autoAllow` tight.** A `Tool(glob)` pattern is a shell-glob match on the whole command, so
 > `Bash(ls*)` also allows `ls; rm -rf /`. Prefer exact tools or anchored commands, and deny
 > dangerous shapes with `autoDeny`, which always wins.
-
-### Named policy bundles
-
-`policies.patterns` is one fleet-wide allow/deny list. **Bundles** make those rules reusable and
-per-session: define named sets under `policies.bundles`, then attach one to a session with the
-detail panel's **Policy** dropdown (shown when **Model controls** is on), or fleet-wide with
-`policies.attachments`. An attachment's `match` takes `project`, `group`, `providerId` and `key`,
-each a glob; the first attachment that matches wins. `project` is the session's project key: its
-launch folder's path encoded with dashes (`/Users/me/code/secure-api` becomes
-`-Users-me-code-secure-api`), so match it with a leading `*`.
-
-```json
-"policies": {
-  "patterns": { "enabled": false, "autoAllow": [], "autoDeny": [] },
-  "bundles": {
-    "read-only":  { "autoDeny": ["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit"] },
-    "no-network": { "autoDeny": ["Bash(curl*)", "Bash(wget*)", "WebFetch"] }
-  },
-  "attachments": [ { "match": { "project": "*secure-*" }, "bundle": "read-only" } ]
-}
-```
-
-When a bundle is attached, its rules apply **even if `patterns.enabled` is false** (attaching is the
-opt-in). The bundle's lists are added to the fleet patterns, or *replace* them if the bundle sets
-`"disableGlobal": true`. The panel resolves each session (precedence: the per-session **Policy**
-dropdown, then an attachment, then the fleet), writes the result to `~/.claude/cc-policy/<key>`, and
-the gate reads it. A session spawned from an [agent profile](providers-and-integrations.md#agent-profiles)
-that names a bundle starts with that bundle chosen in its dropdown. Removing an attachment tears its
-enforcement down within a tick. The starter
-bundles are **read-only**, **no-bash** and **no-network**. They are `autoDeny` rules, not an
-allow-list, and like every policy they only act on the tools in `gate.tools`.
-
-**The 🛡 Policy bundles editor** (☰ menu) creates, edits and deletes bundles and attachments in the
-panel (the starters prefill the form) and writes them to `cc-config.json`, so you don't have to
-hand-edit the JSON. It warns that bundles are enforced only while the gate is armed. Saving ⚙
-Settings (or flipping Headless approvals) keeps your bundles and attachments.
 
 ## Answer questions from Shepherd
 

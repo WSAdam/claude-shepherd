@@ -48,7 +48,7 @@ Every feature below has a reference page one click away. The panel lists the sam
 - [**Worklist (My List)**](docs/fleet.md#my-list): a checklist beside the fleet that imports each
   project's `TODO.md`, so you can verify what an automation says it finished: **To do · To verify · All** lanes, and a heads-up on a project's card (and a 📋 count) once 30 items wait for your check or one has waited a day.
 - [**Needs a live run**](docs/fleet.md#my-list): `- [~]` and `(needs live run)` lines get a ▶ chip; `[~]` lines wait in To verify.
-- [**Playbooks in My List**](docs/fleet.md#my-list): any markdown checklist you pick imports into a project's tab; [**Run selected**](docs/fleet.md#my-list) works through picked items one fresh session at a time and checks off what got done.
+- [**Run selected**](docs/fleet.md#my-list): works through picked My List items one fresh session at a time and checks off what got done.
 - [**User stories**](docs/fleet.md#user-stories-tab): view and edit a project's `spec/product/user-stories.md` in a detail-panel tab.
 - [**On purpose**](docs/fleet.md#on-purpose): a repo's `DECISIONS.md` says what it does on
   purpose; sessions and the merge checker read it, and the coach can propose entries.
@@ -90,10 +90,6 @@ Every feature below has a reference page one click away. The panel lists the sam
 A fresh install turns on auto-continue, handoff notes, auto-compact and
 the fleet idle alert; every other automatic behaviour here waits for its switch.
 
-- [**Prompt templates**](docs/automation.md#prompt-templates): reusable, versioned prompts with
-  variables filled in at send time.
-- [**Model auto-routing**](docs/automation.md#model-auto-routing): a queued task switches the
-  session to a cheaper or stronger model based on how hard it looks.
 - [**Auto-respawn & auto-continue**](docs/automation.md#auto-respawn-and-auto-continue): relaunch a
   session that died mid-turn, or resume one frozen on an API error, within retry budgets.
 - [**Handoff notes**](docs/automation.md#handoff-notes): each finished turn leaves a note; after
@@ -102,19 +98,15 @@ the fleet idle alert; every other automatic behaviour here waits for its switch.
   that arrives at its next turn end or start, and types it only where typing is safe.
 - [**Auto-compact with notes**](docs/automation.md#auto-compact-with-notes): sessions compact at 85%
   of their window, write their notes just before, and get them back right after.
-- [**Automation rules**](docs/automation.md#automation-rules): when a session finishes, errors or
-  stalls, log it, relabel it, nudge it or continue it.
 - [**Automation dry run & trace**](docs/automation.md#dry-run-and-the-automation-trace): see what
   automation would do, did, or refused and why.
-- [**Routines**](docs/automation.md#routines): spawn a session, push a digest, or run a [**Main-green check**](docs/merging-and-batches.md#is-main-still-green-a-scheduled-check) on a cron schedule.
+- [**Main-green check**](docs/merging-and-batches.md#is-main-still-green-a-scheduled-check): run a repo's merge gate on main and flag its cards when main is red. (Routines, which scheduled it, were removed.)
 - [**Coach**](docs/automation.md#the-coach): a read-only Sonnet reads a repo's last 10 sessions and
   suggests `CLAUDE.md` edits with evidence, and auto-memory changes (backed up, with Undo). A card starts it;
   with `coach.enabled` it also runs weekly and on new evidence (`cc-lesson.sh` files a lesson); remembers what you applied, skipped or
   undid; judges applied edits; Sharpen rewords one. [**Coach across repos**](docs/automation.md#across-repos): a lesson 2+ repos learned is proposed for `~/.claude/CLAUDE.md`.
 - [**Notifications & escalation**](docs/automation.md#escalation-and-watchdogs): nags, banners and pushes when a session waits
   too long or stalls; a [**Fleet idle alert**](docs/automation.md#fleet-idle-alert) once nothing has worked for 15 min.
-- [**A/B compare**](docs/automation.md#ab-compare): run one task as 2–4 variants in separate
-  worktrees, score them, and keep the winner.
 
 ### Merge safely
 
@@ -146,11 +138,9 @@ the fleet idle alert; every other automatic behaviour here waits for its switch.
 - [**Headless approvals**](docs/approvals-and-policies.md#headless-approvals-the-gate): risky tools
   wait for your Approve or Deny in the panel, with no window switching.
 - [**Always-ask commands**](docs/approvals-and-policies.md#always-ask-commands): `git push`,
-  `rm -rf`, history rewrites and publish always wait for your click; no autopilot or rule passes them.
+  `rm -rf`, history rewrites and publish always wait for your click; no policy passes them.
 - [**Worktree fence**](docs/approvals-and-policies.md#worktree-fence): a session can't edit another
   worktree of its repo or run git that changes one, except its own approved merge into main.
-- [**Policy bundles & autopilot**](docs/approvals-and-policies.md#policies): reusable allow and deny
-  rules per session or fleet, and a time-boxed autopilot.
 - [**Shared-window guard**](docs/controls.md#sessions-that-share-a-window): Shepherd won't type into
   a window that hosts several sessions, because the keys could land in the wrong tab.
 - [**Keep awake & screen lock**](docs/controls.md#keep-this-mac-awake): keep the Mac awake for long
@@ -171,10 +161,6 @@ the fleet idle alert; every other automatic behaviour here waits for its switch.
 
 ### Connect
 
-- [**Providers & models**](docs/providers-and-integrations.md#providers-and-models): Claude models,
-  other companies' models through a gateway, or local models, with no API keys stored.
-- [**Agent profiles**](docs/providers-and-integrations.md#agent-profiles): saved agents with a role,
-  skills, MCP servers and knowledge folders, spawned in one click.
 - [**Find-only audit**](docs/providers-and-integrations.md#find-only-audit): an auditor that reads the
   code and drives the app, can write only its findings, and fills My List with them.
 - [**MCPs & Skills**](docs/providers-and-integrations.md#mcps-and-skills): what MCP servers, skills
@@ -243,8 +229,8 @@ any key you haven't set).
 auto-compact (`compact`), worktree leases (`lease`), the audit ledger (`ledger`),
 the three Stop guards (`stopGuards`), the fleet idle alert (`alerts.idleMinutes`) and the My List review heads-up (`worklist.reviewCount`), plus the merge
 checker, the worktree fence, held questions, Remote Control for spawned sessions, ending leftover
-processes that have no tab, the main moved notice and grant grading. Rules, routines,
-escalation and the coach start off. Reference: [docs/configuration.md](docs/configuration.md).
+processes that have no tab, the main moved notice and grant grading. Escalation and the
+coach start off. Reference: [docs/configuration.md](docs/configuration.md).
 
 ## Safety model
 
@@ -253,7 +239,7 @@ escalation and the coach start off. Reference: [docs/configuration.md](docs/conf
 - **Always asked, armed or not:** `git push`, `rm -rf`, history rewrites and publishing are held for
   your click, and nothing automatic can approve them.
 - **Approving without you** needs the gate armed and a switch you turned on: an `autoAllow` pattern,
-  an attached policy bundle, Autopilot or approve-repeats. `autoDeny` always wins.
+  or approve-repeats. `autoDeny` always wins.
 - **When the gate can't answer** (it's off, the tool isn't gated, Shepherd wasn't running, or 120
   seconds pass), Claude Code's own permission mode decides; in Auto or Bypass mode there may be no
   prompt. The gate never approves on a timeout.
@@ -280,13 +266,13 @@ Full detail: [docs/approvals-and-policies.md](docs/approvals-and-policies.md#the
 | Page | What's in it |
 |------|--------------|
 | [Install](docs/install.md) | Install, upgrade, uninstall, what the installer changes, the tab bridge, the Dock launcher |
-| [Fleet](docs/fleet.md) | Statuses, grey cards, project cards, Instances, leases, the detail panel and its tabs, search, groups, My List, playbooks, Run selected |
+| [Fleet](docs/fleet.md) | Statuses, grey cards, project cards, Instances, leases, the detail panel and its tabs, search, groups, My List, Run selected |
 | [Controls](docs/controls.md) | Clicks and menus, detail-panel buttons, shared windows, spawning, hotkeys, Stream Deck, awake and lock |
 | [Approvals and policies](docs/approvals-and-policies.md) | The safety model, the gate, always-ask commands, the worktree fence, policies, questions, the three Stop guards |
 | [Merging and batches](docs/merging-and-batches.md) | Worktree tabs, ready to merge, gates, gate blame, the main-green check, the checker, red-first, receipts, batches, brief pre-flight, grant grading, the overlap radar, main moved, the demo, the tab bridge |
-| [Automation](docs/automation.md) | When automation types, dry run, templates, respawn, notes, the mailbox, tickets, rules, routines, the coach, the fleet idle alert, A/B compare |
+| [Automation](docs/automation.md) | When automation types, dry run, respawn, notes, the mailbox, tickets, the coach, the fleet idle alert |
 | [Usage and cost](docs/usage-and-cost.md) | Context bars, plan usage, cost, commits, where the time went, the audit ledger and its views, past sessions and Resume |
-| [Providers and integrations](docs/providers-and-integrations.md) | Providers and models, agent profiles, the find-only audit, MCPs and skills, Remote Control, the SSH bridge |
+| [Providers and integrations](docs/providers-and-integrations.md) | Providers and models, the find-only audit, MCPs and skills, Remote Control, the SSH bridge |
 | [Make it yours](docs/customizing.md) | Layouts, themes, colours, sizing |
 | [Configuration](docs/configuration.md) | Settings tabs, `cc-config.json` block by block, what's on by default, the files Shepherd keeps, environment variables |
 | [Troubleshooting](docs/troubleshooting.md) | Diagnostics, Claude Code compatibility, "is it running?", the scheduled-tasks lock, logs, known limits |

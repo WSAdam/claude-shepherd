@@ -63,9 +63,10 @@ assert_eq "decision: autoDeny carries the pattern" "1" "$(lcount '.by=="autoDeny
 runpol '{"session_id":"a1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"ls -la"}}'
 assert_eq "decision: autoAllow -> by autoAllow + allow" "1" "$(lcount '.by=="autoAllow" and .outcome=="allow"')"
 
+# 2026-11-19, REQUIREMENT CHANGE: autopilot was removed -- a leftover expiry file records no decision
 mkdir -p "$CC_AUTOPILOT_DIR"; echo 9999999999 > "$CC_AUTOPILOT_DIR/ap1"
 runpol '{"session_id":"ap1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"make deploy"}}'
-assert_eq "decision: autopilot -> by autopilot + allow" "1" "$(lcount '.by=="autopilot" and .outcome=="allow"')"
+assert_eq "decision: a leftover autopilot file decides nothing" "0" "$(lcount '.by=="autopilot"')"
 
 # 2026-09-28: `git fetch`, not `git push` -- git push is an always-ask command, never auto-approved.
 mkdir -p "$CC_APPROVED_DIR"; printf 'Bash|git fetch\n' > "$CC_APPROVED_DIR/r1"

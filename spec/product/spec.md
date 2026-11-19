@@ -40,8 +40,8 @@ auto-memory) only on your click.
 - See the whole fleet at a glance; surface the one session that needs a human first.
 - Reliable **approve/deny** of permission prompts — ideally hands-free, regardless of editor.
 - Per-session control (jump, stop, nudge, clear/compact, effort/mode/model) from the panel.
-- Spawn new sessions (folders, presets, agent profiles, providers) from the panel.
-- Automation you switch on: escalation, auto-respawn, rules, schedules and the
+- Spawn new sessions (folders, presets) from the panel.
+- Automation you switch on: escalation, auto-respawn and the
   coach act only once enabled. A few named conveniences are on from the start, and a fresh install
   writes the author's defaults, which turn on more; §7 lists both exactly.
 - Governance you can audit: a local ledger, insights, shift reports, gate-decision provenance.
@@ -54,9 +54,10 @@ auto-memory) only on your click.
 **Non-goals**
 - **Orchestrating non-Claude agent CLIs** (aider, gemini-cli). They have no hook system, so
   tiles/approvals couldn't work. Shepherd supervises **Claude Code** specifically. **[DECISION D-1]**
-- **Being a second executor.** Rules and routines fire the *normal* spawn/nudge/digest effects,
-  and a routine's `gate` action (**Check main is green**) runs the repo's own merge gate in its
-  gate lane; they don't introduce a parallel action engine. **[DECISION D-2]**
+- **Being a second executor.** Automation fires the *normal* spawn/nudge effects, and the
+  main-green check runs the repo's own merge gate in its gate lane; neither introduces a parallel
+  action engine. (Routines, which fired them on a schedule, were removed 2026-11-19.)
+  **[DECISION D-2]**
 - **Enforcement by quarantine.** Risk/collision/loop/hung are **detection only** — they badge,
   they never block, lock, or kill another process. The brief pre-flight and gate blame are
   advisory in the same way. **[DECISION D-3]** Two things do hold work back, on purpose, and
@@ -274,13 +275,13 @@ Around a merge Shepherd gathers more of its own evidence (D-5):
   them) touch the merged files gets one mailbox note — "main moved to <sha7> (<unit>), touching
   <files>: rebase onto main before you ask to merge". It is handed over at a turn end or start,
   never typed, and announced once per repo and merged sha, across reloads (`main-moved.seen`).
-- **Main-green check** (2026-10-03): a routine with `"action": "gate"` (**Check main is green** on
-  the ⏰ Routines board, opt-in per repo) runs the repo's merge gate in its main checkout, behind any
+- **Main-green check** (2026-10-03): a check (a routine with `"action": "gate"` started one until
+  routines were removed on 2026-11-19; nothing in the panel starts one now) runs the repo's merge
+  gate in its main checkout, behind any
   merge in the repo's gate lane, after checking the checkout is on its branch with no uncommitted
   tracked changes. Red raises one banner (and a phone push with escalation push on), **⚠ main is
   red** on every card of the repo and an entry in the coach's log; the next green clears it. A run
-  that couldn't run or timed out changes nothing. It fires on schedule only with `schedules.enabled`; **Run** (Adam's own
-  click) works regardless.
+  that couldn't run or timed out changes nothing.
 
 Jump lands on the **exact tab** after all — through the tab bridge, not the Claude URI. The bridge's
 second op, `select` (by name, single match only), focuses the tab's editor group and opens the tab
@@ -387,23 +388,15 @@ it on their next fire. Not everything starts off; this is exactly what is on, an
   no file yet, and those also turn on auto-continue, the Respawn menu, auto-compact with notes, the
   three **Stop guards** (`stopGuards.question`, `.fakeDone`, `.unfinished`), the merge checker
   (`verify.onMerge`), the worktree fence, the audit ledger and real spawning (`spawn.live`).
-- **Off until switched on**, either way: rules, routines
-  (`schedules.enabled`), escalation, auto-respawn, voice alerts (`alerts.voice`) and the coach's
+- **Off until switched on**, either way: escalation, auto-respawn, voice alerts (`alerts.voice`) and the coach's
   own runs (`coach.enabled`).
 
 The capability ladder:
 
 - **The gate** holds a configurable risky-tool list (default `Bash Write Edit MultiEdit
   NotebookEdit`) until you decide; pattern `autoAllow`/`autoDeny` globs (deny wins); per-session
-  override (Default/All/None/Custom); time-boxed **Autopilot**. Emptying the tool list restores
+  override (Default/All/None/Custom). Emptying the tool list restores
   the default (a blank can't be distinguished from unset). **[DECISION D-8]**
-- **Named policy bundles** (read-only/no-bash/no-network) attachable per session or by
-  project/group/provider glob; union with or replace the fleet patterns.
-- **Event-callback rules** (L6): `{trigger: done|error|approval, processor: log|relabel|nudge}`,
-  optional match scope, fire-once.
-- **Scheduled routines** (L7): cron/one-shot that fire the normal spawn or digest effects, or a
-  `gate` action (**Check main is green**, §5); a scheduled spawn still respects `spawn.live`
-  (dry-run). Nothing fires on schedule until `schedules.enabled`.
 - **Recovery:** manual + automatic **respawn** of a session frozen mid-turn (capped per folder);
   **Auto-Continue** of a session frozen on an API error (capped per folder); **escalation** nag
   when an approval waits too long. A session waiting on *you* is never auto-respawned. (☰ → ♻️
@@ -440,18 +433,15 @@ own turn end, never another process, and the session may answer it in one line a
 automatic send reached it. Removed 2026-11-19: Adam pruned the features he had no use for.
 `cc-hold/` is a leftover `uninstall.sh --purge` still deletes. **[DECISION D-23, retired]**
 
-**Playbooks and the checklist runner** (2026-10-03). **📘 Add a playbook…** on a project's My List
-tab picks a markdown checklist through the Mac's file chooser (never a path typed into the panel);
-its `- [ ]` lines import like `TODO.md`'s, grouped under the file's name, and their ✓ auto and
-▶ live run chips follow the file. **Remove playbook** stops the import and keeps its items to
-verify. **▶ Run…** picks open items (nothing preselected) and **Run selected** works through them
+**The checklist runner** (2026-10-03; playbooks, which imported a picked markdown checklist into a
+project's My List tab like `TODO.md`, shipped beside it and were removed 2026-11-19). **▶ Run…** picks open items (nothing preselected) and **Run selected** works through them
 one at a time, each in a fresh tab in the repo's **main checkout**, opened through D-13 with its
 brief typed in (Adam presses Return) and tagged through the bridge's `expect`, so it closes by
-its run tag when the item is done (D-20). A file line (`TODO.md`, a playbook) counts once Shepherd
+its run tag when the item is done (D-20). A `TODO.md` line counts once Shepherd
 reads its box ticked and the turn didn't end as *did nothing*; any other item once its own session
 runs `cc-run.sh done` (or `blocked`, which pauses the run). Then Shepherd sets **Adam's own
 checkmark**, shown as **✓ by run** and unchecked like any other, and only for a run Adam started;
-importing a `TODO.md` or a playbook never sets it. Three items in a row that finish nothing stop
+importing a `TODO.md` never sets it. Three items in a row that finish nothing stop
 the run; a live-run item, a blocked report or a batch in the repo pauses it; one run per repo
 at a time. Runs are `cc-run/<id>.run.json`, written only by the panel.
 **[DECISION D-24]**
@@ -524,7 +514,10 @@ install's `cc-keep/` is left alone, even by `uninstall.sh --purge`, since its co
 
 A "provider profile" is a named bundle of **env vars + a model id** injected into the `claude`
 launch. **No API keys are stored** — a profile names an *env var* the spawned login shell expands;
-the key lives in your shell, never in Shepherd's config or process. **[DECISION D-9]**
+the key lives in your shell, never in Shepherd's config or process. **[DECISION D-9]** The Settings
+editor and the New session dialog's per-session choice were removed 2026-11-19: the `providers` list
+and the `spawn.provider` default are hand-kept in `cc-config.json`, and still feed respawn, restart,
+the Model dropdown, the context limit and the SSH bridge's hosts.
 
 - **anthropic** — sets `ANTHROPIC_MODEL` against the normal endpoint.
 - **gateway** — also sets `ANTHROPIC_BASE_URL` to an Anthropic-Messages-compatible endpoint
@@ -551,13 +544,13 @@ cc-status/<session_id>.json     live per-session status (hook-written)
 cc-status/<session_id>.decision panel→gate approval decisions
 cc-ask/<key>.answer             panel→cc-ask.sh answer to a held question
 cc-labels.json / cc-groups.json relabels, group tags        (by project identity)
-cc-presets.json / cc-agents.json spawn presets, agent profiles
-cc-mcp.json                     MCP server defs (secrets as ${VAR} refs, never values)
+cc-presets.json                 spawn presets
+cc-agents.json / cc-mcp.json    leftovers of agent profiles, removed 2026-11-19 (nothing reads them)
 cc-queue/*.json (per project)   leftover of the task queue, removed 2026-11-19 (nothing reads it)
-cc-templates.json               parameterized templates
-cc-worklist.json                the My-List checklist and its `playbooks` sources (by project identity)
-cc-config.json / cc-rules.json / cc-schedules.json  automation config
-cc-policy/<key> / cc-gate-tools/<key>  resolved per-session gate state
+cc-templates.json               leftover of prompt templates, removed 2026-11-19 (nothing reads it)
+cc-worklist.json                the My-List checklist (by project identity)
+cc-config.json                  automation config
+cc-gate-tools/<key>             per-session gated tools
 cc-ledger/YYYY-MM-DD.jsonl      append-only audit ledger
 cc-exports/                     archived sessions (transcript + meta.json)
 cc-inbox/<key>/                 the session mailbox
@@ -583,8 +576,8 @@ cc-keep/                        left by the transcript keeper (removed 2026-11-1
   ⚠ main is red and the coach's 🧭 chip), with **grey cards** in their own row under
   the grid. Header: New, ☕ keep-awake, 🔒 lock, the ☰ views menu, ⚙ settings, theme.
 - **☰ views menu:** 🎫 Tickets, 🔍 Filter sessions, 🔎 Find in fleet,
-  📊 Fleet insights, 📜 Audit ledger (with 🗂 History), ⏰ Routines, 📝 Templates, ✦ Agents,
-  🔌 MCPs & Skills, 🛡 Policy bundles, ⚙️ Automation rules, ⚡ Automation trace, 💰 Cost & tokens, 🩺 Diagnostics, ✨ Features list, 📋 Shift report, 🔔 Notifications.
+  📊 Fleet insights, 📜 Audit ledger (with 🗂 History),
+  🔌 MCPs & Skills, ⚡ Automation trace, 💰 Cost & tokens, 🩺 Diagnostics, ✨ Features list, 📋 Shift report, 🔔 Notifications.
 - **Detail panel** with a tab strip — Activity, Transcript, Rewind, Decisions, Usage, Changes
   (git status + diff), **User Stories** (gated on `spec/product/user-stories.md`), On purpose and
   Requirements (gated on a git repo), Agents, Queue — expensive tabs load on open; the ⋯ menu hides
@@ -599,7 +592,7 @@ cc-keep/                        left by the transcript keeper (removed 2026-11-1
   spawn, show/hide; a live legend so they never drift.
 - **Worklist** (📋 My List): a built-in per-project + global checklist — items carry subject,
   details, a tickable sub-step checklist and an expected date, with a MASTER tab rolling every
-  open item up by date priority across lists. A project tab adds **📘 Add a playbook…** and
+  open item up by date priority across lists. A project tab adds
   **▶ Run…** (pick items, then Run selected); a run's checkmark shows as **✓ by run**.
 - **Keep the fleet alive:** ☕ caffeinate (holds with the lid closed) + 🔒 soft lock (blocks input
   while everything keeps running; force-unlock chord so a typo can't lock you out).
@@ -623,7 +616,8 @@ Shepherd grew in levels; these are the milestones as built, not a forward plan.
 | **L8** | **Merge flow & the build program** (2026-09) — ready to merge, the tab bridge, batch driving on one approval, the test gate and merge checker, the session mailbox, tickets, restart in place, the worktree fence and leases. |
 | **L9** | **Mining round 2** (2026-10) — Stop guards, grant grading, gate blame, main-green and main moved, hands-off hold, queue hold, the coach's ledger/evidence/memory/across-repos runs, Seance, kept transcripts and past sessions, playbooks and Run selected, grey cards, the fleet idle alert. |
 
-The in-panel bundle, agent and template editors and the ⏰ Routines board have shipped. Deferred
+The in-panel agent, bundle and template editors and the ⏰ Routines board shipped, and were removed
+2026-11-19. Deferred
 (need a design call first): a routing topology view, role-addressed delegation/handoff,
 idle/auto-spawn routing targets.
 
