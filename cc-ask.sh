@@ -34,6 +34,9 @@ set -u
 . "$(dirname "$0")/cc-lib.sh" 2>/dev/null || . "$HOME/.claude/cc-lib.sh"
 
 HEARTBEAT_MAX_AGE="${CC_PANEL_MAX_AGE:-5}"
+# 2026-11-19: mid-hold, a heartbeat this old means Shepherd has stopped: the tab takes the question.
+# Looser than the start check, so a busy tick or a reload (a few seconds) doesn't let go.
+HEARTBEAT_LOST_AGE="${CC_ASK_HB_LOST:-20}"
 POLL="${CC_ASK_POLL:-0.1}"
 
 INPUT="$(cat 2>/dev/null || true)"
@@ -136,6 +139,14 @@ while [ "$SECONDS" -lt "$WAIT" ]; do
   # nonce back (~1Hz) so the card keeps its buttons. A foreign nonce is a newer question.
   if [ "$SECONDS" -ne "$last_rearm" ]; then
     last_rearm="$SECONDS"
+    # 2026-11-19 (round 4): the heartbeat was read only when the hold started, so a Shepherd that
+    # stopped mid-hold left the question hidden from the tab for the rest of the wait
+    HB="$(cat "$HB_FILE" 2>/dev/null || echo 0)"
+    case "$HB" in ''|*[!0-9]*) HB=0 ;; esac
+    if [ $(( $(cc_now) - HB )) -gt "$HEARTBEAT_LOST_AGE" ]; then
+      echo "[cc-ask] 💤 Shepherd stopped (its heartbeat is over ${HEARTBEAT_LOST_AGE}s old) -- the tab's picker takes the question ($KEY)" >&2
+      exit 0
+    fi
     [ -z "$(cc_read_field "$KEY" '.ask_nonce')" ] && cc_merge "$KEY" "$ARM"
   fi
   # Wake the panel once the card can show the question: our nonce AND cc-status.sh's pending.ask

@@ -238,6 +238,31 @@ assert_eq "...with nothing on stdout (the tab's own picker takes it)" "" "$(cat 
 assert_eq "...and its nonce is gone from the card" "" "$(jq -r '.ask_nonce // empty' "$SF")"
 rm -f "$CC_ASK_DIR/.away"
 
+# ---- Shepherd stops mid-hold: the tab takes the question (2026-11-19) ----
+# 2026-11-19 (mining round 4, agent-hud): cc-ask.sh read the panel heartbeat only when the hold
+# started, so a Shepherd that stopped mid-hold left the question hidden from its tab -- and from
+# Remote Control -- for the rest of the wait (2 minutes by default, up to an hour).
+fresh; alive; opt_in
+run o "" "" 60
+N="$(wait_nonce)" || N=""
+assert_eq "(a question is held while Shepherd is alive)" "yes" "$([ -n "$N" ] && echo yes || echo no)"
+echo $(( $(date +%s) - 120 )) > "$CC_STATUS_DIR/.panel-alive"   # Shepherd stopped two minutes ago
+wait_for "$TMP/rc.o" 40 && got=yes || got=no
+assert_eq "held question goes to the tab within seconds when Shepherd stops mid-hold" "yes" "$got"
+assert_eq "...with nothing on stdout (the tab's own picker takes it)" "" "$(cat "$TMP/out.o" 2>/dev/null)"
+assert_eq "...and its nonce is gone from the card" "" "$(jq -r '.ask_nonce // empty' "$SF")"
+case "$(cat "$TMP/err.o" 2>/dev/null)" in *heartbeat*) got=said ;; *) got=silent ;; esac
+assert_eq "...and the hook's log says why" "said" "$got"
+# a heartbeat that is only a few seconds old (a busy tick, a reload) doesn't let go
+fresh; alive; opt_in
+run p "" "" 60
+N="$(wait_nonce)" || N=""
+echo $(( $(date +%s) - 6 )) > "$CC_STATUS_DIR/.panel-alive"
+sleep 2
+assert_eq "...but a heartbeat a few seconds late keeps the hold" "" "$(cat "$TMP/rc.p" 2>/dev/null)"
+answer "$(jq -nc --arg n "$N" '{nonce:$n, release:true}')"
+wait_for "$TMP/rc.p" 40
+
 # ---- SessionEnd leaves no answer behind ----
 mkdir -p "$CC_ASK_DIR"; : > "$CC_ASK_DIR/s1.answer"; : > "$CC_ASK_DIR/s1.answer.claim.99"
 ( . "$ROOT/cc-lib.sh"; cc_remove s1 )
