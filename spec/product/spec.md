@@ -41,7 +41,7 @@ auto-memory) only on your click.
 - Reliable **approve/deny** of permission prompts — ideally hands-free, regardless of editor.
 - Per-session control (jump, stop, nudge, clear/compact, effort/mode/model) from the panel.
 - Spawn new sessions (folders, presets, agent profiles, providers) from the panel.
-- Automation you switch on: queues/routing, escalation, auto-respawn, rules, schedules and the
+- Automation you switch on: escalation, auto-respawn, rules, schedules and the
   coach act only once enabled. A few named conveniences are on from the start, and a fresh install
   writes the author's defaults, which turn on more; §7 lists both exactly.
 - Governance you can audit: a local ledger, insights, shift reports, gate-decision provenance.
@@ -155,8 +155,8 @@ Two delivery paths, and which one a session uses determines reliability. **[DECI
 2. **Per-session keystroke effects** (jump, stop, nudge, clear/compact, answer, mode-switch). On
    **Kitty** these run headlessly via `kitty @` remote control. On **VS Code/Cursor** they focus
    the window and type — reliable in a terminal, **best-effort in the VS Code extension** (no
-   supported API to inject into a running session). **Queue** stores work reliably; feeding into
-   the VS Code chat input is the fragile part.
+   supported API to inject into a running session). The session mailbox delivers reliably; typing
+   into the VS Code chat input is the fragile part.
 
 A third path carries messages rather than keystrokes: the **session mailbox** (2026-09-29).
 Shepherd leaves a session a `[shepherd]`-marked message in `~/.claude/cc-inbox/<key>/`; the Stop
@@ -387,7 +387,7 @@ it on their next fire. Not everything starts off; this is exactly what is on, an
   no file yet, and those also turn on auto-continue, the Respawn menu, auto-compact with notes, the
   three **Stop guards** (`stopGuards.question`, `.fakeDone`, `.unfinished`), the merge checker
   (`verify.onMerge`), the worktree fence, the audit ledger and real spawning (`spawn.live`).
-- **Off until switched on**, either way: the queue's auto-feed and routing, rules, routines
+- **Off until switched on**, either way: rules, routines
   (`schedules.enabled`), escalation, auto-respawn, voice alerts (`alerts.voice`) and the coach's
   own runs (`coach.enabled`).
 
@@ -553,7 +553,7 @@ cc-ask/<key>.answer             panel→cc-ask.sh answer to a held question
 cc-labels.json / cc-groups.json relabels, group tags        (by project identity)
 cc-presets.json / cc-agents.json spawn presets, agent profiles
 cc-mcp.json                     MCP server defs (secrets as ${VAR} refs, never values)
-cc-queue/*.json (per project)   task queues: one string per line
+cc-queue/*.json (per project)   leftover of the task queue, removed 2026-11-19 (nothing reads it)
 cc-templates.json               parameterized templates
 cc-worklist.json                the My-List checklist and its `playbooks` sources (by project identity)
 cc-config.json / cc-rules.json / cc-schedules.json  automation config
@@ -630,7 +630,7 @@ idle/auto-spawn routing targets.
 ## 12. Risks & honest limits
 
 1. **VS Code keystroke delivery is best-effort** — no supported injection API. Mitigated by
-   Headless approvals (reliable) + Queue (reliable storage) + Kitty's `kitty @` path.
+   Headless approvals (reliable) + the session mailbox + Kitty's `kitty @` path.
 2. **Auto-actions could thrash** — respawn/continue are capped per launch folder, and budgets
    reset only after sustained healthy running; a session waiting on you is never auto-respawned.
 3. **Stale/ghost tiles** after `/clear` — auto-pruned by matching old+new tiles to the same
@@ -653,7 +653,7 @@ status file, a decision-file gate, `kitty @`, macOS Accessibility). The design's
 state lives and who writes it**: hooks and Shepherd's scripts write their own files, the panel's
 answers are nonce-bound files claimed with `mv`, and everything else is a read — no daemon, no DB,
 crash-safe, inspectable. The one thing that stays fragile by nature is **keystroke delivery into
-the VS Code extension**, which is why the reliable spine is **headless approvals + queues + the
+the VS Code extension**, which is why the reliable spine is **headless approvals + the
 session mailbox + Kitty remote control**. What acts on its own is named (§7): a few conveniences
 with no config, and the author's defaults a fresh install writes. Detectors are **advisory not
 enforcing**; the two things that hold work back, the Stop guards and grant grading, are named

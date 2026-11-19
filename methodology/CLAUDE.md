@@ -110,7 +110,7 @@ parallel.
   once and add `--storage-state=<file>` to that project's `.mcp.json` Playwright entry (a
   project entry replaces the user one, so repeat `--headless --isolated` there).
 - **Shepherd.** It types into a window, not a tab, so it refuses keystroke actions (nudge,
-  queue feed, `/clear`, auto-continue) for sessions that share a window; Jump, hands-free
+  `/clear`, auto-continue) for sessions that share a window; Jump, hands-free
   approvals and ready-to-merge still work, and Close goes through its tab bridge (a local VS
   Code extension) that closes just that tab. A unit that needs the keystroke automation gets
   its own window.

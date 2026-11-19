@@ -101,7 +101,7 @@ also for a policy that allowed it: the Decisions tab and the audit ledger record
 ## A button is greyed out or refused
 
 - **"Shares its window"**: several Claude tabs run in one VS Code window, so Shepherd won't type into
-  any of them. Jump, approvals, questions, merges and Queue still work
+  any of them. Jump, approvals, questions and merges still work
   ([Controls → Sessions that share a window](controls.md#sessions-that-share-a-window)).
 - **Close refused**: the tab bridge couldn't pick out exactly one tab (a fresh tab still named
   "Claude Code", two tabs with the same name, or no bridge in that window). Reload the window or

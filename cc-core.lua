@@ -6636,9 +6636,8 @@ end
 -- close/reopen and a brand-new session in the same folder inherits it. Persistence
 -- (cc-groups.json) + group-scoped bulk actions live in the dashboard; pure bits here.
 -- #35: a projectKey-keyed group is shared by EVERY session in the folder -- but the
--- @role: router (memberRole) needs to discriminate members of one project queue
--- (queueKey == projectKey), so a per-TILE entry (keyed by the session's tile key)
--- takes precedence over the project cohort. Tile keys (sanitized session ids /
+-- "this session only" checkbox needs one member to stand apart, so a per-TILE entry
+-- (keyed by the session's tile key) takes precedence over the project cohort. Tile keys (sanitized session ids /
 -- folder basenames) and projectKeys (encoded transcript dirs / cwd paths) live in
 -- disjoint namespaces, so one map holds both without collisions.
 
@@ -7888,16 +7887,15 @@ end
 local STANDUP_LIFE   = { spawn = true, auto_respawn = true, respawn = true,
                          clear = true, continue = true, auto_continue = true,
                          drain_close = true }
-local STANDUP_PROBLEM = { escalation = true, hung = true, queue_starved = true }
+-- 2026-11-19: routed feeds, routed tasks completed and queue starvation went with the task queue.
+local STANDUP_PROBLEM = { escalation = true, hung = true }
 function M.fleetStandup(events, opts)
   opts = opts or {}
   local slice = M.filterLedger(events, { sinceTs = opts.sinceTs, untilTs = opts.untilTs })
   local stats = M.fleetStats(slice, { topN = opts.topN or 8 })
   local life = { spawn = 0, auto_respawn = 0, respawn = 0, clear = 0,
                  continue = 0, auto_continue = 0, drain_close = 0 }
-  local problems = { escalation = 0, hung = 0, queue_starved = 0 }
-  local routed = 0
-  local tasksDone, taskSecs = 0, 0   -- L4 per-task timing rollup (task_done events)
+  local problems = { escalation = 0, hung = 0 }
   local byKey = {}   -- projectKey -> rollup
   local function proj(e)
     local k = e.projectKey or e.cwd or e.name or "?"
@@ -7914,16 +7912,10 @@ function M.fleetStandup(events, opts)
     local t = e.type
     if STANDUP_LIFE[t] then life[t] = (life[t] or 0) + 1 end
     if STANDUP_PROBLEM[t] then problems[t] = (problems[t] or 0) + 1 end
-    -- R2-13: routed feeds are DELIVERED 'task_feed' events with by='router' (written
-    -- by the dispatcher), NOT 'decision' events -- the gate never sets by='router'.
-    -- Count only delivered feeds (task_feed), not task_feed_skipped (no delivery).
-    if t == "task_feed" and e.by == "router" then routed = routed + 1 end
     if t == "prompt" then local p = proj(e); p.prompts = p.prompts + 1
     elseif t == "auto_respawn" then local p = proj(e); p.autoRespawns = p.autoRespawns + 1
     elseif t == "escalation" then local p = proj(e); p.escalations = p.escalations + 1
     elseif t == "hung" then local p = proj(e); p.hangs = p.hangs + 1
-    elseif t == "task_done" then
-      tasksDone = tasksDone + 1; taskSecs = taskSecs + (tonumber(e.durationS) or 0)
     elseif t == "decision" then
       local p = proj(e)
       if e.outcome == "deny" then p.deny = p.deny + 1
@@ -7947,11 +7939,9 @@ function M.fleetStandup(events, opts)
     blockedSeconds = stats.approvalBlockedSeconds,
     lifecycle = life,                 -- spawn / respawn / clear / continue counts
     autoActions = { auto_respawn = life.auto_respawn, auto_continue = life.auto_continue,
-                    drain_close = life.drain_close, routed = routed },
-    problems = problems,              -- escalation / hung / queue_starved
+                    drain_close = life.drain_close },
+    problems = problems,              -- escalation / hung
     continues = life.continue + life.auto_continue,  -- error-recovery signal (honest stand-in for "errors")
-    tasks = { done = tasksDone, totalSeconds = taskSecs,   -- L4 per-task timing rollup
-              avgSeconds = tasksDone > 0 and math.floor(taskSecs / tasksDone + 0.5) or 0 },
     byProject = byProject,
     mostActive = stats.mostActive,
   }
@@ -7974,16 +7964,12 @@ function M.standupMarkdown(report, opts)
   local t, d, a, p = report.totals, report.decisions, report.autoActions, report.problems
   L[#L + 1] = string.format("Sessions active: %d   ·   Prompts: %d   ·   Tool requests: %d",
     t.sessions or 0, t.prompts or 0, t.toolRequests or 0)
-  L[#L + 1] = string.format("Spawns: %d   ·   Auto-respawns: %d   ·   Auto-continues: %d   ·   Drained: %d   ·   Routed feeds: %d",
-    t.spawns or 0, a.auto_respawn or 0, a.auto_continue or 0, a.drain_close or 0, a.routed or 0)
+  L[#L + 1] = string.format("Spawns: %d   ·   Auto-respawns: %d   ·   Auto-continues: %d   ·   Drained: %d",
+    t.spawns or 0, a.auto_respawn or 0, a.auto_continue or 0, a.drain_close or 0)
   L[#L + 1] = string.format("Approvals: %d allow / %d deny (of %d)   ·   You were the bottleneck for %s",
     d.allow or 0, d.deny or 0, d.total or 0, M.fmtDuration(report.blockedSeconds or 0))
   L[#L + 1] = string.format("Escalations: %d   ·   Stalls: %d   ·   Error recoveries: %d",
     p.escalation or 0, p.hung or 0, report.continues or 0)
-  if report.tasks and (report.tasks.done or 0) > 0 then
-    L[#L + 1] = string.format("Routed tasks completed: %d   ·   avg %s   ·   total %s",
-      report.tasks.done, M.fmtDuration(report.tasks.avgSeconds or 0), M.fmtDuration(report.tasks.totalSeconds or 0))
-  end
   -- who made the gate decisions (human vs automation), most-common first
   local prov = {}
   for by, n in pairs(report.provenance or {}) do prov[#prov + 1] = { by = by, n = n } end
@@ -10645,167 +10631,6 @@ function M.cycleNext(list, afterKey)
   return list[(idx % #list) + 1]
 end
 
--- ---- Task queue (Phase 4b) -------------------------------------------------
--- A queue is { tasks = { "task1", "task2", ... } }; nil/missing is empty. The
--- 4c-E arm flag (routing = true) rides in the same file, so EVERY function that
--- rebuilds a queue must carry it through `qkeep` -- a pop/move/push that
--- dropped it would silently disarm the project on the next write.
--- 2026-11-19: holding a line (D4b, 2026-10-03) was removed. A line an older Shepherd wrote as
--- { text = "...", held = true } reads as its plain text, and is fed like any other.
--- Parsed tolerantly: a line with no string text is dropped on the next rebuild.
-function M.queueText(x)
-  if type(x) == "string" then return x end
-  if type(x) == "table" and type(x.text) == "string" then return x.text end
-  return nil
-end
-local function qtasks(q)
-  if type(q) ~= "table" or type(q.tasks) ~= "table" then return {} end
-  local out = {}
-  for _, x in ipairs(q.tasks) do
-    local text = M.queueText(x)
-    if text then out[#out + 1] = text end
-  end
-  return out
-end
-local function qkeep(q, out)
-  if type(q) == "table" then
-    if q.routing == true then out.routing = true end
-    -- L4 process mode rides the queue file like `routing`; carry it through every
-    -- rebuild so a pop/move/push can't silently revert a sequential queue.
-    if q.mode == "sequential" then out.mode = "sequential" end
-  end
-  return out
-end
-
-function M.queueDepth(q) return #qtasks(q) end
-
-function M.queuePush(q, task)
-  local t = {}
-  for _, x in ipairs(qtasks(q)) do t[#t + 1] = x end
-  if task and #task > 0 then t[#t + 1] = task end
-  return qkeep(q, { tasks = t })
-end
-
--- Returns the front task and the queue without it.
-function M.queuePop(q)
-  local src = qtasks(q)
-  local task = table.remove(src, 1)
-  return task, qkeep(q, { tasks = src })
-end
-
--- The front task without removing it. The router peeks the head to resolve a
--- routed task's @role: before choosing a target (the dispatcher then pops it).
-function M.queuePeek(q)
-  return qtasks(q)[1]
-end
-
--- Concatenate two queues (a's tasks first). Used when adopting a legacy
--- session-keyed queue file into the project-keyed one -- `a` is the DESTINATION
--- (project) queue, so its arm flag wins.
-function M.queueMerge(a, b)
-  local t = {}
-  for _, x in ipairs(qtasks(a)) do t[#t + 1] = x end
-  for _, x in ipairs(qtasks(b)) do t[#t + 1] = x end
-  return qkeep(a, { tasks = t })
-end
-
--- Move tasks[idx] by dir (-1 = up toward the front, +1 = down). The panel's
--- rendered list can be STALE (the 1s autofeed loop pops heads asynchronously),
--- so `expect` -- the task text the operator clicked -- must match tasks[idx] or
--- the move is refused; the caller replies with the fresh list so the UI
--- self-heals. Returns newQueue, moved(boolean); refusals return an unchanged
--- copy in the standard { tasks = ... } shape.
-function M.queueMove(q, idx, dir, expect)
-  local src = qtasks(q)
-  local t = {}
-  for _, x in ipairs(src) do t[#t + 1] = x end
-  idx = tonumber(idx)
-  dir = tonumber(dir)
-  if not idx or not dir or (dir ~= -1 and dir ~= 1) then return qkeep(q, { tasks = t }), false end
-  local j = idx + dir
-  if idx < 1 or idx > #t or j < 1 or j > #t then return qkeep(q, { tasks = t }), false end
-  if expect ~= nil and M.queueText(t[idx]) ~= expect then return qkeep(q, { tasks = t }), false end
-  t[idx], t[j] = t[j], t[idx]
-  return qkeep(q, { tasks = t }), true
-end
-
--- Remove tasks[idx] (same expect guard as queueMove). Returns newQueue,
--- removedTask|nil -- nil means the remove was refused/out of range.
-function M.queueRemoveAt(q, idx, expect)
-  local src = qtasks(q)
-  local t = {}
-  for _, x in ipairs(src) do t[#t + 1] = x end
-  idx = tonumber(idx)
-  if not idx or idx < 1 or idx > #t then return qkeep(q, { tasks = t }), nil end
-  if expect ~= nil and M.queueText(t[idx]) ~= expect then return qkeep(q, { tasks = t }), nil end
-  local removed = table.remove(t, idx)
-  return qkeep(q, { tasks = t }), M.queueText(removed)
-end
-
--- Split a multi-line queue input into tasks: one per line, CRLF-tolerant,
--- trimmed, blanks dropped, leading list markers stripped ("- x", "* x",
--- "3. x", "3) x" -> "x"). The splitting authority lives HERE (not in JS) so
--- the bulk-add bridge action and its tests agree on the rules.
-function M.queueSplitLines(text)
-  local out = {}
-  for rawLine in (tostring(text or "") .. "\n"):gmatch("(.-)\n") do
-    local line = rawLine:gsub("\r$", ""):gsub("^%s+", ""):gsub("%s+$", "")
-    line = line:gsub("^[-*]%s+", ""):gsub("^%d+[.%)]%s+", "")
-    -- a line that was ONLY a marker ("- ", "3.") trims to the bare marker --
-    -- drop it (it's list scaffolding, not a task). "-x flag" stays a task.
-    if line:match("^[-*]$") or line:match("^%d+[.%)]$") then line = "" end
-    if #line > 0 then out[#out + 1] = line end
-  end
-  return out
-end
-
--- One read-modify-write for a bulk add (queuePush semantics over a list:
--- empties dropped, order preserved). Returns the new queue.
-function M.queuePushAll(q, tasks)
-  local out = q
-  for _, task in ipairs(tasks or {}) do out = M.queuePush(out, task) end
-  -- normalize shape even when nothing was added (queuePush carried the arm flag)
-  return qkeep(out ~= nil and out or q, { tasks = qtasks(out) })
-end
-
--- The on-disk key for a session's task queue. Queues are keyed by the STABLE
--- projectKey (launch folder, falling back to cwd) rather than the per-session
--- tile key: a respawn or /clear gives the project a NEW session_id, so a
--- session-keyed queue file would be stranded forever (invisible to the successor
--- tile) the moment auto-respawn or ghost-prune replaces the session. Project
--- keying means the successor inherits the pending tasks automatically (and
--- parallel sessions in one folder deliberately share the queue). Sanitized the
--- same way cc_sanitize does (anything outside [A-Za-z0-9._-] -> "_") so it's a
--- safe filename. Falls back to the tile key when there's no project identity.
-function M.queueKey(item)
-  local pk = item and (item.projectKey or item.cwd)
-  if type(pk) == "string" and pk ~= "" then
-    return (pk:gsub("[^%w._%-]", "_"))
-  end
-  return item and item.key or nil
-end
-
--- After ATTEMPTING to feed a queued task, decide what to persist/record. The FX
--- paste path reports delivery (false = the no-window-match guard skipped the
--- paste); only a DELIVERED feed may pop the queue -- persisting the shortened
--- queue after a skipped paste silently destroys the operator's queued task and
--- writes a false task_feed audit event.
-function M.queueFeedCommit(delivered)
-  if delivered then return { persist = true, event = "task_feed" } end
-  return { persist = false, event = "task_feed_skipped" }
-end
-
--- Feed the next task only on a FRESH transition into `done`, when the queue is
--- non-empty and auto-feed is on. (prev==done means we already handled it. prev==nil
--- means NO prior observation -- the first refresh after a Hammerspoon reload, since
--- the prev snapshot is in-memory while queue files persist on disk -- so it can't
--- be a fresh transition either: counting it would re-feed on every reload.)
-function M.shouldFeed(prev, cur, q, autoOn)
-  if not autoOn then return false end
-  if M.queuePeek(q) == nil then return false end
-  return cur == "done" and prev ~= nil and prev ~= "done"
-end
-
 -- ---- A checkout's HEAD, read from its files (FX.gitHead) ---------------------
 -- (These lived with task packets, removed 2026-11-19; the scheduled-tasks lock check reads HEAD with them.)
 -- HEAD's file -> "ref", "refs/..." | "sha", sha; nil for anything else.
@@ -10830,303 +10655,9 @@ function M.packedRefSha(packed, ref)
   return nil
 end
 
--- ---- Project routing (4c-E, roadmap orchestrator) ---------------------------
--- With routing armed, a project's queue feeds WHICHEVER session of that project
--- is free -- not just the one that finished (4b's edge trigger can't reach a
--- session that was already done when the task was queued). Level-triggered: a
--- single dispatcher per refresh tick picks at most ONE target per project; an
--- in-memory routePending marker keeps the next tick from double-feeding the
--- same session while its status file still says `done` (the paste hasn't
--- flipped it to `working` yet). Double opt-in: queue.routing.enabled (global)
--- AND routing:true in the project's queue file. All off by default.
-
--- The per-project arm flag rides INSIDE the queue file so it inherits the
--- projectKey keying + respawn survival for free. Accessors keep the file-shape
--- knowledge in one place; queueSetRouted preserves tasks.
-function M.queueRouted(q)
-  return type(q) == "table" and q.routing == true
-end
-function M.queueSetRouted(q, on)
-  local out = { tasks = qtasks(q) }
-  if on then out.routing = true end  -- absent (not false) when off: legacy shape
-  if M.queueRouteMode(q) == "sequential" then out.mode = "sequential" end  -- preserve mode
-  return out
-end
-
--- Process mode (L4): "distribute" (default) fans the queue across whichever member
--- is free (today's routePick); "sequential" serializes -- at most ONE routed task
--- in flight per project, the next starting only after the current finishes (other
--- members are held). Rides the queue file like `routing` (absent = distribute).
-function M.queueRouteMode(q)
-  return (type(q) == "table" and q.mode == "sequential") and "sequential" or "distribute"
-end
-function M.queueSetMode(q, mode)
-  local out = { tasks = qtasks(q) }
-  if type(q) == "table" and q.routing == true then out.routing = true end  -- preserve arm
-  if mode == "sequential" then out.mode = "sequential" end  -- absent = distribute (legacy shape)
-  return out
-end
-
--- Has a pending routed feed resolved? satisfied = the session left done/idle
--- (the paste landed: working/approval/...); expired = the marker outlived
--- `timeout` seconds (lost feed -- no-window-match, kill, etc). Caller clears
--- the map entry when true.
-function M.routePendingDone(ts, status, now, timeout)
-  if ts == nil then return false end
-  if status ~= "done" and status ~= "idle" then return true end
-  return ((tonumber(now) or 0) - (tonumber(ts) or 0)) > (tonumber(timeout) or 45)
-end
-
-M.ROUTE_PENDING_TIMEOUT = 45
-
--- Is this session eligible to receive routed work? v1 is deliberately
--- done-only: an `idle` session may be one the operator is actively typing
--- into, and a routed paste would land in their prompt (idle-inclusion is a
--- flagged follow-up). Excludes error/remote/draining sessions and ones with
--- a FRESH pending routed feed (an expired marker no longer blocks).
--- #36: display-staleness does NOT disqualify. Status files are hook-written,
--- so a session parked at its prompt goes stale ~90s after Stop -- the NORMAL
--- between-turns state (see staleDuplicateKeys' header), and exactly the
--- "already done when the task was queued" member 4c-E exists to reach; the
--- old `item.stale` rejection made a whole project permanently unroutable
--- minutes after its sessions finished. A genuinely DEAD done tile is caught
--- by the delivery gate instead (feedTask finds no window -> task kept
--- queued) and eventually by prune -- death is window evidence, not age.
-function M.sessionFree(item, opts)
-  opts = opts or {}
-  if type(item) ~= "table" then return false end
-  if item.status ~= "done" then return false end
-  if item.remote then return false end
-  -- a routed feed is a paste: never into a window shared with other sessions (the
-  -- level-triggered router would otherwise re-pick it, and be refused, every tick)
-  if M.keystrokeBlocked(item) then return false end
-  if opts.draining then return false end
-  if opts.pending ~= nil then
-    local expired = ((tonumber(opts.now) or 0) - (tonumber(opts.pending) or 0))
-      > (tonumber(opts.pendingTimeout) or M.ROUTE_PENDING_TIMEOUT)
-    if not expired then return false end
-  end
-  return true
-end
-
--- Does the project have a routed task IN FLIGHT? (sequential mode holds the queue
--- until the current one finishes.) True if any member is mid-turn (working/approval)
--- or carries a FRESH pending routed-feed marker. opts = { pending = map key->ts,
--- now, pendingTimeout }.
--- R2-19: a STALE mid-turn member must NOT count as in-flight -- a session that
--- died/froze mid-turn keeps status=='working' and would otherwise hold a sequential
--- queue forever behind a corpse, with no starvation alert (queueStarved suppresses
--- on the sequential-busy branch). NB (#36): stale here can only mean a mid-turn
--- corpse -- the busy statuses are working/approval, and a stale DONE member is the
--- normal between-turns state (routable via sessionFree, never busy anyway).
-function M.projectBusy(members, opts)
-  opts = opts or {}
-  local pending = opts.pending or {}
-  for _, it in ipairs(members or {}) do
-    if type(it) == "table" then
-      if not it.stale and (it.status == "working" or it.status == "approval") then return true end
-      local ts = pending[it.key]
-      if ts ~= nil then
-        local expired = ((tonumber(opts.now) or 0) - (tonumber(ts) or 0))
-          > (tonumber(opts.pendingTimeout) or M.ROUTE_PENDING_TIMEOUT)
-        if not expired then return true end
-      end
-    end
-  end
-  return false
-end
-
--- ---- L4 conditional routing: @role: labels ---------------------------------
--- A queued task may carry a leading "@role:" prefix addressing it to a session
--- ROLE (the DECIDED affinity source). Returns (role|nil, bareText): the role
--- lowercased, and the task with the prefix stripped -- the bare text is what gets
--- TYPED (the session never sees the routing scaffolding). A prefix with nothing
--- after it is treated as literal text (no role), so a stray "@x:" can't blank a task.
-function M.taskRoute(task)
-  -- R3-06: strip leading whitespace at the parse chokepoint so a task like
-  -- " @review: x" (queue-add bridge / L6 feed don't pre-trim) is still recognized
-  -- as routed and the scaffolding is stripped (renderFeed types the trimmed bare text).
-  task = tostring(task or ""):gsub("^%s+", "")
-  local role, rest = task:match("^@([%w._%-]+):%s*(.*)$")
-  if role and rest and rest:gsub("%s+$", "") ~= "" then return role:lower(), rest end
-  return nil, task
-end
-
--- A member's role axis for @role: matching: its session GROUP, lowercased.
--- nil/blank -> nil. An UNLABELED task matches any member; a LABELED task matches
--- only members whose group equals the role. #35: queue membership is keyed by
--- projectKey, so a projectKey-keyed group can never split one queue's members --
--- discrimination requires the per-TILE group entries applyGroups now resolves
--- first (set-group must be able to write them; see the dashboard bridge).
-function M.memberRole(item)
-  local g = item and item.group
-  if type(g) == "string" then
-    g = g:gsub("^%s+", ""):gsub("%s+$", ""):lower()
-    if g ~= "" then return g end
-  end
-  return nil
-end
-
--- A queued task may be a JOIN BARRIER (L4): a leading "@all:" waits until ALL of
--- the project's members have finished, "@any:" until AT LEAST ONE has, before it
--- routes. Returns (mode|nil, rest). "all"/"any" are reserved (a group so named
--- can't be @-addressed); a barrier composes with a role -- "@all: @review: x" is a
--- join THEN a role. A prefix with no body after it is literal text (no barrier).
-function M.taskBarrier(task)
-  -- R3-06: strip leading whitespace (untrimmed callers: queue-add bridge, L6 feed).
-  task = tostring(task or ""):gsub("^%s+", "")
-  -- R3-05: lowercase the matched keyword before the reserved-word test, mirroring
-  -- taskRoute's role:lower(), so @ALL:/@Any:/etc. are recognized as barriers (and thus
-  -- excluded from role routing) -- otherwise an uppercase barrier silently degrades to
-  -- a role filter (group=='all') and the task stalls forever.
-  local kw, rest = task:match("^@(%a+):%s*(.*)$")
-  kw = kw and kw:lower() or kw
-  if (kw == "all" or kw == "any") and rest and rest:gsub("%s+$", "") ~= "" then
-    return kw, rest
-  end
-  return nil, task
-end
-
--- Is a join barrier satisfied? "all" = every DRIVABLE member settled (done);
--- "any" = at least one settled. Flat AND/OR over done-state -- no nested tree.
--- nil/unknown mode -> true (not a barrier). Empty (or all-non-drivable) -> false.
--- R2-18: remote members and stale MID-TURN members (working/approval -- died or
--- froze mid-turn, so they can never settle; the same corpse notion as
--- projectBusy's R2-19) are EXCLUDED from the requirement, not permanent
--- blockers -- counting them in `total` made "all" forever-unsatisfiable, a
--- silent permanent stall (routeTask returns nil and queueStarved is suppressed).
--- #36: a stale DONE member is the normal between-turns state, NOT a corpse --
--- it is settled and routable (sessionFree no longer rejects stale), so it
--- counts on both sides; excluding it made "@all:" forever-unsatisfiable for a
--- project whose members all finished >90s ago. Matches sessionFree's drivable notion.
-function M.routeBarrierMet(members, mode)
-  if mode ~= "all" and mode ~= "any" then return true end
-  local settled, total = 0, 0
-  for _, it in ipairs(members or {}) do
-    if type(it) == "table" and not it.remote
-       and not (it.stale and it.status ~= "done") then
-      total = total + 1
-      if it.status == "done" then settled = settled + 1 end
-    end
-  end
-  if total == 0 then return false end
-  if mode == "all" then return settled == total end
-  return settled >= 1
-end
-
--- Pick the target for one project's next task. Deterministic: longest-free
--- first (smallest `since` -- the status file stamps it on each status change),
--- key ascending as the tiebreak; a missing `since` reads as "just changed"
--- (lowest priority). members = parsed items sharing one queueKey. opts =
--- { draining = map key->bool, pending = map key->ts, now, pendingTimeout,
--- role = label|nil, skip = map key->true }. With a role set, only members whose memberRole
--- matches are eligible (conditional routing). 2026-09-28: `skip` holds out members a send was
--- refused for (M.typingHeld) -- from the pick only, never from busy/barrier checks. Returns
--- the chosen tile key, or nil when none free.
-function M.routePick(members, opts)
-  opts = opts or {}
-  local draining = opts.draining or {}
-  local pending = opts.pending or {}
-  local skip = opts.skip or {}
-  local role = opts.role
-  local best, bestSince
-  for _, it in ipairs(members or {}) do
-    if not skip[it.key] and (role == nil or M.memberRole(it) == role)
-       and M.sessionFree(it, { draining = draining[it.key], pending = pending[it.key],
-                               now = opts.now, pendingTimeout = opts.pendingTimeout }) then
-      local since = tonumber(it.since) or math.huge
-      if best == nil or since < bestSince
-         or (since == bestSince and tostring(it.key) < tostring(best)) then
-        best, bestSince = it.key, since
-      end
-    end
-  end
-  return best
-end
-
--- The whole per-project decision: should the dispatcher feed this tick?
--- Requires opts.globalOn AND the queue file armed AND depth > 0 AND a free
--- pick. Returns { key = <tile key> } or nil.
-function M.routeTask(members, q, opts)
-  opts = opts or {}
-  if not opts.globalOn then return nil end
-  if not M.queueRouted(q) then return nil end
-  if M.queuePeek(q) == nil then return nil end
-  -- sequential mode: hold while a routed task is still in flight (one at a time)
-  if M.queueRouteMode(q) == "sequential"
-     and M.projectBusy(members, { pending = opts.pending, now = opts.now,
-                                  pendingTimeout = opts.pendingTimeout }) then
-    return nil
-  end
-  local barrier, afterB = M.taskBarrier(M.queuePeek(q))  -- @all:/@any: join on the head
-  if barrier and not M.routeBarrierMet(members, barrier) then return nil end  -- hold until met
-  local role = select(1, M.taskRoute(afterB))  -- @role: (possibly after the barrier)
-  local key = M.routePick(members, { draining = opts.draining, pending = opts.pending,
-    now = opts.now, pendingTimeout = opts.pendingTimeout, role = role, skip = opts.skip })
-  if not key then return nil end
-  return { key = key, role = role, barrier = barrier }
-end
-
--- R1-18: re-validate a routed feed AFTER the pop, before committing. routeTask peeks
--- the head and picks a member for that head's @role:/barrier; the actual pop happens
--- later inside the dispatchSerialized slot and re-reads the file FIFO. If the operator
--- reorders the queue (queue-move) during the sub-second stagger, the popped task may
--- carry a DIFFERENT @role: than the chosen member -> a role-addressed task lands in a
--- non-matching member. This recomputes barrier + role from the freshly-popped task and
--- the chosen item, returning true only when both still hold (so the caller can refuse
--- the feed and leave the task queued for the next tick to re-pick). Pure.
-function M.routeFeedMatches(item, task, members)
-  if type(item) ~= "table" then return false end
-  local barrier, afterB = M.taskBarrier(task)
-  if barrier and not M.routeBarrierMet(members, barrier) then return false end
-  local role = select(1, M.taskRoute(afterB))
-  if role ~= nil and M.memberRole(item) ~= role then return false end
-  return true
-end
-
--- Starvation check: an armed project with queued work and NO free session for
--- longer than `minutes`. sinceTs = when the caller first observed the starved
--- condition (it keeps the clock; pure here). minutes <= 0 disables.
-function M.queueStarved(members, q, opts)
-  opts = opts or {}
-  local minutes = tonumber(opts.minutes) or 0
-  if minutes <= 0 then return false end
-  if not M.queueRouted(q) or M.queuePeek(q) == nil then return false end
-  -- R1-16: a sequential queue with a task in flight is PROGRESSING one-at-a-time, not
-  -- starved. routeTask already holds (returns nil) for sequential-busy; mirror that
-  -- here so the dispatcher's starvation branch doesn't fire queue_starved on a queue
-  -- working exactly as designed. projectBusy defaults pendingTimeout when nil.
-  if M.queueRouteMode(q) == "sequential"
-     and M.projectBusy(members, { pending = opts.pending, now = opts.now,
-                                  pendingTimeout = opts.pendingTimeout }) then
-    return false
-  end
-  -- a head waiting on an unmet join barrier is WAITING, not starved
-  local barrier, afterB = M.taskBarrier(M.queuePeek(q))
-  if barrier and not M.routeBarrierMet(members, barrier) then return false end
-  -- starved = the FIFO head can't be routed (its @role: has no free matching member)
-  local role = select(1, M.taskRoute(afterB))
-  if M.routePick(members, { draining = opts.draining, pending = opts.pending,
-       now = opts.now, pendingTimeout = opts.pendingTimeout, role = role }) ~= nil then return false end
-  local sinceTs = tonumber(opts.sinceTs)
-  if not sinceTs then return false end
-  return ((tonumber(opts.now) or 0) - sinceTs) > minutes * 60
-end
-
--- L4 per-task timing: a fed queue task completes on the FIRST done edge after it
--- was fed. Given the recorded start ({ts=...}) and the tile's prev/cur status,
--- returns { durationS } on that edge, else nil. Same edge discipline as shouldFeed
--- (a nil prev = no prior observation, not a completion; prev==done already handled).
-function M.stepTaskDone(start, prev, cur, now)
-  if type(start) ~= "table" or start.ts == nil then return nil end
-  if cur ~= "done" then return nil end
-  if prev == nil or prev == "done" then return nil end
-  return { durationS = math.max(0, (tonumber(now) or 0) - (tonumber(start.ts) or 0)) }
-end
-
 -- ---- Graceful drain (Feature F) --------------------------------------------
 -- Close a session only AFTER it finishes the in-flight turn: fire on the same
--- fresh transition into `done` that shouldFeed uses (prev==done means we already
+-- fresh transition into `done` (prev==done means we already
 -- handled it), but only when the operator armed drain for this tile. The draining
 -- flag is an in-memory panel intent (not a file) -- a Hammerspoon reload clears it
 -- so a stale "close on next done" can't fire on a session you've since resumed.
@@ -12014,7 +11545,6 @@ M.SETTINGS_KEEP_SUBKEYS = {
   -- 2026-10-03: and the evidence runs' block (minItems, cooldownHours, dailyUsd).
   coach = { "enabled", "day", "maxBudgetUsd", "timeoutSeconds", "evidence" },
   automation = { "dryRun" },
-  queue = { "dryRun" },
   rules = { "dryRun" },
   respawn = { "dryRun" },
   summary = { "dryRun" },
@@ -12476,7 +12006,7 @@ end
 -- Namespace separator ":" can never appear in a local key (cc_sanitize strips
 -- to [A-Za-z0-9._-]), so host:key is unambiguous and reversible. Namespaced
 -- keys live IN MEMORY only -- mirror files keep their raw remote names, and
--- anything key->filename (queueKey) sanitizes ":" to "_" deterministically.
+-- anything key->filename sanitizes ":" to "_" deterministically.
 function M.namespaceKey(ns, key)
   return tostring(ns or "") .. ":" .. tostring(key or "")
 end
@@ -13338,7 +12868,6 @@ M.AUTOMATION_DRY = "dry run"   -- the `why` FX.automationAct returns when a dry 
 -- The Settings switches, in the order Settings shows them: the config block whose .dryRun holds it.
 M.DRY_RUN_FEATURES = {
   { feature = "autoContinue",  label = "Auto-continue" },
-  { feature = "queue",         label = "Auto-feed and project routing" },
   { feature = "rules",         label = "Automation rules" },
   { feature = "respawn",       label = "Auto-respawn" },
   { feature = "summary",       label = "Post-run self-summary" },
@@ -13349,8 +12878,6 @@ M.DRY_RUN_FEATURES = {
 -- Every kind of automatic action, the feature that switches it, and its name in the Trace.
 M.AUTOMATION_KINDS = {
   { kind = "continue",    feature = "autoContinue",  label = "Auto-continue" },
-  { kind = "feed",        feature = "queue",         label = "Auto-feed" },
-  { kind = "route",       feature = "queue",         label = "Project routing" },
   { kind = "rule",        feature = "rules",         label = "Rule" },
   { kind = "respawn",     feature = "respawn",       label = "Auto-respawn" },
   { kind = "summary",     feature = "summary",       label = "Self-summary" },
@@ -13360,7 +12887,7 @@ M.AUTOMATION_KINDS = {
 }
 -- FX.typeWhenReady's senders -> their kind.
 M.AUTOMATION_TYPISTS = {
-  autofeed = "feed", router = "route", ["rule-nudge"] = "rule", ["rule-continue"] = "rule",
+  ["rule-nudge"] = "rule", ["rule-continue"] = "rule",
   ["auto-continue"] = "continue", summary = "summary", mailbox = "mailbox", ["rc-sweep"] = "rc",
 }
 local AUTOMATION_FEATURE_OF = {}
@@ -24476,7 +24003,7 @@ M.FEATURES = {
     what = "Nothing one project's session writes for another reaches it on its own. A ticket, every reply and every close note waits on the writing session's card as a red Needs you, with the exact text in boxes you can edit. Approve sends what the boxes say -- the other side sees (edited by Adam) on anything you changed -- and Deny keeps it back, telling the session your note. A crossing never expires and outlives its session's /clear or end; one whose session has no card waits on ☰ → Tickets instead.",
     why = "Projects shouldn't use Shepherd to talk to each other behind your back: every message between them is a translation you approved." },
   { key = "sharedwin", cat = "Control", new = true, title = "Shared-window guard",
-    what = "When several Claude sessions run as tabs in one VS Code window, Shepherd won't type into any of them — no nudge, queue feed or /clear — and says why. Close goes through the Shepherd tab bridge, which closes just that session's tab. Jump and hands-free approvals still work. keystrokes.refuseSharedWindow switches it off.",
+    what = "When several Claude sessions run as tabs in one VS Code window, Shepherd won't type into any of them — no nudge or /clear — and says why. Close goes through the Shepherd tab bridge, which closes just that session's tab. Jump and hands-free approvals still work. keystrokes.refuseSharedWindow switches it off.",
     why = "Shepherd types into a window, not a tab, so a message meant for one tab could land in another." },
   { key = "merge", cat = "Control", new = true, title = "Ready to merge",
     what = "A worktree tab that finishes its unit asks for a merge; its card says so and the detail panel shows the review — commits, files, full diff, the session's summary and test claim. Merge lets it rebase, test and fast-forward main (one merge per repo at a time); afterwards Shepherd closes its tab. Not yet sends your note back.",
@@ -24563,9 +24090,6 @@ M.FEATURES = {
     why = "Continue a local session from your phone or another machine." },
 
   -- ---- Automate ----
-  { key = "queue", cat = "Automate", title = "Task queue & auto-feed",
-    what = "Line up tasks per session, auto-feed the next when one finishes, and route work to whichever session is free.",
-    why = "Keep sessions busy without babysitting each handoff." },
   { key = "recover", cat = "Automate", title = "Auto-respawn & auto-continue",
     what = "Respawn a stuck session and nudge one frozen on an API error to continue — within safe retry budgets.",
     why = "A long-running fleet heals itself instead of silently stalling overnight." },
@@ -24576,7 +24100,7 @@ M.FEATURES = {
     what = "Shepherd can leave a session a message instead of typing it. The message waits in ~/.claude/cc-inbox and arrives when the session's current turn ends -- it carries on with it -- or at its next start. An idle session in a kitty window or a VS Code window of its own gets it typed, as one line, once it's ready; in a VS Code window shared with other Claude tabs nothing is typed and the card says the message is waiting. Diagnostics counts what's waiting.",
     why = "Automation can reach a session in a shared window, or mid-turn, without keystrokes landing in the wrong tab." },
   { key = "trace", cat = "Automate", new = true, title = "Automation dry run & trace",
-    what = "Every automatic action -- auto-continue, auto-feed and routing, rules, respawn, the self-summary, ending a tab-less leftover, a mailbox message, the /rc sweep -- is recorded as acted, refused (with why) or, in a dry run, would. Settings turns dry run on for all automation or one feature at a time; ☰ → Automation trace (or ⚡ Trace in the detail panel for one session) lists the decisions newest first, repeats collapsed to ×N.",
+    what = "Every automatic action -- auto-continue, rules, respawn, the self-summary, ending a tab-less leftover, a mailbox message, the /rc sweep -- is recorded as acted, refused (with why) or, in a dry run, would. Settings turns dry run on for all automation or one feature at a time; ☰ → Automation trace (or ⚡ Trace in the detail panel for one session) lists the decisions newest first, repeats collapsed to ×N.",
     why = "See what automation would do before you let it, and what it did while you were away." },
   { key = "compact", cat = "Automate", new = true, title = "Auto-compact with notes",
     what = "Claude Code compacts each session at 85% of its window (changeable in Settings; Shepherd sets CLAUDE_AUTOCOMPACT_PCT_OVERRIDE in ~/.claude/settings.json). At the first turn end a few points before that, the session is asked once to write its working notes to ~/.claude/cc-notes; the summary is told they come back, and the session gets them back whole right after it compacts. A 📝 on the card means it has notes; the detail panel says when they're next due. Diagnostics warns if the installed claude stops reading the override.",

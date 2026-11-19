@@ -95,14 +95,6 @@
     "sweepOnStartup": true,
     "onSpawn": true
   },
-  "queue": {
-    "autofeed": false,
-    "routing": {
-      "enabled": false,
-      "starveMinutes": 0
-    },
-    "dryRun": false
-  },
   "bridge": {
     "enabled": false,
     "intervalSeconds": 2

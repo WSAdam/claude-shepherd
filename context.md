@@ -19,8 +19,7 @@ session. It also runs Adam's parallel-worktree method end to end. What it automa
 (the README's [feature tour](README.md#feature-tour) has the full list; `core.FEATURES` holds 81
 entries):
 
-- **Feeding work:** task queues with auto-feed and routing, routines (cron spawns, digests, the
-  main-green check), event rules, auto-continue with back-off,
+- **Feeding work:** routines (cron spawns, digests, the main-green check), event rules, auto-continue with back-off,
   auto-respawn with handoff notes, auto-compact with notes.
 - **Steering without keystrokes:** the session mailbox, cross-repo tickets,
   AskUserQuestion answered on the card, the Stop guards.
@@ -784,6 +783,7 @@ load-bearing facts a refactor must keep:
 
 **L4 — declarative routing & orchestration** is shipped (the non-UX-gated parts): conditional routing,
 process modes, join barriers, per-task timing — all queue-line syntax on top of the shipped Project Routing
+(the task queue, auto-feed and routing were all removed on 2026-11-19; this section is history)
 v1 dispatcher, stripped before the task is typed. Load-bearing facts:
 - **`@role:` affinity matches a member's GROUP** (`core.memberRole` = the tile's group; `core.taskRoute` parses
   the prefix). `routePick` gained a `role` filter; `routeTask`/`queueStarved` derive the FIFO head's role. The

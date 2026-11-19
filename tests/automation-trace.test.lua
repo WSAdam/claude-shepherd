@@ -156,16 +156,18 @@ check("every fixture session is on the panel", byK.idle1 and byK.idle2 and byK.i
 if not (byK.idle1 and byK.idle2 and byK.idle3 and byK.busy1) then finish() end
 
 -- ---- live: automation acts, and the Trace says so ----
+-- 2026-11-19: the sample sends were auto-feed's and the router's ("feed" / "route"); those kinds went
+-- with the task queue, so the same checks now ride a rule's nudge and continue ("rule").
 local typed = {}
-quietly(function() fx.typeWhenReady(byK.idle1, "autofeed", function() typed.idle1 = true end, { summary = "feed 'fix the tests'" }) end)
+quietly(function() fx.typeWhenReady(byK.idle1, "rule-nudge", function() typed.idle1 = true end, { summary = "nudge 'fix the tests'" }) end)
 quietly(beats)
-local r1 = rows("idle1", "feed")
+local r1 = rows("idle1", "rule")
 check("live: an automated send types", typed.idle1 == true)
 check("live: ...and the Trace records it acted, with what and who sent it",
-      #r1 == 1 and r1[1].outcome == "acted" and r1[1].summary == "feed 'fix the tests'" and r1[1].by == "autofeed")
+      #r1 == 1 and r1[1].outcome == "acted" and r1[1].summary == "nudge 'fix the tests'" and r1[1].by == "rule-nudge")
 local a1 = events("automation", "idle1")
-check("live: ...ledgered once as automation/acted", #a1 == 1 and a1[1].kind == "feed" and a1[1].outcome == "acted")
-check("live: nothing is ledgered as a would", #events("would_feed") == 0)
+check("live: ...ledgered once as automation/acted", #a1 == 1 and a1[1].kind == "rule" and a1[1].outcome == "acted")
+check("live: nothing is ledgered as a would", #events("would_rule") == 0)
 
 -- ---- dry run for all automation: nothing is acted on, a would is recorded ----
 config({ automation = { dryRun = true } })
@@ -226,21 +228,21 @@ end)
 quietly(beats)
 clock = NOW + 120
 quietly(function()
-  fx.typeWhenReady(byK.idle4, "autofeed", function() typed.idle4f = true end, { summary = "feed 'y'" })
+  fx.typeWhenReady(byK.idle4, "summary", function() typed.idle4f = true end, { summary = "summarise" })
 end)
 quietly(beats)
 check("autoContinue.dryRun: auto-continue is held", typed.idle3c == nil and #events("would_continue", "idle3") == 1)
-check("autoContinue.dryRun: ...auto-feed still types", typed.idle4f == true and #events("would_feed", "idle4") == 0)
+check("autoContinue.dryRun: ...the self-summary still types", typed.idle4f == true and #events("would_summary", "idle4") == 0)
 local _, mp2 = quietly(function() return fx.mailboxSend("idle3", "Summarise what you just did.") end)
 check("autoContinue.dryRun: ...and a mailbox send is written", type(mp2) == "string" and readFile(mp2) ~= nil)
 
 -- ---- refusals: the readiness door, an effect's own `false, why`, FX.automationRefuse, an error ----
 config({})
-quietly(function() fx.typeWhenReady(byK.busy1, "router", function() typed.busy1 = true end, { summary = "feed 'z'" }) end)
+quietly(function() fx.typeWhenReady(byK.busy1, "rule-continue", function() typed.busy1 = true end, { summary = "continue 'z'" }) end)
 quietly(beats)
-local rb = rows("busy1", "route")
+local rb = rows("busy1", "rule")
 check("refused: a session mid-turn is a refused row, with why  (" .. tostring(rb[1] and rb[1].reason) .. ")",
-      #rb == 1 and rb[1].outcome == "refused" and rb[1].reason == "working" and rb[1].summary == "feed 'z'" and not typed.busy1)
+      #rb == 1 and rb[1].outcome == "refused" and rb[1].reason == "working" and rb[1].summary == "continue 'z'" and not typed.busy1)
 check("refused: ...ledgered as automation/refused", (function()
   for _, ev in ipairs(events("automation", "busy1")) do if ev.outcome == "refused" and ev.reason == "working" then return true end end
   return false
@@ -248,8 +250,8 @@ end)())
 quietly(function() fx.automationAct("respawn", byK.idle4, { summary = "relaunch" }, function() return false, "spawn.live is off" end) end)
 local rr = rows("idle4", "respawn")
 check("refused: an effect's `false, why` is a refused row", #rr == 1 and rr[1].outcome == "refused" and rr[1].reason == "spawn.live is off")
-quietly(function() fx.automationAct("feed", byK.idle4, { summary = "feed 'q'" }, function() fx.automationRefuse("no window match") end) end)
-local rf = rows("idle4", "feed")
+quietly(function() fx.automationAct("summary", byK.idle4, { summary = "summarise 'q'" }, function() fx.automationRefuse("no window match") end) end)
+local rf = rows("idle4", "summary")
 check("refused: FX.automationRefuse inside the effect makes it refused, not acted  (" .. #rf .. " rows)",
       #rf == 2 and rf[2].outcome == "refused" and rf[2].reason == "no window match")
 local okErr = quietly(function() fx.automationAct("rule", byK.idle4, { summary = "log" }, function() error("boom") end) end)
@@ -296,25 +298,27 @@ check("trace view: labels for every kind", type(payload.kinds) == "table" and pa
 config({ rules = { enabled = true }, tabless = { autoEndMinutes = 20 } })
 quietly(function()
   panelCb({ body = json.encode({ a = "save-config", v = "", text = json.encode({
-    config = { queue = { autofeed = true, routing = { enabled = false, starveMinutes = 0 } } },
+    config = { autoContinue = { enabled = true, delaySeconds = 60, maxAttempts = 3 } },
     gate = false, autoLaunch = false,
-    dryRun = { automation = false, rules = true, queue = true, tabless = false } }) }) })
+    dryRun = { automation = false, rules = true, autoContinue = true, tabless = false } }) }) })
 end)
 local saved = json.decode(readFile(CFG) or "{}") or {}
 check("settings: rules.dryRun saved, rules.enabled kept",
       saved.rules and saved.rules.dryRun == true and saved.rules.enabled == true)
-check("settings: queue.dryRun saved beside the form's queue block",
-      saved.queue and saved.queue.dryRun == true and saved.queue.autofeed == true)
+-- 2026-11-19: the sample block was the queue's (removed with it); autoContinue is the same shape
+check("settings: autoContinue.dryRun saved beside the form's autoContinue block",
+      saved.autoContinue and saved.autoContinue.dryRun == true and saved.autoContinue.enabled == true)
 check("settings: automation.dryRun saved off", saved.automation and saved.automation.dryRun == false)
 check("settings: tabless.autoEndMinutes kept", saved.tabless and saved.tabless.autoEndMinutes == 20 and saved.tabless.dryRun == false)
 -- a later Save that doesn't send the switches keeps them
 quietly(function()
   panelCb({ body = json.encode({ a = "save-config", v = "", text = json.encode({
-    config = { queue = { autofeed = false, routing = { enabled = false, starveMinutes = 0 } } }, gate = false }) }) })
+    config = { autoContinue = { enabled = false, delaySeconds = 60, maxAttempts = 3 } }, gate = false }) }) })
 end)
 saved = json.decode(readFile(CFG) or "{}") or {}
-check("settings: a Save without the switches keeps queue.dryRun and rules.dryRun",
-      saved.queue and saved.queue.dryRun == true and saved.queue.autofeed == false and saved.rules and saved.rules.dryRun == true)
+check("settings: a Save without the switches keeps autoContinue.dryRun and rules.dryRun",
+      saved.autoContinue and saved.autoContinue.dryRun == true and saved.autoContinue.enabled == false
+      and saved.rules and saved.rules.dryRun == true)
 
 os.execute('rm -r "' .. T .. '"')
 finish()

@@ -1218,92 +1218,6 @@ do
   eq("stagger: garbage tail = gap", t5, 5)
 end
 
--- ---- Task queue: push / pop / depth / shouldFeed --------------------------
-do
-  eq("queue: push onto empty", core.queueDepth(core.queuePush(nil, "a")), 1)
-  local q = core.queuePush(core.queuePush(nil, "a"), "b")
-  eq("queue: depth after two pushes", core.queueDepth(q), 2)
-  local first, rest = core.queuePop(q)
-  eq("queue: pop returns front", first, "a")
-  eq("queue: pop leaves the rest", core.queueDepth(rest), 1)
-  eq("queue: pop next is b", (core.queuePop(rest)), "b")
-  local none = core.queuePop({ tasks = {} })
-  eq("queue: pop empty -> nil", none, nil)
-  eq("queue: push ignores empty task", core.queueDepth(core.queuePush(nil, "")), 0)
-
-  local q1 = { tasks = { "next" } }
-  eq("feed: done transition with queue+auto -> true", core.shouldFeed("working", "done", q1, true), true)
-  eq("feed: still done (no fresh transition) -> false", core.shouldFeed("done", "done", q1, true), false)
-  -- nil prev = no prior observation (first refresh after a reload, queue persisted
-  -- on disk): NOT a fresh transition, else every reload would re-feed a done tile.
-  eq("feed: nil prev (first refresh after reload) -> false", core.shouldFeed(nil, "done", q1, true), false)
-  eq("feed: empty queue -> false", core.shouldFeed("working", "done", { tasks = {} }, true), false)
-  eq("feed: autofeed off -> false", core.shouldFeed("working", "done", q1, false), false)
-  eq("feed: not done -> false", core.shouldFeed("working", "working", q1, true), false)
-end
-
--- ---- Queue editing (roadmap #5): move / removeAt / splitLines / pushAll -----
-do
-  local q3 = { tasks = { "a", "b", "c" } }
-  -- queueMove: happy paths + boundary no-ops
-  local m1, ok1 = core.queueMove(q3, 2, -1, "b")
-  eq("qmove: middle up", table.concat(m1.tasks, ","), "b,a,c")
-  eq("qmove: middle up flag", ok1, true)
-  local m2, ok2 = core.queueMove(q3, 2, 1, "b")
-  eq("qmove: middle down", table.concat(m2.tasks, ","), "a,c,b")
-  eq("qmove: middle down flag", ok2, true)
-  local m3, ok3 = core.queueMove(q3, 1, -1, "a")
-  eq("qmove: first up refused", ok3, false)
-  eq("qmove: refused leaves order", table.concat(m3.tasks, ","), "a,b,c")
-  local _, ok4 = core.queueMove(q3, 3, 1, "c")
-  eq("qmove: last down refused", ok4, false)
-  local _, ok5 = core.queueMove(q3, 9, -1, "x")
-  eq("qmove: out of range refused", ok5, false)
-  -- the expect guard: a stale panel (autofeed popped the head) must not move
-  -- the WRONG task -- mismatch refuses and returns an unchanged copy.
-  local m6, ok6 = core.queueMove(q3, 2, -1, "stale-text")
-  eq("qmove: expect mismatch refused", ok6, false)
-  eq("qmove: mismatch leaves order", table.concat(m6.tasks, ","), "a,b,c")
-  local m7, ok7 = core.queueMove(nil, 1, 1, "a")
-  eq("qmove: nil queue tolerated", ok7, false)
-  eq("qmove: nil queue -> canonical shape", #m7.tasks, 0)
-  eq("qmove: original untouched (pure)", table.concat(q3.tasks, ","), "a,b,c")
-  -- queueRemoveAt
-  local r1, rem1 = core.queueRemoveAt(q3, 2, "b")
-  eq("qrm: removes the task", rem1, "b")
-  eq("qrm: remaining order", table.concat(r1.tasks, ","), "a,c")
-  local _, rem2 = core.queueRemoveAt(q3, 9, nil)
-  eq("qrm: out of range -> nil", rem2, nil)
-  local r3, rem3 = core.queueRemoveAt(q3, 1, "not-a")
-  eq("qrm: expect mismatch -> nil", rem3, nil)
-  eq("qrm: mismatch leaves queue", #r3.tasks, 3)
-  local r4, rem4 = core.queueRemoveAt({ tasks = { "only" } }, 1, "only")
-  eq("qrm: last task removed", rem4, "only")
-  eq("qrm: empty canonical shape", #r4.tasks, 0)
-  check("qrm: shape stays {tasks=...}", type(r4.tasks) == "table")
-  -- queueSplitLines
-  local s1 = core.queueSplitLines("a\nb\n\n   \nc")
-  eq("qsplit: blanks dropped", #s1, 3)
-  eq("qsplit: order kept", table.concat(s1, ","), "a,b,c")
-  eq("qsplit: CRLF tolerated", table.concat(core.queueSplitLines("a\r\nb\r\n"), ","), "a,b")
-  eq("qsplit: dash bullet stripped", core.queueSplitLines("- task one")[1], "task one")
-  eq("qsplit: star bullet stripped", core.queueSplitLines("* task two")[1], "task two")
-  eq("qsplit: numbered dot stripped", core.queueSplitLines("3. task three")[1], "task three")
-  eq("qsplit: numbered paren stripped", core.queueSplitLines("12) task twelve")[1], "task twelve")
-  eq("qsplit: bare marker line dropped", #core.queueSplitLines("- \n* "), 0)
-  eq("qsplit: single line -> 1", #core.queueSplitLines("just one"), 1)
-  eq("qsplit: empty -> {}", #core.queueSplitLines(""), 0)
-  eq("qsplit: nil -> {}", #core.queueSplitLines(nil), 0)
-  -- a literal "-x" (no space) is a task, not a bullet
-  eq("qsplit: dash without space kept", core.queueSplitLines("-x flag")[1], "-x flag")
-  -- queuePushAll
-  local pa = core.queuePushAll({ tasks = { "old" } }, { "n1", "n2" })
-  eq("qpushall: appends after existing", table.concat(pa.tasks, ","), "old,n1,n2")
-  eq("qpushall: empty list unchanged", table.concat(core.queuePushAll(q3, {}).tasks, ","), "a,b,c")
-  eq("qpushall: drops empty strings", #core.queuePushAll(nil, { "", "x" }).tasks, 1)
-  check("qpushall: nil queue canonical shape", type(core.queuePushAll(nil, nil).tasks) == "table")
-end
-
 -- ---- Saved task templates (roadmap #5c) -------------------------------------
 do
   local st, ok1 = core.templatePush(nil, "deploy", "run make deploy")
@@ -1617,42 +1531,6 @@ do
   eq("fuzzy: nil paths -> {}", #core.fuzzyFilter("x", nil), 0)
 end
 
--- ---- queueKey: queues are PROJECT-keyed so respawn//clear can't strand them --
-do
-  -- a respawned session gets a NEW session_id (= a new tile key); the queue must
-  -- key off the stable projectKey so the successor inherits the pending tasks.
-  eq("queueKey: projectKey wins", core.queueKey({ key = "sess-1", projectKey = "-Users-a-proj", cwd = "/u/a/proj" }),
-     "-Users-a-proj")
-  eq("queueKey: same project, new session -> same key",
-     core.queueKey({ key = "sess-2", projectKey = "-Users-a-proj" }), "-Users-a-proj")
-  -- cwd fallback is sanitized like cc_sanitize (outside [A-Za-z0-9._-] -> "_")
-  eq("queueKey: cwd fallback sanitized", core.queueKey({ key = "s", cwd = "/u/a proj" }), "_u_a_proj")
-  eq("queueKey: no project identity -> tile key", core.queueKey({ key = "sess-3" }), "sess-3")
-  eq("queueKey: nil item -> nil", core.queueKey(nil), nil)
-end
-
--- ---- queueMerge: legacy session-keyed queue adopted into the project queue ---
-do
-  local m = core.queueMerge({ tasks = { "a" } }, { tasks = { "b", "c" } })
-  eq("queueMerge: depth", core.queueDepth(m), 3)
-  eq("queueMerge: keeps order, a first", m.tasks[1], "a")
-  eq("queueMerge: appends legacy", m.tasks[3], "c")
-  eq("queueMerge: nil sides safe", core.queueDepth(core.queueMerge(nil, nil)), 0)
-end
-
--- ---- queueFeedCommit: only a DELIVERED feed pops the queue -------------------
-do
-  -- FX.feedTask returns false when the no-window-match guard skipped the paste;
-  -- persisting the popped queue then would silently destroy the task and write a
-  -- false task_feed audit event.
-  local ok = core.queueFeedCommit(true)
-  eq("feed-commit: delivered -> persist", ok.persist, true)
-  eq("feed-commit: delivered -> task_feed event", ok.event, "task_feed")
-  local skip = core.queueFeedCommit(false)
-  eq("feed-commit: skipped -> queue kept", skip.persist, false)
-  eq("feed-commit: skipped -> task_feed_skipped event", skip.event, "task_feed_skipped")
-  eq("feed-commit: nil (legacy no-report) -> queue kept", core.queueFeedCommit(nil).persist, false)
-end
 
 -- ---- shouldPrune: orphan + ghost cleanup ----------------------------------
 do
@@ -3540,9 +3418,6 @@ do
   core.applyGroups(list, { ["proj-x"] = "builders", ["s2"] = "reviewer" })
   eq("#35-pin: untagged member keeps the project cohort", list[1].group, "builders")
   eq("#35-pin: per-tile entry wins over the projectKey cohort", list[2].group, "reviewer")
-  -- memberRole (the @role: axis) now differs WITHIN one project queue
-  check("#35-pin: @role: axis discriminates queue members",
-        core.memberRole(list[1]) == "builders" and core.memberRole(list[2]) == "reviewer")
   -- a per-tile entry alone (no cohort) resolves too, and setGroup can write it
   local solo = { { key = "s3", name = "c", projectKey = "proj-y" } }
   core.applyGroups(solo, core.setGroup({}, "s3", "docs"))
@@ -4065,9 +3940,6 @@ do
   local r1t
   for _, it in ipairs(mlTight) do if it.remoteKey == "r1" then r1t = it end end
   eq("bridge: no slack -> stale", r1t.stale, true)
-  -- queueKey folding: a remote projectKey can never collide with the local clone
-  eq("bridge: queueKey folds the namespace", core.queueKey({ projectKey = "devbox:-home-a-proj" }),
-     "devbox_-home-a-proj")
   -- mergeStatusLists: sort holds across the merge; no collisions by construction
   local localList = { { key = "l1", name = "loc", status = "done" } }
   local merged = core.mergeStatusLists(localList, ml)
@@ -4138,9 +4010,6 @@ do
   eq("bridge: bulk stop hits the local one", stops[1], "l2")
   local nudges = core.selectActionable(fleet, "nudge")
   eq("bridge: bulk nudge excludes remote", #nudges, 1)
-  -- routing never targets remote (re-pin alongside the bridge)
-  eq("bridge: sessionFree excludes remote",
-     core.sessionFree({ key = "devbox:r", status = "done", stale = false, remote = { host = "h" } }, {}), false)
   -- recorder contract: approve on a remote waiting tile still routes through
   -- fx.writeDecision with the NAMESPACED key (FX owns local-vs-ssh routing)
   local rec = newRecorder()
@@ -4170,251 +4039,6 @@ do
     eq("R2-07: remote " .. act .. " -> nil", core.handleAction(rrc.fx, remoteTile, act, "some text"), nil)
     eq("R2-07: remote " .. act .. " records NO op", rrc.count(), 0)
   end
-end
-
--- ---- 4c-E project routing: free-set, pick, dispatch gating ------------------
-do
-  local function sess(key, status, over)
-    local s = { key = key, status = status, since = 100, stale = false }
-    for k, v in pairs(over or {}) do s[k] = v end
-    return s
-  end
-  -- sessionFree: v1 is done-only (an idle session may be one you're typing into)
-  eq("route-free: done -> true", core.sessionFree(sess("a", "done"), {}), true)
-  eq("route-free: idle -> false (v1)", core.sessionFree(sess("a", "idle"), {}), false)
-  eq("route-free: working -> false", core.sessionFree(sess("a", "working"), {}), false)
-  eq("route-free: approval -> false", core.sessionFree(sess("a", "approval"), {}), false)
-  eq("route-free: error -> false", core.sessionFree(sess("a", "error"), {}), false)
-  -- #36: display-staleness no longer disqualifies -- hook-written status files go
-  -- stale ~90s after Stop (the NORMAL between-turns state; see staleDuplicateKeys'
-  -- header), so the old `stale -> false` pin made a whole project permanently
-  -- unroutable minutes after its sessions finished. A genuinely DEAD done tile is
-  -- caught by the delivery gate (feedTask finds no window -> task kept queued).
-  eq("route-free: stale done stays routable (#36)",
-     core.sessionFree(sess("a", "done", { stale = true }), {}), true)
-  eq("route-free: remote -> false", core.sessionFree(sess("a", "done", { remote = { host = "h" } }), {}), false)
-  eq("route-free: draining -> false", core.sessionFree(sess("a", "done"), { draining = true }), false)
-  eq("route-free: fresh pending -> false",
-     core.sessionFree(sess("a", "done"), { pending = 100, now = 110 }), false)
-  eq("route-free: expired pending -> true (lost feed re-eligible)",
-     core.sessionFree(sess("a", "done"), { pending = 100, now = 200 }), true)
-  eq("route-free: nil item -> false", core.sessionFree(nil, {}), false)
-  -- routePendingDone: satisfied (left done/idle) / held / timed out
-  eq("route-pending: nil marker -> false", core.routePendingDone(nil, "done", 100, 45), false)
-  eq("route-pending: flipped to working -> done", core.routePendingDone(50, "working", 60, 45), true)
-  eq("route-pending: still done within timeout -> held", core.routePendingDone(50, "done", 60, 45), false)
-  eq("route-pending: still done past timeout -> done", core.routePendingDone(50, "done", 100, 45), true)
-  -- routePick: determinism
-  local members = { sess("b", "done", { since = 50 }), sess("a", "done", { since = 80 }),
-                    sess("c", "working") }
-  eq("route-pick: longest-free wins", core.routePick(members, { now = 100 }), "b")
-  local tied = { sess("z", "done", { since = 50 }), sess("a", "done", { since = 50 }) }
-  eq("route-pick: key tiebreak ascending", core.routePick(tied, { now = 100 }), "a")
-  -- missing since reads as newest (lowest priority)
-  local noSince = { sess("a", "done", { since = nil }), sess("b", "done", { since = 70 }) }
-  eq("route-pick: missing since loses", core.routePick(noSince, { now = 100 }), "b")
-  eq("route-pick: all busy -> nil", core.routePick({ sess("a", "working") }, {}), nil)
-  eq("route-pick: empty members -> nil", core.routePick({}, {}), nil)
-  -- simultaneous finishers: one deterministic pick (the dispatcher feeds ONE per tick)
-  local simul = { sess("s2", "done", { since = 90 }), sess("s1", "done", { since = 90 }) }
-  eq("route-pick: simultaneous finishers -> single deterministic pick",
-     core.routePick(simul, { now = 100 }), "s1")
-  -- pending map blocks the just-fed session on the next tick (two-tick drain)
-  local two = { sess("s1", "done", { since = 90 }), sess("s2", "done", { since = 95 }) }
-  eq("route-pick: tick 1 picks s1", core.routePick(two, { now = 100, pending = {} }), "s1")
-  eq("route-pick: tick 2 skips pending s1",
-     core.routePick(two, { now = 101, pending = { s1 = 100 } }), "s2")
-  -- routeTask: double opt-in gating
-  local armed = { tasks = { "t" }, routing = true }
-  local unarmed = { tasks = { "t" } }
-  local free = { sess("a", "done") }
-  eq("route-task: happy path", core.routeTask(free, armed, { globalOn = true, now = 100 }).key, "a")
-  eq("route-task: global off -> nil", core.routeTask(free, armed, { globalOn = false, now = 100 }), nil)
-  eq("route-task: project unarmed -> nil", core.routeTask(free, unarmed, { globalOn = true, now = 100 }), nil)
-  eq("route-task: empty queue -> nil",
-     core.routeTask(free, { tasks = {}, routing = true }, { globalOn = true, now = 100 }), nil)
-  eq("route-task: nobody free -> nil",
-     core.routeTask({ sess("a", "working") }, armed, { globalOn = true, now = 100 }), nil)
-  -- L4 conditional routing: a "@role:" prefix routes to a session whose GROUP matches
-  eq("taskRoute: strips the prefix", select(2, core.taskRoute("@review: do the thing")), "do the thing")
-  eq("taskRoute: role lowercased", (core.taskRoute("@Review: x")), "review")
-  eq("taskRoute: no prefix -> nil role", core.taskRoute("just do it"), nil)
-  eq("taskRoute: bare prefix -> no role", core.taskRoute("@review:"), nil)
-  eq("taskRoute: bare prefix kept literal", select(2, core.taskRoute("@review:")), "@review:")
-  eq("memberRole: group lowercased", core.memberRole({ group = "Review" }), "review")
-  eq("memberRole: blank -> nil", core.memberRole({ group = "  " }), nil)
-  local roled = { sess("rv", "done", { since = 50, group = "review" }),
-                  sess("bd", "done", { since = 40, group = "build" }) }
-  eq("route-pick: role restricts the pool", core.routePick(roled, { now = 100, role = "review" }), "rv")
-  eq("route-pick: unmatched role -> nil", core.routePick(roled, { now = 100, role = "deploy" }), nil)
-  eq("route-pick: no role -> longest-free across all", core.routePick(roled, { now = 100 }), "bd")
-  local rq = { tasks = { "@review: ship it" }, routing = true }
-  eq("route-task: labeled head -> matching group",
-     core.routeTask(roled, rq, { globalOn = true, now = 100 }).key, "rv")
-  eq("route-task: labeled head returns role",
-     core.routeTask(roled, rq, { globalOn = true, now = 100 }).role, "review")
-  eq("route-task: label with no matching member -> nil",
-     core.routeTask(roled, { tasks = { "@deploy: x" }, routing = true }, { globalOn = true, now = 100 }), nil)
-  eq("route-starved: labeled head, no matching free -> starved",
-     core.queueStarved({ sess("bd", "done", { group = "build" }) },
-       { tasks = { "@review: x" }, routing = true }, { minutes = 1, sinceTs = 0, now = 1000 }), true)
-  -- L4 process modes: distribute (default) vs sequential (one routed task at a time)
-  eq("mode: default distribute", core.queueRouteMode({ tasks = { "x" } }), "distribute")
-  local seqQ = core.queueSetMode({ tasks = { "a", "b" }, routing = true }, "sequential")
-  eq("mode: set sequential", core.queueRouteMode(seqQ), "sequential")
-  eq("mode: preserves routing", core.queueRouted(seqQ), true)
-  eq("mode: preserves tasks", table.concat(seqQ.tasks, ","), "a,b")
-  eq("mode: setRouted preserves mode", core.queueRouteMode(core.queueSetRouted(seqQ, true)), "sequential")
-  eq("mode: survives a pop", core.queueRouteMode(select(2, core.queuePop(seqQ))), "sequential")
-  eq("mode: back to distribute", core.queueRouteMode(core.queueSetMode(seqQ, "distribute")), "distribute")
-  eq("busy: working -> true", core.projectBusy({ sess("a", "working") }, {}), true)
-  eq("busy: approval -> true", core.projectBusy({ sess("a", "approval") }, {}), true)
-  eq("busy: all done -> false", core.projectBusy({ sess("a", "done"), sess("b", "done") }, {}), false)
-  eq("busy: fresh pending -> true", core.projectBusy({ sess("a", "done") }, { pending = { a = 100 }, now = 110 }), true)
-  eq("busy: expired pending -> false", core.projectBusy({ sess("a", "done") }, { pending = { a = 100 }, now = 200 }), false)
-  local seqBusy = { sess("a", "done", { since = 50 }), sess("b", "working") }
-  eq("route-seq: holds while a member works",
-     core.routeTask(seqBusy, core.queueSetMode({ tasks = { "t" }, routing = true }, "sequential"),
-       { globalOn = true, now = 100 }), nil)
-  local seqIdle = { sess("a", "done", { since = 50 }), sess("b", "done", { since = 60 }) }
-  eq("route-seq: feeds when the project is idle",
-     core.routeTask(seqIdle, core.queueSetMode({ tasks = { "t" }, routing = true }, "sequential"),
-       { globalOn = true, now = 100 }).key, "a")
-  eq("route-dist: feeds despite a busy sibling (default)",
-     core.routeTask(seqBusy, { tasks = { "t" }, routing = true }, { globalOn = true, now = 100 }).key, "a")
-  -- R2-19: a STALE 'working' member must NOT count as in-flight (a dead/frozen session
-  -- would otherwise hold a sequential queue forever behind a corpse).
-  local seqStale = { sess("a", "done", { since = 50 }), sess("b", "working", { stale = true }) }
-  eq("busy: stale working member is NOT in-flight",
-     core.projectBusy(seqStale, {}), false)
-  eq("route-seq: feeds past a STALE working sibling (not held by a corpse)",
-     core.routeTask(seqStale, core.queueSetMode({ tasks = { "t" }, routing = true }, "sequential"),
-       { globalOn = true, now = 100 }).key, "a")
-  -- L4 join barriers: @all:/@any: hold a task until members finish
-  eq("barrier: @all parses", (core.taskBarrier("@all: merge")), "all")
-  eq("barrier: @all strips", select(2, core.taskBarrier("@all: merge")), "merge")
-  eq("barrier: @any parses", (core.taskBarrier("@any: go")), "any")
-  eq("barrier: @role is not a barrier", core.taskBarrier("@review: x"), nil)
-  eq("barrier: bare @all is literal", core.taskBarrier("@all:"), nil)
-  eq("barrier: composes with a role", select(2, core.taskBarrier("@all: @review: x")), "@review: x")
-  -- R3-05: uppercase barrier is recognized (case-insensitive, mirroring role lowercasing)
-  eq("barrier: @ALL parses (case-insensitive)", (core.taskBarrier("@ALL: merge")), "all")
-  eq("barrier: @Any parses (case-insensitive)", (core.taskBarrier("@Any: go")), "any")
-  -- an uppercase barrier strips to the bare body with NO spurious role
-  eq("barrier: @ALL stripped body has no role",
-     core.taskRoute(select(2, core.taskBarrier("@ALL: x"))), nil)
-  -- R3-06: leading whitespace does not defeat barrier/role parsing
-  eq("barrier: leading space tolerated", (core.taskBarrier("  @all: merge")), "all")
-  eq("barrier: leading tab tolerated", (core.taskBarrier("\t@any: go")), "any")
-  eq("route: leading space tolerated role", (core.taskRoute("  @review: x")), "review")
-  eq("route: leading space stripped body", select(2, core.taskRoute("  @review: x")), "x")
-  local allDone = { sess("a", "done"), sess("b", "done") }
-  local oneWorking = { sess("a", "done"), sess("b", "working") }
-  eq("barrier-met: all done -> all true", core.routeBarrierMet(allDone, "all"), true)
-  eq("barrier-met: one working -> all false", core.routeBarrierMet(oneWorking, "all"), false)
-  eq("barrier-met: one done -> any true", core.routeBarrierMet(oneWorking, "any"), true)
-  eq("barrier-met: none done -> any false", core.routeBarrierMet({ sess("a", "working") }, "any"), false)
-  eq("barrier-met: empty -> false", core.routeBarrierMet({}, "all"), false)
-  -- #36: a stale DONE member is the normal between-turns state (hook-written status
-  -- files go stale ~90s after Stop), NOT a corpse -- it is settled and routable
-  -- (sessionFree no longer rejects stale), so it counts on both sides. The old
-  -- exclusion made "@all:" forever-unsatisfiable (total==0 -> false) for a project
-  -- whose members all finished >90s ago.
-  eq("barrier-met: stale done counts as settled (#36)",
-     core.routeBarrierMet({ sess("a", "done", { stale = true }) }, "all"), true)
-  eq("#36-pin: @any: satisfiable by a long-done (display-stale) member",
-     core.routeBarrierMet({ sess("a", "done", { stale = true }),
-                            sess("b", "working") }, "any"), true)
-  -- R2-18: a stale MID-TURN (working/approval -- died or froze mid-turn, can never
-  -- settle) or remote sibling is EXCLUDED from the requirement, not a permanent
-  -- blocker -- counting it would make @all forever-unmet.
-  eq("barrier-met: stale sibling excluded -> all true",
-     core.routeBarrierMet({ sess("a", "done"), sess("b", "working", { stale = true }) }, "all"), true)
-  eq("barrier-met: remote sibling excluded -> all true",
-     core.routeBarrierMet({ sess("a", "done"), sess("b", "done", { remote = { host = "h" } }) }, "all"), true)
-  local bq = { tasks = { "@all: merge" }, routing = true }
-  eq("route-barrier: @all holds while one works",
-     core.routeTask(oneWorking, bq, { globalOn = true, now = 100 }), nil)
-  eq("route-barrier: @all routes when all done",
-     core.routeTask({ sess("a", "done", { since = 50 }), sess("b", "done", { since = 60 }) }, bq,
-       { globalOn = true, now = 100 }).key, "a")
-  eq("route-barrier: returns the barrier mode",
-     core.routeTask(allDone, bq, { globalOn = true, now = 100 }).barrier, "all")
-  eq("route-barrier: nested role honored after the barrier",
-     core.routeTask({ sess("rv", "done", { since = 50, group = "review" }),
-                      sess("bd", "done", { since = 40, group = "build" }) },
-       { tasks = { "@all: @review: ship" }, routing = true }, { globalOn = true, now = 100 }).key, "rv")
-  eq("route-barrier: blocked head is not starved",
-     core.queueStarved(oneWorking, bq, { minutes = 1, sinceTs = 0, now = 1000 }), false)
-  -- R1-18: routeFeedMatches re-validates the popped head against the chosen member so a
-  -- queue reorder during the dispatch delay can't feed a role-mismatched task.
-  local rvMember = sess("rv", "done", { since = 50, group = "review" })
-  local bdMember = sess("bd", "done", { since = 40, group = "build" })
-  local roleMembers = { rvMember, bdMember }
-  eq("feed-match: head @review: matches a review member",
-     core.routeFeedMatches(rvMember, "@review: ship", roleMembers), true)
-  eq("feed-match: head @review: does NOT match a build member (reorder hazard)",
-     core.routeFeedMatches(bdMember, "@review: ship", roleMembers), false)
-  eq("feed-match: an unaddressed head matches any member",
-     core.routeFeedMatches(bdMember, "plain task", roleMembers), true)
-  eq("feed-match: an unmet barrier head refuses the feed",
-     core.routeFeedMatches(rvMember, "@all: ship", oneWorking), false)
-  eq("feed-match: a met barrier + role head feeds the right member",
-     core.routeFeedMatches(rvMember, "@all: @review: ship", roleMembers), true)
-  eq("feed-match: nil item -> false", core.routeFeedMatches(nil, "x", roleMembers), false)
-  -- L4 per-task timing: fire on the first done edge after a feed, with the duration
-  eq("task-done: fires on working->done edge",
-     core.stepTaskDone({ ts = 100 }, "working", "done", 160).durationS, 60)
-  eq("task-done: no start -> nil", core.stepTaskDone(nil, "working", "done", 160), nil)
-  eq("task-done: not done yet -> nil", core.stepTaskDone({ ts = 100 }, "working", "working", 160), nil)
-  eq("task-done: already done (no edge) -> nil", core.stepTaskDone({ ts = 100 }, "done", "done", 160), nil)
-  eq("task-done: nil prev (post-reload) -> nil", core.stepTaskDone({ ts = 100 }, nil, "done", 160), nil)
-  eq("task-done: clamps negative", core.stepTaskDone({ ts = 200 }, "working", "done", 100).durationS, 0)
-  -- queueRouted / queueSetRouted round-trip; tasks preserved; legacy shape clean
-  eq("route-flag: legacy file unarmed", core.queueRouted({ tasks = { "x" } }), false)
-  local on = core.queueSetRouted({ tasks = { "x", "y" } }, true)
-  eq("route-flag: armed", core.queueRouted(on), true)
-  eq("route-flag: tasks preserved", table.concat(on.tasks, ","), "x,y")
-  local off = core.queueSetRouted(on, false)
-  eq("route-flag: disarmed", core.queueRouted(off), false)
-  eq("route-flag: off leaves no key (legacy shape)", off.routing, nil)
-  eq("route-flag: nil queue tolerated", core.queueRouted(core.queueSetRouted(nil, false)), false)
-  -- EVERY queue rebuild must carry the arm flag: a routed feed pops + writes
-  -- the queue back, and dropping `routing` there would silently disarm the
-  -- project on its first fed task. Same for add/move/remove/bulk on an armed
-  -- queue. (Regression: queuePop originally rebuilt a bare {tasks} shape.)
-  local _, popped = core.queuePop(on)
-  eq("route-flag: pop preserves arm flag", core.queueRouted(popped), true)
-  eq("route-flag: push preserves arm flag", core.queueRouted(core.queuePush(on, "z")), true)
-  local moved = core.queueMove(on, 1, 1, "x")
-  eq("route-flag: move preserves arm flag", core.queueRouted(moved), true)
-  local removedQ = core.queueRemoveAt(on, 1, "x")
-  eq("route-flag: remove preserves arm flag", core.queueRouted(removedQ), true)
-  eq("route-flag: bulk add preserves arm flag", core.queueRouted(core.queuePushAll(on, { "n" })), true)
-  -- queueMerge: the DESTINATION (project) queue's flag wins on adoption
-  eq("route-flag: merge keeps destination arm", core.queueRouted(core.queueMerge(on, unarmed)), true)
-  eq("route-flag: merge unarmed destination stays off", core.queueRouted(core.queueMerge(unarmed, on)), false)
-  -- unarmed queues still serialize to the legacy plain shape
-  local _, plainPop = core.queuePop(unarmed)
-  eq("route-flag: unarmed pop has no routing key", plainPop.routing, nil)
-  -- queueStarved
-  local busy = { sess("a", "working") }
-  eq("starve: armed+depth+nobody free past threshold",
-     core.queueStarved(busy, armed, { minutes = 5, sinceTs = 100, now = 100 + 301 }), true)
-  eq("starve: within threshold -> false",
-     core.queueStarved(busy, armed, { minutes = 5, sinceTs = 100, now = 100 + 299 }), false)
-  eq("starve: free member -> false",
-     core.queueStarved(free, armed, { minutes = 5, sinceTs = 100, now = 999 }), false)
-  eq("starve: minutes 0 -> never", core.queueStarved(busy, armed, { minutes = 0, sinceTs = 0, now = 999 }), false)
-  eq("starve: unarmed -> false", core.queueStarved(busy, unarmed, { minutes = 5, sinceTs = 100, now = 999 }), false)
-  -- R1-16: a SEQUENTIAL queue with its one task in flight is PROGRESSING, not starved
-  -- (the lone working member makes routePick nil, which the distribute path reads as
-  -- starvation). The distribute queue with the same busy member still starves.
-  local seqArmed = core.queueSetMode({ tasks = { "t" }, routing = true }, "sequential")
-  eq("starve: sequential busy is NOT starved",
-     core.queueStarved(busy, seqArmed, { minutes = 5, sinceTs = 100, now = 100 + 301 }), false)
-  eq("starve: distribute busy (same member) still starves (control)",
-     core.queueStarved(busy, armed, { minutes = 5, sinceTs = 100, now = 100 + 301 }), true)
 end
 
 -- ---- Fleet-wide search (roadmap #3): argv builders + result parsing ---------
@@ -5406,14 +5030,13 @@ do
   eq("fleetStandup: allow counted", r.decisions.allow, 1)
   eq("fleetStandup: provenance records who decided (router)", r.provenance.router, 1)
   eq("fleetStandup: auto-respawn tallied", r.autoActions.auto_respawn, 1)
-  -- R2-13: only the DELIVERED task_feed counts; task_feed_skipped does NOT.
-  eq("fleetStandup: routed feeds counted (delivered only)", r.autoActions.routed, 1)
+  -- 2026-11-19, REQUIREMENT CHANGE: the routed-feed count and the task_done rollup went with the task
+  -- queue; old task_feed / task_done events in a ledger are simply not counted any more.
+  eq("fleetStandup: routed feeds aren't counted (no queue since 2026-11-19)", r.autoActions.routed, nil)
   eq("fleetStandup: escalation problem tallied", r.problems.escalation, 1)
   eq("fleetStandup: pre-window event excluded (prompts=alpha1+beta1)", r.totals.prompts, 2)
   check("fleetStandup: byProject rollup present", #r.byProject >= 2)
-  eq("fleetStandup: task_done count", r.tasks.done, 2)
-  eq("fleetStandup: task_done total seconds", r.tasks.totalSeconds, 120)
-  eq("fleetStandup: task_done avg seconds", r.tasks.avgSeconds, 60)
+  eq("fleetStandup: no task_done rollup (no queue since 2026-11-19)", r.tasks, nil)
   local empty = core.fleetStandup({}, { sinceTs = 0 })
   check("fleetStandup: empty window flagged", empty.empty == true)
 
@@ -5422,7 +5045,7 @@ do
   check("standupMarkdown: carries the window label", md:find("since open", 1, true) ~= nil)
   check("standupMarkdown: reports approvals line", md:find("1 allow / 1 deny", 1, true) ~= nil)
   check("standupMarkdown: lists provenance (router)", md:find("router", 1, true) ~= nil)
-  check("standupMarkdown: reports routed tasks completed", md:find("Routed tasks completed: 2", 1, true) ~= nil)
+  check("standupMarkdown: no routed-task lines (no queue since 2026-11-19)", md:find("Routed", 1, true) == nil)
   check("standupMarkdown: by-project section present", md:find("By project:", 1, true) ~= nil)
   local mdEmpty = core.standupMarkdown(core.fleetStandup({}, { sinceTs = 0 }), { windowLabel = "8h" })
   check("standupMarkdown: empty window explains the ledger", mdEmpty:find("ledger must be enabled", 1, true) ~= nil)
@@ -9282,8 +8905,6 @@ do
   eq("guard: a lone session still gets its keystroke", r.last().op, "actOnWindow")
   eq("guard: ...and its target names the session", r.last().tgt and r.last().tgt.key, "c")
 
-  check("guard: the router never picks a shared-window session", not core.sessionFree(vs("s", "100", { sharedWindow = 2 })))
-  check("guard: ...a lone finished session is still free", core.sessionFree(vs("c", "200")))
   -- 2026-09-15 requirement change: the /rc sweep types into terminal sessions only, so no VS Code
   -- session -- shared or lone -- is ever a target (the extension has no /rc; see rcsweep above).
   local sweep = core.remoteControlSweepTargets({ vs("s", "100", { sharedWindow = 2, session_id = "s" }),
@@ -12227,21 +11848,6 @@ do
   eq("typingHeld: released when the status changes",
      core.typingHeld(held, { key = "k1", status = "working", updated = 500 }), false)
   eq("typingHeld: another session isn't held", core.typingHeld(held, { key = "k2", status = "done", updated = 500 }), false)
-
-  -- the router: a held member is skipped for the pick only -- it still counts for a sequential
-  -- queue's busy check and a barrier, so holding a working member can't let a second task in
-  local rq = { routing = true, tasks = { "t1" } }
-  local mA = { key = "a", status = "done", since = 1, cwd = "/p" }
-  local mB = { key = "b", status = "done", since = 2, cwd = "/p" }
-  eq("routeTask: the longest-idle member is picked", (core.routeTask({ mA, mB }, rq, { globalOn = true }) or {}).key, "a")
-  eq("routeTask: a held member is skipped; the next free one is picked",
-     (core.routeTask({ mA, mB }, rq, { globalOn = true, skip = { a = true } }) or {}).key, "b")
-  eq("routeTask: nobody free when every member is held",
-     core.routeTask({ mA, mB }, rq, { globalOn = true, skip = { a = true, b = true } }), nil)
-  local seq = { routing = true, mode = "sequential", tasks = { "t1" } }
-  local busy = { key = "w", status = "working", since = 0, cwd = "/p" }
-  eq("routeTask: a held working member still holds a sequential queue",
-     core.routeTask({ busy, mB }, seq, { globalOn = true, skip = { w = true } }), nil)
 end
 
 -- ---- auto-continue backs off when turns change nothing (2026-09-28) ----
@@ -13146,7 +12752,9 @@ do
   -- every kind names the config block whose .dryRun switches it alone
   local byKind = {}
   for _, k in ipairs(core.AUTOMATION_KINDS or {}) do byKind[k.kind] = k end
-  for _, want in ipairs({ { "continue", "autoContinue" }, { "feed", "queue" }, { "route", "queue" }, { "rule", "rules" },
+  -- 2026-11-19, REQUIREMENT CHANGE: auto-feed ("feed") and routing ("route"), queue.dryRun's kinds, went
+  -- with the task queue, and the queue's typists and switch below are gone.
+  for _, want in ipairs({ { "continue", "autoContinue" }, { "rule", "rules" },
                           { "respawn", "respawn" }, { "summary", "summary" },
                           { "tabless_end", "tabless" }, { "mailbox", "mailbox" }, { "rc", "remoteControl" } }) do
     eq("dry run: " .. want[1] .. " is switched by " .. want[2] .. ".dryRun", byKind[want[1]] and byKind[want[1]].feature, want[2])
@@ -13156,13 +12764,17 @@ do
   -- 2026-09-30: 10 -> 11 kinds, for "restart" (the requirement grew by one kind; nothing was removed)
   -- 2026-11-19: 11 -> 10, REQUIREMENT CHANGE: restart in place was removed, and its kind with it
   -- 2026-11-19: 10 -> 9, REQUIREMENT CHANGE: resume at the limit reset was removed, and its kind with it
-  check("dry run: every kind has a label for the Trace", labelled and #(core.AUTOMATION_KINDS or {}) == 9)
+  -- 2026-11-19: 9 -> 7, REQUIREMENT CHANGE: auto-feed and routing were removed with the task queue
+  check("dry run: every kind has a label for the Trace", labelled and #(core.AUTOMATION_KINDS or {}) == 7)
   check("dry run: no restart kind or typist (restart in place was removed 2026-11-19)",
         byKind.restart == nil and (core.AUTOMATION_TYPISTS or {}).restart == nil)
   check("dry run: no resume kind or typist (resume at the limit reset was removed 2026-11-19)",
         byKind.resume == nil and (core.AUTOMATION_TYPISTS or {}).resume == nil)
+  check("dry run: no feed or route kind, no autofeed or router typist (the task queue was removed 2026-11-19)",
+        byKind.feed == nil and byKind.route == nil and (core.AUTOMATION_TYPISTS or {}).autofeed == nil
+        and (core.AUTOMATION_TYPISTS or {}).router == nil)
   -- every automated typist maps to its kind
-  for typist, kind in pairs({ autofeed = "feed", router = "route", ["rule-nudge"] = "rule", ["rule-continue"] = "rule",
+  for typist, kind in pairs({ ["rule-nudge"] = "rule", ["rule-continue"] = "rule",
                               ["auto-continue"] = "continue", summary = "summary", mailbox = "mailbox",
                               ["rc-sweep"] = "rc" }) do
     eq("dry run: typist " .. typist .. " is kind " .. kind, (core.AUTOMATION_TYPISTS or {})[typist], kind)
@@ -13170,7 +12782,7 @@ do
 
   local dry = core.automationDryRun
   eq("dry run: no config -> live", dry and dry(nil, "continue"), false)
-  eq("dry run: an empty config -> live", dry and dry({}, "feed"), false)
+  eq("dry run: an empty config -> live", dry and dry({}, "rule"), false)
   local all = { automation = { dryRun = true } }
   local d1, s1 = dry(all, "respawn")
   check("dry run: automation.dryRun puts every kind in dry run  (" .. tostring(s1) .. ")", d1 == true and s1 == "all")
@@ -13178,12 +12790,10 @@ do
   local one = { autoContinue = { dryRun = true } }
   local d2, s2 = dry(one, "continue")
   check("dry run: autoContinue.dryRun -> auto-continue alone  (" .. tostring(s2) .. ")", d2 == true and s2 == "autoContinue")
-  eq("dry run: ...the queue stays live", dry(one, "feed"), false)
-  local q = { queue = { dryRun = true } }
-  check("dry run: queue.dryRun covers auto-feed and routing", dry(q, "feed") == true and dry(q, "route") == true)
-  eq("dry run: ...not a rule", dry(q, "rule"), false)
-  eq("dry run: only true switches it (a string \"true\" is not)", dry({ automation = { dryRun = "true" } }, "feed"), false)
-  eq("dry run: a feature block that isn't a table", dry({ queue = true }, "feed"), false)
+  eq("dry run: ...rules stay live", dry(one, "rule"), false)
+  eq("dry run: only true switches it (a string \"true\" is not)", dry({ automation = { dryRun = "true" } }, "rule"), false)
+  eq("dry run: a feature block that isn't a table", dry({ rules = true }, "rule"), false)
+  eq("dry run: the queue's old switch does nothing now", dry({ queue = { dryRun = true } }, "feed"), false)
   local st = core.dryRunState({ automation = { dryRun = false }, rules = { dryRun = true }, mailbox = { dryRun = true } })
   check("dry run: the state lists the features switched on, in Settings order",
         st and st.all == false and st.on == true and #st.features == 2 and st.features[1] == "rules" and st.features[2] == "mailbox")
@@ -13192,26 +12802,27 @@ do
   check("dry run: ...all of it", core.dryRunState(all).all == true and core.dryRunState(all).on == true)
 
   -- Settings sends the switches as a map; they land in their own blocks and nothing else moves
-  local cfg = { queue = { autofeed = true }, rules = { enabled = true }, automation = { dryRun = true } }
-  core.applyDryRunFlags(cfg, { automation = false, rules = true, queue = true, tabless = false, bogus = true })
+  local cfg = { autoContinue = { enabled = true }, rules = { enabled = true }, automation = { dryRun = true } }
+  core.applyDryRunFlags(cfg, { automation = false, rules = true, autoContinue = true, tabless = false, bogus = true, queue = true })
   eq("dry run flags: automation.dryRun off", cfg.automation.dryRun, false)
   eq("dry run flags: rules.dryRun on", cfg.rules.dryRun, true)
   eq("dry run flags: ...rules.enabled untouched", cfg.rules.enabled, true)
-  eq("dry run flags: queue.dryRun on, autofeed untouched", cfg.queue.dryRun == true and cfg.queue.autofeed, true)
+  eq("dry run flags: autoContinue.dryRun on, enabled untouched", cfg.autoContinue.dryRun == true and cfg.autoContinue.enabled, true)
   eq("dry run flags: a block that wasn't there is made", type(cfg.tabless) == "table" and cfg.tabless.dryRun, false)
   eq("dry run flags: an unknown feature is ignored", cfg.bogus, nil)
-  local same = { queue = { dryRun = true } }
+  eq("dry run flags: ...the removed queue too (2026-11-19)", cfg.queue, nil)
+  local same = { rules = { dryRun = true } }
   core.applyDryRunFlags(same, nil)
-  eq("dry run flags: no map leaves the config alone", same.queue.dryRun, true)
-  core.applyDryRunFlags(same, { queue = "yes" })
-  eq("dry run flags: a non-boolean is ignored", same.queue.dryRun, true)
+  eq("dry run flags: no map leaves the config alone", same.rules.dryRun, true)
+  core.applyDryRunFlags(same, { rules = "yes" })
+  eq("dry run flags: a non-boolean is ignored", same.rules.dryRun, true)
 
   -- Settings Save keeps each switch (a form that doesn't send one never drops it)
   local keeps = function(block)
     for _, k in ipairs(core.SETTINGS_KEEP_SUBKEYS[block] or {}) do if k == "dryRun" then return true end end
     return false
   end
-  for _, block in ipairs({ "automation", "queue", "autoContinue", "rules", "respawn", "summary",
+  for _, block in ipairs({ "automation", "autoContinue", "rules", "respawn", "summary",
                            "tabless", "mailbox", "remoteControl" }) do
     check("dry run: " .. block .. ".dryRun is in SETTINGS_KEEP_SUBKEYS", keeps(block))
   end

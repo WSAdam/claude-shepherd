@@ -727,14 +727,8 @@ do
         src:find("pcall(steps[i])", 1, true) ~= nil)
   check("ladder-pin: sendKeys pcalls each keystroke",
         src:find("pcall(function() hs.eventtap.keyStroke(k.mods or {}, k.key) end)", 1, true) ~= nil)
-  -- R1-17: writeQueue is durable (temp+rename) and readQueue backs up an undecodable
-  -- file instead of silently stripping its routing/mode flags.
-  check("queue-pin: writeQueue writes via temp+rename (durable)",
-        src:find('local tmp = path .. ".tmp." .. tostring(FX.now())', 1, true) ~= nil
-        and src:find("if not os.rename(tmp, path) then os.remove(tmp) end", 1, true) ~= nil)
-  check("queue-pin: readQueue backs up an undecodable queue (no silent disarm)",
-        src:find("undecodable queue", 1, true) ~= nil
-        and src:find('local bak = path .. ".bad." .. tostring(FX.now())', 1, true) ~= nil)
+  -- 2026-11-19, REQUIREMENT CHANGE: the task queue was removed (see "The task queue, auto-feed and project
+  -- routing are gone"); the R1-17 queue-pins (durable writeQueue, readQueue's backup) went with it.
   -- R3-09: the JS actionableKeys twin must mirror core.remoteActionAllowed (remote
   -- approve/deny only when gate=='waiting'). There is NO remote-keystroke transport, so
   -- nudge/stop/clear/compact must NEVER be bulk-eligible for a remote tile -- the JS twin
@@ -842,8 +836,9 @@ do
   -- dispatches through dispatchSerialized itself -- still serialized, pinned via twrSerialized.
   local twrSerialized = (src:match("function FX%.typeWhenReady%(it, typist, fn, opts%)(.-)\nend\n") or "")
     :find("dispatchSerialized(it, typist, function()", 1, true) ~= nil
-  check("inject-pin: refresh() auto-feed serialized (pop inside the slot)",
-        twrSerialized and src:find('FX.typeWhenReady(it, "autofeed", function()\n          FX.feedGuard(function()', 1, true) ~= nil)
+  -- 2026-11-19, REQUIREMENT CHANGE: the task queue was removed (see "The task queue, auto-feed and project
+  -- routing are gone"); auto-feed's slot pin is now FX.typeWhenReady's own.
+  check("inject-pin: FX.typeWhenReady dispatches through dispatchSerialized", twrSerialized)
   check("inject-pin: per-tile close no longer skips the tail",
         src:find('dispatchSerialized(item, a, function() core.handleAction(FX, item, "close") end)', 1, true) ~= nil)
   check("inject-pin: ctx-menu clear serialized",
@@ -1076,21 +1071,8 @@ do
   check("l3-pin: render target switch", src:find("var tplRenderTarget", 1, true) ~= nil)
   check("l3-pin: modal render targets n-task", src:find('tplRenderTarget = "n-task"', 1, true) ~= nil)
   check("l3-pin: modal required-var gates Use", src:find('document.getElementById("m-tpl-go")', 1, true) ~= nil)
-  -- Inc 4: queue render-before-feed — {{prev_output}}/built-ins resolved before the paste,
-  -- raw task still popped/persisted; keepMissing so non-template queues are byte-unaffected.
-  check("l3-pin: renderFeed helper", src:find("local function renderFeed(task, item)", 1, true) ~= nil)
-  check("l3-pin: renderFeed uses keepMissing", src:find("keepMissing = true", 1, true) ~= nil)
-  check("l3-pin: renderFeed prevOutput from item.activity", src:find("item.activity", 1, true) ~= nil)
-  -- every feed site renders before typing; none feeds the raw task verbatim
-  -- 2026-09-29 (unit 26): renderFeed can refuse a task packet, so each site renders into `typed`
-  -- first (keeping the task on nil) and types exactly that -- same requirement, new shape
-  -- 2026-11-17: the Queue tab's Feed next (the manual site) was pruned with the tab -- autofeed + router remain
-  check("l3-pin: both feed sites render",
-        select(2, src:gsub("local typed, notFed = renderFeed%(task, %a+%)", "")) == 2
-        and select(2, src:gsub("FX%.feedTask%(winTarget%([a-z]+%), typed, pre and pre%.cmd%)", "")) == 2)
-  check("l3-pin: no feed site bypasses render",
-        src:find("FX.feedTask(winTarget(item), task)", 1, true) == nil
-        and src:find("FX.feedTask(winTarget(it), task)", 1, true) == nil)
+  -- 2026-11-19, REQUIREMENT CHANGE: the task queue was removed (see "The task queue, auto-feed and project
+  -- routing are gone"); Inc 4's render-before-feed pins (renderFeed) went with it.
   -- Inc 5: definition source — import *.prompt/*.md from a local dir via cc-core
   check("l3-pin: PROMPTS_DIR constant", src:find("local PROMPTS_DIR", 1, true) ~= nil)
   check("l3-pin: FX.listPromptFiles", src:find("function FX.listPromptFiles(dir)", 1, true) ~= nil)
@@ -1098,31 +1080,9 @@ do
   check("l3-pin: import via cc-core promptImport", src:find("core.promptImport(FX.readTemplates()", 1, true) ~= nil)
   check("l3-pin: sourceDir config override", src:find('core.config(loadConfig(), "templates.sourceDir"', 1, true) ~= nil)
   check("l3-pin: JS import row", src:find("function templateImport()", 1, true) ~= nil)
-  -- L4 Inc 1: renderFeed strips the @role: routing prefix before typing
-  check("l4-pin: renderFeed strips @role:", src:find("local _, bare = core.taskRoute(afterBarrier)", 1, true) ~= nil)
-  -- L4 Inc 1 (review fix): applyGroups MUST run before the routing dispatcher, or
-  -- every tile's .group is nil at route time and labeled tasks starve. Guard the order.
-  do
-    local agPos = src:find("core.applyGroups(list, groups)", 1, true)
-    local rtPos = src:find("core.routeTask(members, q", 1, true)
-    check("l4-pin: applyGroups runs before the router (so .group is set for @role:)",
-          agPos ~= nil and rtPos ~= nil and agPos < rtPos)
-  end
-  -- L4 Inc 2: process modes (sequential vs distribute). The Queue tab's seq toggle went with the
-  -- tab (pruned 2026-11-17); the mode still rides the queue file and the tile.
-  check("l4-pin: tile carries routeSeq", src:find("it.routeSeq = (core.queueRouteMode(q)", 1, true) ~= nil)
-  -- L4 Inc 3: renderFeed strips the @all:/@any: join barrier before typing
-  check("l4-pin: renderFeed strips barrier", src:find("local _, afterBarrier = core.taskBarrier(tostring(task or ", 1, true) ~= nil)
-  -- L4 Inc 4: per-task timing — stamp at feed, ledger task_done on the done edge
-  check("l4-pin: taskStart map", src:find("local taskStart", 1, true) ~= nil)
-  check("l4-pin: stampTaskStart helper", src:find("local function stampTaskStart(item, task, by)", 1, true) ~= nil)
-  check("l4-pin: stamps at both feed sites",   -- 2026-11-17: the Queue tab's Feed next (the manual site) was pruned with the tab -- autofeed + router remain
-        select(2, src:gsub('stampTaskStart%(it[em]*, task, "', "")) == 2)
-  check("l4-pin: task_done via stepTaskDone", src:find("core.stepTaskDone(started, pv and pv.status", 1, true) ~= nil)
-  check("l4-pin: task_done ledger event", src:find('type = "task_done", durationS', 1, true) ~= nil)
-  -- L4 review fix: taskStart has no self-expiry -> must abandon on stale + reap vanished keys
-  check("l4-pin: abandon timer on stale", src:find("taskStart[it.key] = nil  -- abandon", 1, true) ~= nil)
-  check("l4-pin: reap vanished task timers", src:find("core.reapUnbacked(taskStart, newPrev)", 1, true) ~= nil)
+  -- 2026-11-19, REQUIREMENT CHANGE: the task queue was removed (see "The task queue, auto-feed and project
+  -- routing are gone"); the L4 pins (@role:/@all: routing, applyGroups before the
+  -- router, sequential mode, per-task timing and its reaping) went with it.
   -- L5 Inc 1: error-reason taxonomy — tile carries the cause, badge + fresh-edge ledger
   check("l5-pin: tile carries error_reason", src:find("it.error_reason = err.reason", 1, true) ~= nil)
   check("l5-pin: cause badge on the error tile", src:find("it.error_reason.replace(/_/g", 1, true) ~= nil)
@@ -1318,11 +1278,7 @@ do
   -- new triggers fired at their detection sites + new processors in the engine
   check("l6trig-pin: loop trigger fired on rising edge", src:find('runRules(ruleSet, it, "loop")', 1, true) ~= nil)
   check("l6trig-pin: hung trigger fired on rising edge", src:find('runRules(ruleSet, it, "hung")', 1, true) ~= nil)
-  check("l6trig-pin: starved trigger fired on rising edge", src:find('runRules(ruleSet, members[1], "starved")', 1, true) ~= nil)
-  check("l6proc-pin: feed processor enqueues via queuePush",
-        src:find("core.queuePush(FX.readQueue(qk), tostring(p.text))", 1, true) ~= nil)
-  check("l6proc-pin: feed key sanitized like the reader (review fix)",
-        src:find("review%-caught silent data loss") ~= nil)
+  -- 2026-11-19, REQUIREMENT CHANGE: the starved trigger and the feed processor went with the task queue
   -- 2026-09-28 requirement change: the continue now carries Shepherd's mark; same delivery-gated path.
   check("l6proc-pin: continue processor delivery-gated",
         src:find('core.handleAction(FX, target, "continue", core.shepherdSays("continue"))', 1, true) ~= nil)
@@ -1530,12 +1486,7 @@ do
   check("r2-23-pin: watchdog + draining reaped on tile vanish",
         src:find("core.reapUnbacked(watchdog, newPrev)", 1, true) ~= nil
         and src:find("core.reapUnbacked(draining, newPrev)", 1, true) ~= nil)
-  -- R3-20: routePending + starved* are reaped so vanished tiles/projects can't leak
-  check("r3-20-pin: routePending reaped on tile vanish",
-        src:find("core.reapUnbacked(routePending, newPrev)", 1, true) ~= nil)
-  check("r3-20-pin: starved* reaped against live queueKeys",
-        src:find("core.reapUnbacked(starvedSince, liveQk)", 1, true) ~= nil
-        and src:find("core.reapUnbacked(starvedAlerted, liveQk)", 1, true) ~= nil)
+  -- (R3-20's routePending + starved* reaps went with the task queue, 2026-11-19 -- requirement change)
   -- R3-24: refresh() has a re-entrancy guard (a kitty feed's waitUntilExit pumps the loop)
   check("r3-24-pin: refresh re-entrancy guard",
         src:find("if FX._refreshBusy then return end", 1, true) ~= nil
@@ -1746,9 +1697,7 @@ do
         src:find('ck("s-ins-host",   cv(cfg,"insights.hostStats",false))', 1, true) ~= nil
         and src:find('hostStats: ck("s-ins-host")', 1, true) ~= nil
         and src:find('id="s-ins-host"', 1, true) ~= nil)
-  check("host-pin: starvation alert notes host pressure when present",
-        src:find("lastHostHealth.pressured and lastHostHealth.pressure", 1, true) ~= nil
-        and src:find("hostPressure = pressure", 1, true) ~= nil)
+  -- (2026-11-19, requirement change: the starvation alert that noted host pressure went with the task queue)
 
   -- ===== #7 session-history browser + bulk history management =====
   -- the uncapped read + aggregate + ccHistory push are single-sourced in FX.sendHistory so the
@@ -1814,8 +1763,7 @@ do
   -- the count/skip + cc-*.json decisions now live in pure core (behavior-tested: sumdir:* /
   -- matchstate:*); FX.storageEntries is a thin readDir+attributes adapter (nil-guarded).
   check("hist-pin: storageEntries measures Shepherd state via pure core helpers, NOT Claude transcripts",
-        src:find('name = "Audit ledger"', 1, true) ~= nil
-        and src:find('name = "Task queues"', 1, true) ~= nil
+        src:find('name = "Audit ledger"', 1, true) ~= nil   -- 2026-11-19: "Task queues" went with the queue
         and src:find("core.sumDirBytes(", 1, true) ~= nil
         and src:find("core.matchStateFiles(FX.readDir(claudeDir) or {})", 1, true) ~= nil)
   check("hist-pin: History tab wired (button + filter row + auditTab branch)",
@@ -1928,24 +1876,11 @@ do
   -- The model switch + the task feed are ONE atomic delivery via pasteIntoWindow's
   -- preface (so the pop/commit can't race a 2nd tick); the switch is local-native only
   -- and ledgered ONLY on a delivered feed.
-  check("dr6-pin: feedTask carries an optional slash preface into one paste",
-        src:find("function FX.feedTask(target, task, preface)", 1, true) ~= nil
-        and src:find("text = task, preface = preface", 1, true) ~= nil)
+  -- 2026-11-19, REQUIREMENT CHANGE: the task queue went, and with it the feed this switch rode on --
+  -- FX.feedTask, FX.autoModelPreface and both feed sites' pins below are gone.
   check("dr6-pin: pasteIntoWindow submits the preface then settles before the main text",
         src:find("local preface =", 1, true) ~= nil
         and src:find("after(0.5, function() runFrom(1) end)", 1, true) ~= nil)
-  check("dr6-pin: autoModelPreface is local-native-only + classifies the rendered task",
-        src:find("function FX.autoModelPreface(item, task)", 1, true) ~= nil
-        and src:find("core.isAnthropicSession(item.model, item.base_url)", 1, true) ~= nil
-        and src:find("core.suggestModel(typed, loadConfig())", 1, true) ~= nil)  -- R1-32: rendered, not bare template
-  -- both feed sites (autofeed / router) consult it + ledger on delivery
-  -- 2026-11-17: the Queue tab's Feed next (the manual site) was pruned with the tab -- autofeed + router remain
-  do
-    local n = 0; for _ in src:gmatch("= FX%.autoModelPreface%(") do n = n + 1 end  -- call sites, not the def
-    check("dr6-pin: both feed sites consult autoModelPreface", n == 2)
-    local m = 0; for _ in src:gmatch('type = "model_change", from = pre%.from') do m = m + 1 end
-    check("dr6-pin: model_change ledgered (by=auto) at both sites, gated on commit.persist", m == 2)
-  end
   check("dr6-pin: per-session opt-in file (presence=on), off by default, NEVER fleet-wide",
         src:find("function FX.autoModelOn(key)", 1, true) ~= nil
         and src:find("function FX.setAutoModel(key, on)", 1, true) ~= nil
@@ -1963,30 +1898,12 @@ do
   check("dr6-pin: per-tile auto_model/anthropic decoration is local-native short-circuited",
         src:find("it.anthropic = core.isAnthropicSession(it.model, it.base_url)", 1, true) ~= nil
         and src:find('it.auto_model = (not it.remote) and it.anthropic and it.editor ~= "kitty" and it.editor ~= "terminal"', 1, true) ~= nil)
-  -- review fixes (round 1):
-  check("dr6-fix: auto-routing restricted to chat-input editors (kitty/terminal skipped)",
-        src:find('item.editor == "kitty" or item.editor == "terminal" then return nil', 1, true) ~= nil)
-  -- R1-32: classify on the RENDERED (template-expanded) text, not the raw template.
-  check("r1-32-pin: autoModelPreface classifies the rendered feed text",
-        src:find("local typed = renderFeed(task, item)", 1, true) ~= nil
-        and src:find("local s = core.suggestModel(typed, loadConfig())", 1, true) ~= nil)
-  check("dr6-fix: same-tier skip is nil-family-safe (no nil==nil wrong-skip)",
-        src:find("if (sf and cf == sf) or cur == s.model then return nil end", 1, true) ~= nil)
-  -- R3-03: the no-op check compares against the LIVE model (live_model from the transcript
-  -- tail), not the stale spawn-time snapshot that refreshList reverts within 1s.
-  check("r3-03-pin: autoModelPreface compares against the live model",
-        src:find("local cur = item.live_model or item.model", 1, true) ~= nil)
-  check("r3-03-pin: delivered/manual model switch persisted via patchStatus(model)",
-        src:find("FX.patchStatus(item.key, { model = pre.model })", 1, true) ~= nil
-        and src:find("FX.patchStatus(item.key, { model = item.model })", 1, true) ~= nil)
+  -- (2026-11-19: the delivered-feed half went with the queue; the manual switch still persists)
+  check("r3-03-pin: a manual model switch is persisted via patchStatus(model)",
+        src:find("FX.patchStatus(item.key, { model = item.model })", 1, true) ~= nil)
   check("dr6-fix: kitty preface concatenated into ONE send-text (ordered, no socket race)",
         src:find("function dispatchSerialized(item, action, fn, extraStagger)", 1, true) ~= nil
         and src:find("BULK_STAGGER + (tonumber(extraStagger) or 0)", 1, true) ~= nil)
-  do
-    local n = 0; for _ in src:gmatch("item%.auto_model and 0%.8 or 0") do n = n + 1 end
-    local m = 0; for _ in src:gmatch("it%.auto_model and 0%.8 or 0") do m = m + 1 end
-    check("dr6-fix: both feed sites reserve extra stagger for the preface ladder", (n + m) == 2)   -- 2026-11-17: Feed next pruned
-  end
 
   -- ---- DR7: A/B fork-to-compare (panel flow, worktree isolation) --------------
   -- A/B is now a PER-PROJECT action (tile right-click menu), not a global header button.
@@ -2638,16 +2555,7 @@ do
         src:find("elseif awaiting ~= true and FX._healedApproval[it.key] ~= nil", 1, true) ~= nil
         and src:find("FX._healedApproval[it.key] == it.updated", 1, true) ~= nil)
 
-  -- #4: per-task timing abandons taskStart only past the RESPAWN death threshold
-  -- (autoRespawnStale, default 600s), not the 90s display staleness -- a healthy
-  -- session running one long build/test goes display-stale mid-task and its
-  -- task_done record was silently lost.
-  check("#4-pin: abandon keyed to the respawn death threshold",
-        src:find("if it.updated ~= nil and (now - it.updated) > autoRespawnStale then", 1, true) ~= nil)
-  check("#4-pin: abandon comment names the death threshold",
-        src:find("taskStart[it.key] = nil  -- abandon: frozen past the death threshold", 1, true) ~= nil)
-  check("#4-pin: the old display-staleness abandon is gone",
-        src:find("abandon: a frozen session's in-flight task can't be timed", 1, true) == nil)
+  -- #4: per-task timing's abandon pins went with the task queue (2026-11-19, requirement change).
 
   -- #5: voice dictation adapts the raw status item via winTarget (the kitty path
   -- reads camelCase kittyWindowId/kittyListenOn; the raw snake_case item nil'd
@@ -3247,27 +3155,12 @@ do
           and w:find("b.task:terminate()", 1, true) ~= nil)
   end
 
-  -- #34: the queue pop -> deliver -> persist critical section is single-flight
-  -- (FX.feedGuard): a kitty delivery's waitUntilExit PUMPS the run loop, letting
-  -- a nested tick/bridge message re-read the still-unwritten queue and pop +
-  -- deliver the same head twice.
-  check("#34-pin: FX.feedGuard defined",
-        src:find("function FX.feedGuard(fn)", 1, true) ~= nil)
-  do
-    local body = src:match("function FX%.feedGuard%(fn%)(.-)\nend") or ""
-    check("#34-pin: guard is pcall'd so a throw can't latch the flag",
-          body:find("local ok, err = pcall(fn)", 1, true) ~= nil
-          and body:find("FX._queueFeedBusy = false", 1, true) ~= nil)
-  end
-  -- 2026-11-17: the Queue tab's Feed next (the manual site) was pruned with the tab -- autofeed + router remain
-  eq("#34-pin: both feed sites are guarded (autofeed + router)",
-     select(2, src:gsub("FX%.feedGuard%(function%(%)", "")), 2)
-  check("#34-pin: a guarded-out router attempt clears its pending marker",
-        src:find("end) then routePending[item.key] = nil end", 1, true) ~= nil)
+  -- #34: the queue's single-flight feed guard (FX.feedGuard) went with the task queue
+  -- (2026-11-19, requirement change).
 
   -- #35 (writer half): set-group accepts scope=='session' and keys the entry by
   -- the TILE key (which core.applyGroups resolves first -- core-pinned), so ONE
-  -- member of a project queue can carry its own @role: routing target.
+  -- session in a folder can carry its own group.
   check("#35-pin: set-group keys by tile on scope=='session'",
         src:find('local gkey = (tostring(payload.scope or "") == "session" and item.key)', 1, true) ~= nil)
   check("#35-pin: group bar has the 'this session only' checkbox (reset on open)",
@@ -3277,17 +3170,7 @@ do
         src:find('var scope = document.getElementById("setgroupbar-tile").checked ? "session" : "";', 1, true) ~= nil
         and src:find('scope:scope||""', 1, true) ~= nil)
 
-  -- #38: legacy queue adoption verifies the merged write actually LANDED
-  -- (re-read depth >= merged depth) before deleting the legacy file -- a silent
-  -- writeQueue failure otherwise destroyed the only durable copy of its tasks.
-  do
-    local v = src:find("if core.queueDepth(FX.readQueue(qk)) >= core.queueDepth(merged) then", 1, true)
-    local rm = src:find("FX.removeQueue(legacy)", 1, true)
-    check("#38-pin: adoption verifies the write before removing the legacy queue",
-          v ~= nil and rm ~= nil and v < rm and (rm - v) < 300)
-    check("#38-pin: a failed write keeps the legacy file (retry next tick)",
-          src:find("legacy queue adoption write did not land", 1, true) ~= nil)
-  end
+  -- #38: legacy queue adoption went with the task queue (2026-11-19, requirement change).
 end
 
 -- ---- Shared windows: the keystroke guard is wired everywhere (2026-09-10) ----
@@ -3322,11 +3205,9 @@ do
     check("sharedwin-pin: sendKeys refuses after its kitty branch, before focusing",
           jKitty and jRefuse and jFocus and jKitty < jRefuse and jRefuse < jFocus or false)
   end
-  check("sharedwin-pin: auto-feed, auto-continue and self-summary skip a shared window up front",
-        -- 2026-09-29 (unit 26): the done edge went through core.packetAutofeed, still behind the guard
-        -- 2026-11-19: task packets were removed; the done edge is core.shouldFeed again, behind the guard
-        src:find("and not core.keystrokeBlocked(it) then\n      feedNow = core.shouldFeed(", 1, true) ~= nil
-        and src:find("enabled = autoContinueOn and not it.remote and not core.keystrokeBlocked(it)", 1, true) ~= nil
+  -- 2026-11-19, REQUIREMENT CHANGE: auto-feed went with the task queue; the other two stay pinned
+  check("sharedwin-pin: auto-continue and self-summary skip a shared window up front",
+        src:find("enabled = autoContinueOn and not it.remote and not core.keystrokeBlocked(it)", 1, true) ~= nil
         and src:find("{ enabled = not core.keystrokeBlocked(it), prevStatus = pv and pv.status or nil }", 1, true) ~= nil)
   local d = body("function renderDetail(){", 6000)
   check("sharedwin-pin: the detail panel greys the keystroke controls and says why",
@@ -3931,15 +3812,12 @@ do
         not rules:find('dispatchSerialized(target, "rule-nudge"', 1, true) and not rules:find('dispatchSerialized(target, "rule-continue"', 1, true)
         and not tick:find('dispatchSerialized(target, "rule-continue"', 1, true))
   local body = src:match("function FX%._refreshBody%(%)(.-)\nend\n") or ""
-  check("readiness: auto-feed asks first", body:find('FX.typeWhenReady(it, "autofeed", function(', 1, true) ~= nil)
-  check("readiness: the router asks first", body:find('FX.typeWhenReady(item, "router", function(', 1, true) ~= nil)
+  -- (2026-11-19, requirement change: auto-feed and the router went with the task queue)
   check("readiness: auto-continue asks first", body:find('FX.typeWhenReady(ct, "auto-continue", function(', 1, true) ~= nil)
   check("readiness: the self-summary asks first", body:find('FX.typeWhenReady(su, "summary", function(', 1, true) ~= nil)
   check("readiness: no automated feed/continue/summary dispatches around it",
         not body:find('dispatchSerialized(it, "queue-feed"', 1, true) and not body:find('dispatchSerialized(item, "queue-feed"', 1, true)
         and not body:find('dispatchSerialized(ct, "continue"', 1, true) and not body:find('dispatchSerialized(su, "summary"', 1, true))
-  check("readiness: the router skips a held member instead of re-picking it every tick",
-        body:find("core.typingHeld(FX._typing.held, m)", 1, true) ~= nil)
   check("readiness: a vanished session's hold and count are reaped",
         body:find("core.reapUnbacked(FX._typing.held, newPrev)", 1, true) ~= nil
         and body:find("core.reapUnbacked(FX._typing.queued, newPrev)", 1, true) ~= nil)
@@ -4399,7 +4277,7 @@ do
   wrapped("respawn", "local launched = FX.spawnSession(rs.editor, rs.project, nil, rs.permissionMode,")
   wrapped("rule", 'processor = "log", note = p.text')
   wrapped("rule", 'processor = "relabel", to = p.label')
-  wrapped("rule", 'processor = "feed", text = tostring(p.text):sub(1, 200)')
+  -- (2026-11-19: the rule's feed processor went with the task queue -- requirement change)
   wrapped("mailbox", "FX.writeFileAtomic(path, m.body)")
   -- 2026-11-19: the two "resume" effects went with resume at the limit reset (REQUIREMENT CHANGE)
   check("trace: queue.dryRun has no side door of its own (it goes through the one door now)",
@@ -4408,9 +4286,10 @@ do
   check("trace: a readiness refusal is a refused row, now and at send time",
         twr:find('FX.automationNote(kind, it, "refused", why, detail)', 1, true) ~= nil
         and twr:find('FX.automationNote(kind, it, "refused", why2, detail)', 1, true) ~= nil)
+  -- 2026-11-19: its "no window match" callers were the queue's feeds; the mailbox's refusals remain
   check("trace: an effect can say it didn't happen (FX.automationRefuse)",
         src:find("\nfunction FX.automationRefuse(why)", 1, true) ~= nil
-        and src:find('FX.automationRefuse("no window match")', 1, true) ~= nil)
+        and src:find('FX.automationRefuse("write failed")', 1, true) ~= nil)
   -- Settings: one switch for all, one per feature, saved into their own blocks
   check("trace: Settings has the all-automation switch", src:find('id="s-dry-all"', 1, true) ~= nil)
   check("trace: ...and one per feature, from core.DRY_RUN_FEATURES", src:find("var DRY_FEATURES = __DRY_FEATURES__;", 1, true) ~= nil
@@ -5688,10 +5567,8 @@ do
         src:find('a == "queue-feed"', 1, true) == nil and src:find('a == "queue-packet-add"', 1, true) == nil
         and src:find('a == "queue-list"', 1, true) == nil and src:find('a == "queue-route"', 1, true) == nil
         and src:find('a == "queue-route-mode"', 1, true) == nil and src:find("function FX.queueListJs", 1, true) == nil)
-  -- 2026-11-19, REQUIREMENT CHANGE: ☰ → Queues went with queue hold (see "Queue hold and the Queues view are gone")
-  check("pruned: the Queue button by the message box still works",
-        src:find('<button id="b-queue" onclick="queueAdd()">Queue</button>', 1, true) ~= nil
-        and src:find('if a == "queue-add" then', 1, true) ~= nil and src:find('if a == "queue-add-bulk" then', 1, true) ~= nil)
+  -- 2026-11-19, REQUIREMENT CHANGE: ☰ → Queues went with queue hold, and the Queue button by the message
+  -- box with the task queue (see "The task queue, auto-feed and project routing are gone")
 end
 
 -- ---- The lock screen keeps a finished session as Ready for you (2026-11-19) ----
@@ -5787,6 +5664,51 @@ do
         and msg:find("Task: do x", 1, true) ~= nil and not msg:find("packet", 1, true))
   check("kept: FX.gitHead, which the scheduled-tasks lock check uses", src:find("\nfunction FX.gitHead(root)", 1, true) ~= nil
         and okCore and type(c.headRef) == "function" and type(c.packedRefSha) == "function")
+end
+
+-- ---- The task queue, auto-feed and project routing are gone (2026-11-19) ----
+-- Adam, 2026-11-19: "prune features I have no use for". REQUIREMENT CHANGE: the Phase 4b / 4c-E / L4
+-- pins asserted sessions had queues that auto-feed and a router fed. Gone: the Queue button by the
+-- message box and its bulk paste, ~/.claude/cc-queue, auto-feed on a done edge, project routing
+-- (sequential mode, @role:/@all: lines, starvation), per-task timing, the card's "+N queued" line,
+-- Settings' Queue rows, and the feed step (renderFeed, FX.feedTask, FX.feedGuard) other automation
+-- used. Kept: Send by the message box, graceful drain, FX.typeWhenReady and the Automation trace.
+do
+  local function slurp(name)
+    local f = io.open(ROOT .. name, "r")
+    local s = f and f:read("*a") or ""
+    if f then f:close() end
+    return s
+  end
+  local src = slurp("claude-dashboard.lua")
+  local okCore, c = pcall(dofile, ROOT .. "cc-core.lua")
+  check("no queue: no Queue button or its bulk paste", not src:find('id="b-queue"', 1, true) and not src:find("function queueAdd(", 1, true)
+        and not src:find('a == "queue-add"', 1, true) and not src:find('a == "queue-add-bulk"', 1, true))
+  check("no queue: no cc-queue I/O", not src:find("QUEUE_DIR", 1, true) and not src:find("FX.readQueue", 1, true)
+        and not src:find("FX.writeQueue", 1, true) and not src:find("FX.queueKeyFor", 1, true))
+  check("no queue: no feed step", not src:find("renderFeed", 1, true) and not src:find("FX.feedTask", 1, true)
+        and not src:find("FX.feedGuard", 1, true) and not src:find("stampTaskStart", 1, true))
+  check("no queue: no auto-feed or router in the tick", not src:find('"autofeed"', 1, true) and not src:find('"router"', 1, true)
+        and not src:find("routePending", 1, true) and not src:find("starvedSince", 1, true) and not src:find("routeGroups", 1, true))
+  check("no queue: no queued / routed / starved line on a card", not src:find("it.queue", 1, true) and not src:find("it.routed", 1, true)
+        and not src:find("it.starved", 1, true))
+  check("no queue: Settings has no Queue rows", not src:find('id="s-q-auto"', 1, true) and not src:find('id="s-q-route"', 1, true)
+        and not src:find('"queue.autofeed"', 1, true))
+  check("no queue: core keeps none of it", okCore and c.queuePush == nil and c.queuePop == nil and c.shouldFeed == nil
+        and c.routeTask == nil and c.queueStarved == nil and c.queueKey == nil and c.taskRoute == nil and c.stepTaskDone == nil)
+  local dry = {}
+  for _, f in ipairs(okCore and c.DRY_RUN_FEATURES or {}) do dry[f.feature] = true end
+  check("no queue: no dry-run switch for it", okCore and not dry.queue and c.AUTOMATION_TYPISTS.autofeed == nil)
+  local keys = {}
+  for _, f in ipairs(okCore and c.FEATURES or {}) do keys[f.key] = true end
+  check("no queue: not in the feature list", okCore and not keys.queue)
+  check("no queue: no queue block in the shipped config", not slurp("cc-config.example.json"):find('"queue"', 1, true)
+        and not slurp("defaults/cc-config.json"):find('"queue"', 1, true))
+  -- what stays
+  check("kept: Send by the message box", src:find('<button id="b-nudge" onclick="sendNudge()">Send</button>', 1, true) ~= nil)
+  check("kept: graceful drain", src:find("core.shouldDrainClose(draining[it.key], pv and pv.status, it.status)", 1, true) ~= nil)
+  check("kept: FX.typeWhenReady", src:find("\nfunction FX.typeWhenReady(", 1, true) ~= nil)
+  check("kept: uninstall --purge still clears an old cc-queue", slurp("uninstall.sh"):find(" cc-queue ", 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

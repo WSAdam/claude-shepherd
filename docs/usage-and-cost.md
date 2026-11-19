@@ -296,6 +296,6 @@ and the A/B compare's scores alike.
 ### Storage
 
 ⚙ Settings → Observability → **Measure storage** shows how much disk Shepherd's own state uses: the
-audit ledger, task queues, session status and the `cc-*.json` state files, never Claude Code's
+audit ledger, session status and the `cc-*.json` state files, never Claude Code's
 transcripts. Trim old ledger days with the retention setting, and delete a session's recorded
 history from the 🗂 History tab.

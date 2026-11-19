@@ -6,19 +6,19 @@ Each **automatic** behaviour on this page has a switch, in ⚙ Settings → Auto
 `~/.claude/cc-config.json`. A fresh install turns four on: auto-continue, the **Respawn from cwd**
 action, [auto-compact with notes](#auto-compact-with-notes) and the [fleet idle alert](#fleet-idle-alert)
 (on even with no settings file). [Handoff notes](#handoff-notes) and the
-[session mailbox](#session-mailbox) have no switch. Auto-feed, routing, auto-respawn, model
+[session mailbox](#session-mailbox) have no switch. Auto-respawn, model
 auto-routing, the self-summary, escalation, rules, routines and the coach's own runs
 (`coach.enabled`, which its weekly and evidence runs both need) start off; their keys are in
-[Configuration](configuration.md#editing-the-file-by-hand). The manual tools (Queue,
-templates, A/B compare, a routine's **Run**) work without a switch.
+[Configuration](configuration.md#editing-the-file-by-hand). The manual tools (templates,
+A/B compare, a routine's **Run**) work without a switch.
 
-Automatic actions that type into a session are delivery-gated (a task leaves the queue only once
-it reached the session's window), skip sessions whose window hosts other sessions, wait until the
+Automatic actions that type into a session are delivery-gated (a send counts only once it
+reached the session's window), skip sessions whose window hosts other sessions, wait until the
 session can take the text ([below](#when-automation-types)), and are recorded in the audit ledger.
 
 ## When automation types
 
-Auto-feed, project routing, a rule's `nudge` or `continue`, auto-continue, the post-run
+A rule's `nudge` or `continue`, auto-continue, the post-run
 self-summary, the startup `/rc` sweep and a waiting [mailbox](#session-mailbox) message all type
 into a session without you. (The [Stop guards](approvals-and-policies.md#questions-asked-in-prose-come-back) never
 type: they send a turn back through the session's own Stop hook.) Each one waits until the session
@@ -29,7 +29,7 @@ can take it:
 - **Settled**: at least 3 seconds after the session's last status change. A send on a turn that
   just ended waits out the rest; it isn't dropped.
 - **One at a time**: at most one automatic send queued per session. When two fire on the same turn
-  end (auto-feed and the self-summary, say), the first goes and the second is refused.
+  end (a rule's nudge and the self-summary, say), the first goes and the second is refused.
 - **Kitty**: right before typing, Shepherd reads the window (`kitty @ get-text`) and types only
   into an empty composer. A dim prompt suggestion counts as empty; your half-typed text, an open
   menu or picker, the session survey or the trust dialog refuse the send, and so does a screen it
@@ -44,9 +44,8 @@ status file, so a turn that started in between is caught.
 A refused send records one `typing_refused` event in the ledger: `by` names the sender, `reason`
 says why (`working`, `approval`, `question`, `tool`, `queued`, `composer`, `menu`, `trust`,
 `no composer`). Shepherd then leaves that session alone until its status changes, instead of trying
-again every second. What happens to the send depends on the sender: a queued task stays queued for
-the next turn end, routing picks another free session, the self-summary tries again after the next
-turn, and a rule's nudge or continue is skipped (`nudge_skipped` / `continue_skipped` with the
+again every second. What happens to the send depends on the sender: the self-summary tries again
+after the next turn, and a rule's nudge or continue is skipped (`nudge_skipped` / `continue_skipped` with the
 reason). A nudge rule on a `hung` or `loop` edge fires while the session is still working, so it is
 always refused.
 
@@ -57,14 +56,14 @@ Your own clicks (Nudge, Continue and the rest) aren't gated: when you act, it ty
 Every automatic action goes through one door, so you can see what automation would do before you
 let it, and what it did while you were away. Your own clicks never go through it.
 
-- **What counts.** Auto-continue, auto-feed, project routing, a rule firing (log, relabel, feed,
-  nudge, continue), auto-respawn, the post-run self-summary, ending a tab-less leftover, a mailbox message (leaving it,
-  and typing it into an idle session), and the startup `/rc` sweep.
+- **What counts.** Auto-continue, a rule firing (log, relabel, nudge, continue), auto-respawn, the
+  post-run self-summary, ending a tab-less leftover, a mailbox message (leaving it, and typing it
+  into an idle session), and the startup `/rc` sweep.
 - **Dry run.** ⚙ Settings → Automation → **Dry run** switches it on for all automation
-  (`automation.dryRun`) or for one feature at a time (`autoContinue.dryRun`, `queue.dryRun` for
-  auto-feed and routing, `rules.dryRun`, `respawn.dryRun`, `summary.dryRun`, `resume.dryRun`,
-  `tabless.dryRun`, `mailbox.dryRun`, `remoteControl.dryRun`). In a dry run Shepherd records what it
-  would have done and does nothing: nothing typed, no task taken off a queue, nothing launched or
+  (`automation.dryRun`) or for one feature at a time (`autoContinue.dryRun`, `rules.dryRun`,
+  `respawn.dryRun`, `summary.dryRun`, `tabless.dryRun`, `mailbox.dryRun`, `remoteControl.dryRun`).
+  In a dry run Shepherd records what it would have done and does nothing: nothing typed, nothing
+  launched or
   ended, no message left, and a resume is planned as *skip* so the hook stops without waking the
   session. A typed action still waits until the session [can take it](#when-automation-types)
   first, so what's recorded is what would really have been typed; a refusal is still a refusal.
@@ -85,25 +84,9 @@ let it, and what it did while you were away. Your own clicks never go through it
 Outside a dry run nothing changes: each action does exactly what it did before, with the same
 readiness and shared-window refusals.
 
-## Task queue
+## Prompt templates
 
-Each session has a queue. **Queue** next to the detail panel's message box adds the input; the tile
-shows `+N queued`. Turn on `queue.autofeed` and Shepherd feeds the next task
-each time the session finishes, so a session works through a backlog unattended
-(`queue.dryRun` records what it [would feed](#dry-run-and-the-automation-trace) instead of sending).
-
-- **Delivery-safe**: a task leaves the queue only when the paste actually reached the session's
-  window. No window match and it stays queued, and the ledger records `task_feed_skipped`.
-- **Queues follow the project**, so a respawned or `/clear`-ed session inherits its folder's pending
-  tasks.
-- **No editor**: the detail panel's Queue tab (2026-11-17) and ☰ → Queues (2026-11-19) were removed;
-  a queue file in `~/.claude/cc-queue/` can be edited by hand.
-- **Bulk paste**: paste a multi-line list and press Queue. It splits into one task per line
-  (bullets and numbering stripped, blanks dropped) after a confirm.
-
-### Prompt templates
-
-**Tpl ▾** next to Queue saves the current input as a named template and inserts saved ones back into
+**Tpl ▾** next to Send saves the current input as a named template and inserts saved ones back into
 the input (it never auto-sends). The **📝 Templates** editor (☰ menu) creates, edits, renames and
 deletes them. Templates live in `~/.claude/cc-templates.json`.
 
@@ -113,42 +96,18 @@ deletes them. Templates live in `~/.claude/cc-templates.json`.
 - **Structured or raw**: a template is a description plus an optional expected output, or raw text.
 - **Before a spawn**: the New session dialog's **Templates** picker seeds the initial task, with
   variables filled in first.
-- **Before a feed**: queued tasks are rendered just before they're typed in (auto-feed or
-  routed): `{{prev_output}}` (the turn that just finished) and the date built-ins resolve; variables
-  that can't be filled automatically are left as they are.
 - **Versions**: every save keeps the previous body and bumps the version (a `v2` chip marks edited
   templates). **Versions (N)** in the editor lists them, with a non-destructive **Revert to this**.
 - **Import a folder**: **Tpl ▾ → ⤓ Import from prompts folder…** pulls `*.prompt` / `*.md` files (an
   optional `--- name: … ---` front-matter block plus the body) from `templates.sourceDir` (default
   `~/.claude/cc-prompts`). Local disk only.
 
-### Project routing
-
-With `queue.routing.enabled` on **and** a project armed (`"routing": true` in its queue file; the
-Queue tab's **route** toggle that set it was removed 2026-11-17),
-the project's queue feeds **whichever of its sessions is free** (Ready, sitting at its prompt), not only the
-one that emptied its own backlog, so parallel sessions in one folder drain a shared backlog. One
-feed per project per second, delivery-gated, ledgered as `by:"router"`. `starveMinutes` flags a
-project whose tasks wait with no free session (⌛).
-
-Routing reads a prefix on each queue line (stripped before the task is typed, so the session never
-sees it):
-
-- **`@role:`**: a task prefixed `@review: …` goes only to a free session whose **group** is
-  `review`. Unprefixed tasks go to anyone free.
-- **`@all:` / `@any:`**: a join barrier. `@all: …` waits until **every** session in the project has
-  finished before it routes; `@any:` waits for one. It composes with a role: `@all: @review: ship`.
-- **seq**: `"mode": "sequential"` in the queue file (the Queue tab's **seq** toggle, removed
-  2026-11-17) runs a project's queue **one routed task at a time**. Otherwise tasks spread across
-  free sessions in parallel.
-- **Timing**: each routed or queued task is timed from feed to completion; the Shift report shows
-  tasks completed with average and total duration (needs the ledger).
-
 ## Model auto-routing
 
 Per session, off by default. Tick **Auto-model** in the detail panel (shown with **Model controls**)
-and each queued, auto-fed or routed task picks a model by how hard it looks, sending `/model <id>`
-just before the task:
+and each queued, auto-fed or routed task picked a model by how hard it looked, sending `/model <id>`
+just before the task. (The task queue was removed 2026-11-19, so nothing is fed and the switch has
+no effect any more.)
 
 - **hard** (default `opus`) when the task has a "hard" keyword (refactor, debug, migrate, security,
   race condition and the like), or is 40 words or more;
@@ -473,18 +432,19 @@ automations above. Create and edit them in **⚙️ Automation rules** (☰ menu
 `{name, enabled?, trigger:{kind, match?}, processor:{kind, text?, label?}, once?}`:
 
 - **enabled** (default true): switch one rule off without deleting it.
-- **trigger.kind**: `done`, `error`, `approval`, `hung`, `loop` or `starved` (the fresh edge).
-  `hung`, `loop` and `starved` fire only while their detectors are on (`escalation.hung.enabled`,
-  `escalation.loop.enabled`, and routing with `starveMinutes` above 0).
+- **trigger.kind**: `done`, `error`, `approval`, `hung` or `loop` (the fresh edge). `hung` and
+  `loop` fire only while their detectors are on (`escalation.hung.enabled`,
+  `escalation.loop.enabled`). (`starved` fired on a starving routed queue; it went with the task
+  queue on 2026-11-19 and never fires.)
 - **trigger.match** (optional): globs on `project` (the encoded project key, as in
   [policy attachments](approvals-and-policies.md#named-policy-bundles)), `group`, `sessionKey` and
   `provider` (a provider profile's `id`: the profile the session's model, and for a gateway its
   base URL, belong to); absent means fleet-wide.
 - **processor.kind**: `log` (write an audit note), `relabel` (rename the tile to `label`), `nudge`
   (type `text` into the session through the same delivery-gated path as a manual nudge, once it
-  [can take it](#when-automation-types)), `feed` (add `text` to the session's project queue, for
-  auto-feed or routing to deliver) or `continue` (resume an errored turn; held by
+  [can take it](#when-automation-types)) or `continue` (resume an errored turn; held by
   [auto-continue's back-off](#auto-respawn-and-auto-continue) after turns that change nothing).
+  (`feed`, which queued `text`, went with the task queue on 2026-11-19 and does nothing.)
 - **once**: fire at most once per rule per tile, until Hammerspoon reloads.
 
 ```json

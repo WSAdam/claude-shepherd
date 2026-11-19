@@ -10,18 +10,8 @@
   },
 
   "automation": {
-    "_comment": "Dry run for ALL automation (auto-continue, auto-feed, routing, rules, respawn, the self-summary, ending tab-less leftovers, mailbox messages, the /rc sweep): each records what it would do -- ☰ → Automation trace, and would_<kind> in the ledger -- and acts on nothing. Each feature also has its own dryRun (queue.dryRun below, autoContinue.dryRun, rules.dryRun, ...). Settings → Automation → Dry run switches them; a Save keeps them.",
+    "_comment": "Dry run for ALL automation (auto-continue, rules, respawn, the self-summary, ending tab-less leftovers, mailbox messages, the /rc sweep): each records what it would do -- ☰ → Automation trace, and would_<kind> in the ledger -- and acts on nothing. Each feature also has its own dryRun (autoContinue.dryRun, rules.dryRun, ...). Settings → Automation → Dry run switches them; a Save keeps them.",
     "dryRun": false
-  },
-
-  "queue": {
-    "autofeed": false,
-    "dryRun": false,
-    "routing": {
-      "_comment": "4c-E project routing. With enabled=true AND a project's queue armed (the detail-panel 'route' toggle writes routing:true into its cc-queue file), queued tasks feed WHICHEVER session of that project is free (status done, not stale/error/draining) — not just the one that finished. One feed per project per refresh tick; pops stay delivery-gated; routed feeds are ledgered as by:'router'. starveMinutes>0 flags the project (⌛ + one ledger event) when tasks wait with no free session that long; 0 = off. OFF by default at both levels.",
-      "enabled": false,
-      "starveMinutes": 0
-    }
   },
 
   "decisions": {
@@ -153,7 +143,7 @@
   },
 
   "keystrokes": {
-    "_comment": "Shared-window guard (ON by default). Several Claude sessions running as tabs in one VS Code/Cursor window share that window, and Shepherd types into the WINDOW -- whichever tab is in front gets the keys. So a session whose window hosts others gets no keystroke action at all: no nudge, queue feed, auto-continue, /clear, /rc, set-mode or close (close would be the whole window). Jump and hands-free (gate) approvals still work; kitty is unaffected. false = type into shared windows anyway.",
+    "_comment": "Shared-window guard (ON by default). Several Claude sessions running as tabs in one VS Code/Cursor window share that window, and Shepherd types into the WINDOW -- whichever tab is in front gets the keys. So a session whose window hosts others gets no keystroke action at all: no nudge, auto-continue, /clear, /rc, set-mode or close (close would be the whole window). Jump and hands-free (gate) approvals still work; kitty is unaffected. false = type into shared windows anyway.",
     "refuseSharedWindow": true
   },
 

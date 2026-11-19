@@ -18,8 +18,8 @@ category). (The read-only background checks, such as commit counts, the overlap 
 scheduled-tasks lock check, are on too.) A fresh install writes the author's daily
 settings ([defaults/cc-config.json](../defaults/cc-config.json)) when you have no file yet, and
 those also turn on auto-continue, respawn, auto-compact, the three Stop guards (`stopGuards`), the
-merge checker, the worktree fence, the audit ledger and real spawning. The queue's auto-feed,
-routing, rules, routines (the main-green check among them), escalation and the coach's own runs
+merge checker, the worktree fence, the audit ledger and real spawning. Rules, routines (the
+main-green check among them), escalation and the coach's own runs
 (`coach.enabled`, which its weekly and evidence runs both need) stay off until you switch them on. On an upgrade, `make setup` adds any of the
 defaults' keys you haven't set, and never changes one you have.
 
@@ -40,7 +40,7 @@ form-managed block is dropped on Save. Its tabs:
   advanced gate settings, the policies (approve repeats, Autopilot, allow/deny patterns), and the
   **Always ask** commands with your own additions
   ([Approvals and policies](approvals-and-policies.md)).
-- **Automation**: the task queue, escalation, the fleet idle alert, graceful drain, respawn,
+- **Automation**: escalation, the fleet idle alert, graceful drain, respawn,
   Auto-Continue, **Dry run** (all automation, or one feature at a time) and Auto-compact
   ([Automation](automation.md)).
 - **Observability**: risk score, same-folder collision, insights, auto-title, loop watchdog, macOS
@@ -95,7 +95,7 @@ install's [defaults](../defaults/cc-config.json) differ.
 | Key | Default | Fresh install | Reference |
 |-----|---------|---------------|-----------|
 | `automation.dryRun` | `false` | | [Dry run](automation.md#dry-run-and-the-automation-trace) |
-| `<feature>.dryRun` (`autoContinue`, `queue`, `rules`, `respawn`, `summary`, `tabless`, `mailbox`, `remoteControl`) | `false` | | [Dry run](automation.md#dry-run-and-the-automation-trace) |
+| `<feature>.dryRun` (`autoContinue`, `rules`, `respawn`, `summary`, `tabless`, `mailbox`, `remoteControl`) | `false` | | [Dry run](automation.md#dry-run-and-the-automation-trace) |
 | `autoContinue.backoff.startSeconds` / `maxSeconds` | `120` / `1800` (`startSeconds: 0` turns it off) | | [Auto-continue](automation.md#auto-respawn-and-auto-continue) |
 | `compact.enabled` | `false` | `true` | [Auto-compact with notes](automation.md#auto-compact-with-notes) |
 | `compact.atPct` / `notesLeadPct` | `85` / `5` | | [Auto-compact with notes](automation.md#auto-compact-with-notes) |
@@ -132,8 +132,6 @@ A starting point for the most common switches:
 ```json
 {
   "automation": { "dryRun": false },
-  "queue":      { "autofeed": false, "dryRun": false,
-                  "routing": { "enabled": false, "starveMinutes": 0 } },
   "escalation": { "enabled": false, "minutes": 5, "sound": false, "push": false, "pushTopic": "" },
   "focus":      { "popOnComplete": false, "popOnApproval": false },
   "spawn":      { "editor": "vscode", "live": false, "kittyRemote": true, "kittyAutoRemote": true,
@@ -174,7 +172,7 @@ Everything lives under `~/.claude/`:
 | `cc-inbox/` | The [session mailbox](automation.md#session-mailbox): messages waiting for each session |
 | `cc-send/`, `cc-send.sh` | Left by cc-send, removed 2026-11-19: nothing reads them; `--purge` deletes them |
 | `cc-tickets/` | [Cross-repo tickets](automation.md#cross-repo-tickets), one file each |
-| `cc-queue/` | Each project's [task queue](automation.md#task-queue); a `<queue>.packets.json` in it is a leftover of task packets, removed 2026-11-19 |
+| `cc-queue/` | Leftover of the task queue and task packets (removed 2026-11-19): each project's queue and `<queue>.packets.json`. Nothing reads it; `uninstall.sh --purge` deletes it |
 | `cc-pins/`, `cc-pin.sh` | Left by pinned links, removed 2026-11-19: nothing reads them; `--purge` deletes them |
 | `cc-talk/` | Left by talk mode, removed 2026-11-19: nothing reads it; `--purge` deletes it |
 | `cc-resume/`, `cc-resume.sh` | Left by resume at the limit reset, removed 2026-11-19: nothing reads them, and `make setup` unwires and deletes the hook; `--purge` deletes them |

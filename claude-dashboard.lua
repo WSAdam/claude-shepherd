@@ -89,7 +89,6 @@ end
 local STATUS_DIR = os.getenv("CC_STATUS_DIR") or (os.getenv("HOME") .. "/.claude/cc-status")
 local HEARTBEAT  = STATUS_DIR .. "/.panel-alive"
 local CONFIG_FILE   = os.getenv("CC_CONFIG_FILE") or (os.getenv("HOME") .. "/.claude/cc-config.json")
-local QUEUE_DIR     = os.getenv("CC_QUEUE_DIR") or (os.getenv("HOME") .. "/.claude/cc-queue")
 local AUTOPILOT_DIR = os.getenv("CC_AUTOPILOT_DIR") or (os.getenv("HOME") .. "/.claude/cc-autopilot")
 local GATE_TOOLS_DIR = os.getenv("CC_GATE_TOOLS_DIR") or (os.getenv("HOME") .. "/.claude/cc-gate-tools")
 local GATE_FLAG     = os.getenv("CC_GATE_FLAG") or (os.getenv("HOME") .. "/.claude/cc-gate.enabled")
@@ -240,13 +239,6 @@ local MIRROR_DIR = os.getenv("CC_MIRROR_DIR") or ((os.getenv("HOME") or "") .. "
 local BRIDGE_SECONDS = 2     -- per-host rsync cadence (SSH status bridge)
 local bridge = {}            -- ns -> { timer, running, lastOkTs, dest, host }: live bridge state
                              -- (module-level so the timers are GC-safe, per the after() lesson)
-local routePending = {}  -- tile key -> dispatch ts: a routed feed in flight (4c-E);
-                         -- in-memory on purpose -- pops are delivery-gated, so a
-                         -- reload losing the marker can at worst re-pick a target
-local starvedSince  = {} -- queueKey -> first ts the armed project had work but no free session
-local starvedAlerted = {} -- queueKey -> true once the starvation ledger event fired this episode
-local taskStart     = {} -- tile key -> { ts, role, projectKey, by }: a fed queue task in
-                         -- flight (L4 per-task timing); consumed on the next done edge
 local loopAlerted   = {} -- tile key -> true once a loop ledger event fired this episode (L5)
 local ruleFired     = {} -- "ruleName\1tileKey" -> true: a `once` L6 rule already fired for this tile
 local gitChangeFiles = {} -- tile key -> { [path] = orig|false }: the authoritative file
@@ -1153,96 +1145,6 @@ function FX.pollHostStats(force, cfg)
     memThreshold  = tonumber(core.config(cfg, "insights.hostPressure.mem", 90)),
     diskThreshold = tonumber(core.config(cfg, "insights.hostPressure.disk", 90)),
   })
-end
-
--- Task queue I/O (Phase 4b).
-function FX.readQueue(key)
-  local path = QUEUE_DIR .. "/" .. key .. ".json"
-  local c = FX.readFile(path)
-  if not c or #c == 0 then return { tasks = {} } end
-  local ok, q = pcall(function() return core.json.decode(c) end)
-  if ok and type(q) == "table" then return q end
-  -- R1-17: present-but-UNDECODABLE (a truncated/garbled write) must not silently
-  -- strip routing:true / mode:'sequential' -- returning a bare { tasks={} } and
-  -- writing it back would permanently disarm the queue. Back the bad file up ONCE so
-  -- an operator can recover its flags/tasks before any mutation overwrites it. The
-  -- durable temp+rename writer below makes this corruption window very unlikely.
-  local bak = path .. ".bad." .. tostring(FX.now())
-  pcall(function() os.rename(path, bak) end)
-  print("[cc-queue] ⚠️ undecodable queue " .. key .. " -- backed up to " .. bak .. " (flags/tasks preserved there)")
-  return { tasks = {} }
-end
-function FX.writeQueue(key, q)
-  hs.fs.mkdir(QUEUE_DIR)
-  -- R1-17: durable write (temp+rename, same idiom as patchStatus) so a crash / disk-full
-  -- mid-write can never leave a truncated queue that loses routing/mode flags on the
-  -- next read. os.rename is atomic on the same filesystem.
-  local path = QUEUE_DIR .. "/" .. key .. ".json"
-  local tmp = path .. ".tmp." .. tostring(FX.now())
-  local f = io.open(tmp, "w")
-  if not f then return end
-  f:write(core.json.encode(q)); f:close()
-  if not os.rename(tmp, path) then os.remove(tmp) end
-end
-function FX.removeQueue(key) os.remove(QUEUE_DIR .. "/" .. key .. ".json") end
--- Resolve a session's queue file key (project-stable via core.queueKey, so a
--- respawned or /clear'd session inherits its project's pending tasks), adopting
--- any legacy session-keyed queue file left from before queues were project-keyed:
--- its tasks are merged under the project key once and the legacy file removed.
-function FX.queueKeyFor(item)
-  local qk = core.queueKey(item)
-  local legacy = item and item.key
-  if qk and legacy and legacy ~= qk then
-    local old = FX.readQueue(legacy)
-    if core.queueDepth(old) > 0 then
-      local merged = core.queueMerge(FX.readQueue(qk), old)
-      FX.writeQueue(qk, merged)
-      -- #38: writeQueue fails SILENTLY (io.open on a bad QUEUE_DIR, a disk-full
-      -- truncated write, a failed rename) -- deleting the legacy file then would
-      -- destroy the only durable copy of its pending tasks. Verify the merge is
-      -- actually on disk (re-read; a truncated write also fails here via readQueue's
-      -- undecodable-backup path) before removing the legacy file; otherwise keep it
-      -- and let the next tick retry the adoption (temp+rename makes it all-or-nothing).
-      if core.queueDepth(FX.readQueue(qk)) >= core.queueDepth(merged) then
-        FX.removeQueue(legacy)
-        print("[cc-queue] adopted legacy session queue " .. legacy .. " -> " .. qk)
-      else
-        print("[cc-queue] ⚠️ legacy queue adoption write did not land -- keeping " .. legacy)
-      end
-    end
-  end
-  return qk or legacy
-end
--- Returns whether the task was actually delivered (false = the no-window-match
--- guard skipped the paste); callers must NOT pop the queue on a skip. `preface` (DR6,
--- optional) is a slash command (e.g. "/model opus") submitted first in the SAME focus
--- so the model switch + the task are one atomic delivery (one window match, one return).
-function FX.feedTask(target, task, preface)
-  if preface and #preface > 0 then return FX.pasteIntoWindow(target, { text = task, preface = preface }) end
-  return FX.typeIntoWindow(target, task)
-end
-
--- #34: single-flight guard for the queue pop -> deliver -> persist critical
--- section. For a kitty tile the feed slot runs SYNCHRONOUSLY (headless) and
--- FX.runKittyChecked's waitUntilExit PUMPS the run loop mid-delivery -- the 1Hz
--- refresh (router/autofeed) and queued bridge messages ("Feed next") fire NESTED
--- while the shortened queue hasn't been written back yet, re-read the file (head
--- still present), pop the SAME task, and deliver it twice. Every feed body runs
--- through this guard: a nested/concurrent attempt is skipped -- the task stays
--- queued and the level-triggered router/autofeed simply retries next tick.
--- Returns true when fn ran, false when skipped (callers clear their pending
--- markers on a skip). pcall'd so a throw mid-feed can't latch the flag forever.
-function FX.feedGuard(fn)
-  if FX._queueFeedBusy then
-    print("[cc-queue] feed already in flight (nested dispatch during delivery) -- skipped, task kept queued")
-    FX.automationRefuse("a feed already in flight")   -- 2026-09-29: an automatic feed's Trace row says so
-    return false
-  end
-  FX._queueFeedBusy = true
-  local ok, err = pcall(fn)
-  FX._queueFeedBusy = false
-  if not ok then print("[cc-queue] feed failed: " .. tostring(err)) end
-  return true
 end
 
 -- (Task packets were removed 2026-11-19; FX.gitHead, which they used, stays for the scheduled-tasks lock check.)
@@ -2299,7 +2201,6 @@ function FX.storageEntries()
   end
   return {
     { name = "Audit ledger",        bytes = dirBytes(LEDGER_DIR) },
-    { name = "Task queues",         bytes = dirBytes(QUEUE_DIR) },
     { name = "Session status",      bytes = dirBytes(STATUS_DIR) },
     { name = "State files (cc-*.json)", bytes = core.sumDirBytes(stateEntries) },
   }
@@ -8908,7 +8809,7 @@ function FX.kittyScreen(target)
   return ok and out or nil
 end
 -- Build a window-effect target from a status item (for the direct, non-handleAction
--- call sites: feedTask / clear / compact / image-paste). See FX.targetFor.
+-- call sites: clear / compact / image-paste). See FX.targetFor.
 local function winTarget(it) return FX.targetFor(it) end
 
 function FX.focusWindow(target)
@@ -9024,9 +8925,9 @@ end
 
 -- ---- Automation dry run and trace (2026-09-29) ----
 -- Build program unit 14. Every AUTOMATIC effect goes through FX.automationAct: the typed ones in
--- FX.typeWhenReady's slot (auto-feed, the router, a rule's nudge or continue, auto-continue, the
+-- FX.typeWhenReady's slot (a rule's nudge or continue, auto-continue, the
 -- self-summary, a mailbox line, the /rc sweep), the rest at their call sites (auto-respawn,
--- ending a tab-less leftover, a rule's log/relabel/feed, a mailbox send). With automation.dryRun or the kind's own <feature>.dryRun on (core.automationDryRun) it
+-- ending a tab-less leftover, a rule's log/relabel, a mailbox send). With automation.dryRun or the kind's own <feature>.dryRun on (core.automationDryRun) it
 -- records would_<kind> and acts on nothing. Otherwise it runs the effect exactly as before: fn's
 -- `false, why` -- or FX.automationRefuse(why) inside it -- records a refusal, anything else acted.
 -- Every decision goes to the Trace ring (core.traceAdd: a repeat bumps a count) and, once per new
@@ -9081,7 +8982,7 @@ function FX.automationAct(kind, it, detail, fn)
 end
 
 -- ---- Readiness before typing (2026-09-28) ----
--- Build program unit 11. Every AUTOMATED send -- auto-feed, the router, a rule's nudge or
+-- Build program unit 11. Every AUTOMATED send -- a rule's nudge or
 -- continue, auto-continue, the self-summary, the /rc sweep -- comes here instead of straight to
 -- dispatchSerialized. It waits out the settle time, then, in the serialized slot right before
 -- typing, asks core.readyToType about the live status file and (kitty) the screen. A refusal
@@ -12038,74 +11939,6 @@ local function editorTemplates()
   return out
 end
 
--- L3: render a queued task just before it's typed in. Fills {{prev_output}} (the
--- target's latest output, which on the feed's done edge IS the turn that just
--- finished) + the date built-ins; user {{vars}} that can't be auto-resolved
--- without a human are left VERBATIM (keepMissing), and a task with NO placeholders
--- is returned unchanged -- so existing non-template queues are byte-unaffected.
--- The raw queued task is still what gets popped/persisted/ledgered; only the typed
--- text is rendered.
-local function renderFeed(task, item)
-  -- strip the L4 routing scaffolding so the session never sees it: a leading
-  -- @all:/@any: join barrier, then an @role: prefix (the dispatcher already used
-  -- them to gate + choose the target). Only the bare text is typed.
-  local _, afterBarrier = core.taskBarrier(tostring(task or ""))
-  local _, bare = core.taskRoute(afterBarrier)
-  local prevOut = (item and type(item.activity) == "string") and item.activity or ""
-  local r = core.renderTemplate(bare, {},
-    { now = os.time(), prevOutput = prevOut, keepMissing = true })
-  return r or bare
-end
-
--- L4 per-task timing: record when a queue task was fed to a session (its role +
--- source), so the next done edge can ledger a task_done with the duration.
-local function stampTaskStart(item, task, by)
-  if not (item and item.key) then return end
-  local _, afterB = core.taskBarrier(tostring(task or ""))
-  taskStart[item.key] = { ts = os.time(), role = select(1, core.taskRoute(afterB)),
-                          projectKey = item.projectKey, by = by }
-end
-
--- DR6: per-session model auto-routing. If this session opted in (cc-automodel/<key>)
--- AND is a LOCAL native-Anthropic session (/model tiers don't apply to a gateway/ssh)
--- AND the heuristic picks a DIFFERENT model family than the current one, return
--- { cmd, model, from, reason } so FX.feedTask can prepend a `/model` switch in the same
--- atomic delivery. NO side effects (the caller ledgers + re-bases item.model only on a
--- DELIVERED feed, so a skipped paste never logs a phantom switch). Off by default; the
--- the task is classified on the RENDERED text the session actually receives (renderFeed),
--- not the un-expanded template -- so word-count tiers see the real prompt (R1-32).
--- An FX member (not a main-chunk local) to stay under Lua's 200-local cap.
-function FX.autoModelPreface(item, task)
-  if not (item and item.key) or item.remote then return nil end
-  -- Chat-input editors only (VS Code / Cursor): the `/model <id>` preface is the
-  -- extension's type-id+autocomplete path. A terminal/kitty `/model` is an interactive
-  -- picker (and kitty's two `@ send-text` would race the socket), so auto-routing skips them.
-  if item.editor == "kitty" or item.editor == "terminal" then return nil end
-  if not FX.autoModelOn(item.key) then return nil end
-  if not core.isAnthropicSession(item.model, item.base_url) then return nil end
-  -- R1-32: classify on the SAME text the session will receive. renderFeed both strips
-  -- the L4 routing scaffolding (taskBarrier/taskRoute) AND expands the template
-  -- ({{prev_output}}, date built-ins), so suggestModel's word-count tiers reflect the
-  -- delivered prompt -- not a 2-word template that expands to hundreds of words.
-  local typed = renderFeed(task, item)
-  local s = core.suggestModel(typed, loadConfig())
-  if not s or not s.model then return nil end
-  -- R3-03: compare against the LIVE model, not the spawn-time snapshot. item.model is
-  -- parsed from the status file (derived from $ANTHROPIC_MODEL at spawn) and reverts to
-  -- the spawn model ~1s after any in-session /model switch when refreshList rebuilds byKey.
-  -- live_model (set from the transcript tail in computeUsage) reflects the model the
-  -- session actually runs now; fall back to item.model when no live model is known.
-  local cur = item.live_model or item.model
-  -- Skip a no-op switch: already on that family (priced ids) OR the exact same id.
-  -- Guard nil families (empty current model / a custom unfamilied override) so a
-  -- nil==nil can never wrongly skip a real switch.
-  local cf, sf = core.priceFamily(cur), core.priceFamily(s.model)
-  if (sf and cf == sf) or cur == s.model then return nil end
-  local cmd = core.modelCommand(s.model)
-  if not cmd then return nil end
-  return { cmd = cmd, model = s.model, from = cur, reason = s.reason }
-end
-
 -- 🔌 MCPs & Skills viewer payload. Config MCPs (env-redacted) merged with the
 -- last live `claude mcp list` status (nil until the user clicks Re-check), plus
 -- skills = user files (~/.claude/skills) + slash commands (~/.claude/commands) +
@@ -12979,33 +12812,6 @@ local function handleBridgeMsg(msg)
     end
     FX.spawnSession(editor, dir, task, payload.permMode and tostring(payload.permMode) or nil,
       payload.provider and tostring(payload.provider) or nil, agentOpts, mode == "new")
-    return
-  end
-  if a == "queue-add" then
-    local key = tostring(payload.v or "")
-    local task = payload.text and tostring(payload.text) or ""
-    if key ~= "" and task ~= "" then
-      -- queues are PROJECT-keyed (survive respawn//clear); unknown tile -> raw key
-      local qk = byKey[key] and FX.queueKeyFor(byKey[key]) or key
-      FX.writeQueue(qk, core.queuePush(FX.readQueue(qk), task))
-      print("[cc-queue] queued for " .. qk .. ": " .. task)
-    end
-    return
-  end
-  -- Bulk paste from the Queue button (roadmap #5b): one task per line (core.queueSplitLines).
-  -- (The Queue tab's editor -- list / move / remove / hold, Feed next, + Packet and the route
-  -- toggles -- was pruned 2026-11-17, and ☰ → Queues 2026-11-19.)
-  if a == "queue-add-bulk" then
-    local key = tostring(payload.v or "")
-    local item = byKey[key]
-    local qk = item and FX.queueKeyFor(item) or ((key ~= "") and key or nil)
-    if not qk then return end
-    local tasks = core.queueSplitLines(payload.text)
-    if #tasks > 0 then
-      FX.writeQueue(qk, core.queuePushAll(FX.readQueue(qk), tasks))
-      print("[cc-queue] bulk-queued " .. #tasks .. " task(s) for " .. qk)
-      if item then ledgerFor(item, { type = "queue_edit", op = "bulk_add", count = #tasks }) end
-    end
     return
   end
   -- Saved task templates (roadmap #5c; L3): named reusable task strings in
@@ -14577,10 +14383,7 @@ local function handleBridgeMsg(msg)
     -- Cohort tag keyed by the stable projectKey (like relabel), so it survives
     -- close/reopen and a new session in the same folder inherits it. Blank clears.
     -- #35: scope=="session" (the group bar's "this session only" checkbox) keys by
-    -- the TILE key instead. Queue membership is projectKey-keyed, so a project-
-    -- keyed group can never split one queue's members for @role: routing -- a
-    -- per-tile entry (which core.applyGroups resolves FIRST) gives one member its
-    -- own role, e.g. a dedicated "@review:" session among three in one folder.
+    -- the TILE key instead (a per-tile entry, which core.applyGroups resolves FIRST).
     local gkey = (tostring(payload.scope or "") == "session" and item.key)
       or item.projectKey or item.cwd
     groups = core.setGroup(groups, gkey, payload.text)
@@ -14609,7 +14412,7 @@ local function handleBridgeMsg(msg)
         -- Serialized (R3 #2/#5), and gated on pasteIntoWindow's delivery status
         -- (R3 #1): a skipped paste (no window match, or a kitty target -- no
         -- image attach over `kitty @`) must ledger nudge_skipped, never a
-        -- delivery that didn't happen (same contract as task_feed_skipped),
+        -- delivery that didn't happen,
         -- and tell the operator instead of dropping the nudge silently.
         dispatchSerialized(item, a, function()
           if FX.pasteIntoWindow(winTarget(item), { text = payload.text and tostring(payload.text) or nil, imagePath = path }) then
@@ -14653,7 +14456,7 @@ local function handleBridgeMsg(msg)
     -- A text nudge is ledgered AFTER dispatch, gated on what was DELIVERED:
     -- handleAction returns nil when pasteIntoWindow reported a skip (no window
     -- match), so the audit ledger records nudge_skipped instead of a delivery
-    -- that never happened (R3 #1 -- same contract as task_feed_skipped).
+    -- that never happened (R3 #1).
     if a == "nudge" and text and #text > 0 then
       ledgerFor(item, { type = (acted == "nudge") and "nudge" or "nudge_skipped",
                         text = tostring(text):sub(1, 200) })
@@ -15950,7 +15753,7 @@ local HTML = [[
   #nudge-chip.show { display:flex; align-items:center; gap:6px; }
   #nudge-chip button { background:none; border:none; color:var(--muted); cursor:pointer;
              font-size:12px; padding:0 2px; }
-  #b-nudge, #b-queue { background:var(--surface); color:var(--text-2); border:1px solid var(--border);
+  #b-nudge { background:var(--surface); color:var(--text-2); border:1px solid var(--border);
              border-radius:8px; font-size:12px; padding:5px 10px; cursor:pointer; }
   /* saved task templates (roadmap #5c) */
   #b-tpl { background:var(--surface); color:var(--text-2); border:1px solid var(--border); border-radius:8px;
@@ -16921,9 +16724,8 @@ local HTML = [[
       </label>
     </div>
     <div id="nudge-row">
-      <textarea id="nudge" rows="1" placeholder="Nudge now, or Queue for later... (Enter sends, Shift+Enter newline, paste an image)" onkeydown="onNudgeKey(event)" oninput="autoGrow(this)"></textarea>
+      <textarea id="nudge" rows="1" placeholder="Nudge now... (Enter sends, Shift+Enter newline, paste an image)" onkeydown="onNudgeKey(event)" oninput="autoGrow(this)"></textarea>
       <button id="b-nudge" onclick="sendNudge()">Send</button>
-      <button id="b-queue" onclick="queueAdd()">Queue</button>
       <button id="b-tpl" onclick="toggleTemplates()" title="Saved task templates — insert into the input (never auto-sends)">Tpl ▾</button>
     </div>
     <div id="tpl-menu"></div>
@@ -17040,10 +16842,6 @@ local HTML = [[
       <div class="s-sec">Approval gate (advanced)</div>
       <label class="s-row"><input type="checkbox" id="s-gate"> Arm the approval gate (route permission prompts to this panel)</label>
       <div class="s-help">The mechanism behind Headless approvals. Leave the policies below OFF for "approve everything by hand, headlessly." Turn a policy on only to let some requests auto-decide without you.</div>
-      <div class="s-sec">Queue</div>
-      <label class="s-row"><input type="checkbox" id="s-q-auto"> Auto-feed the next queued task when a session finishes</label>
-      <label class="s-row"><input type="checkbox" id="s-q-route"> Project routing (4c-E): feed a project's queue to <i>any</i> free session of that project</label>
-      <div class="s-help">Double opt-in: this global switch AND the per-project "route" toggle in the detail panel. Targets only sessions that just finished a turn (never one you're typing into); one feed per project per second; every routed feed is ledgered as by:"router". Flag a starving project after <input type="number" id="s-q-starve" class="s-num" min="0"> minutes with queued work but no free session (0 = off).</div>
       <div class="s-sec">Escalation (a waiting approval nags harder)</div>
       <label class="s-row"><input type="checkbox" id="s-e-en"> Enable escalation</label>
       <label class="s-row">After <input type="number" id="s-e-min" class="s-num" min="1"> minutes</label>
@@ -17431,7 +17229,6 @@ local HTML = [[
         <option value="tool_request">Tool requests</option>
         <option value="session_start">Session start</option>
         <option value="session_end">Session end</option>
-        <option value="task_feed">Task feeds</option>
         <option value="mode_change">Mode change</option>
         <option value="model_change">Model change</option>
         <option value="effort_change">Effort change</option>
@@ -17905,25 +17702,6 @@ local HTML = [[
     }
     // Enter sends; Shift+Enter inserts a newline (mirrors the Claude chat input).
     function onNudgeKey(e){ if(e.key === "Enter" && !e.shiftKey){ e.preventDefault(); sendNudge(); } }
-    function queueAdd(){
-      var el = document.getElementById("nudge");
-      var t = (el.value || "").trim();
-      if(!selectedKey || !t) return;
-      // Bulk paste (roadmap #5b): a multi-line input splits into one task per
-      // line. The count here is display-only -- the authoritative split rules
-      // (CRLF, bullets, blanks) live in core.queueSplitLines on the Lua side.
-      if(t.indexOf("\n") >= 0){
-        var n = t.split("\n").map(function(s){ return s.trim(); })
-                 .filter(function(s){ return s.length > 0; }).length;
-        if(n > 1){
-          if(confirm("Queue " + n + " tasks (one per line)?")){
-            send("queue-add-bulk", selectedKey, t); resetInput(el);
-          }
-          return;  // cancelled: leave the textarea untouched (Send still works)
-        }
-      }
-      send("queue-add", selectedKey, t); resetInput(el);
-    }
 
     // ---- Saved task templates (roadmap #5c; L3) ----------------------------
     // Records carry a composed `body`, an effective `vars` list, and a version.
@@ -19894,7 +19672,7 @@ local HTML = [[
     function settingsTabFor(t){ t=(t||"").trim(); function s(p){ return t.indexOf(p)===0; }
       if(s("Appearance")) return "appearance";
       if(s("Headless approvals")||s("Questions")||s("Approval gate")||s("Policies")||s("Always ask")) return "approvals";
-      if(s("Queue")||s("Escalation")||s("Fleet idle")||s("Graceful drain")||s("Respawn")||s("Auto-Continue")||s("Dry run")) return "automation";
+      if(s("Escalation")||s("Fleet idle")||s("Graceful drain")||s("Respawn")||s("Auto-Continue")||s("Dry run")) return "automation";
       if(s("Risk score")||s("Same-folder")||s("Insights")||s("Observability")||s("Hooks")||s("Audit log")) return "observability";
       if(s("Editor window pop")||s("Spawn")||s("Claude Code Remote Control")||s("SSH status bridge")||s("Providers")) return "spawn";
       return "general"; }
@@ -19924,10 +19702,7 @@ local HTML = [[
       function val(id,v){ document.getElementById(id).value = v; }
       ck("s-autolaunch", autoOn);
       ck("s-gate", gateOn);
-      ck("s-q-auto", cv(cfg,"queue.autofeed",false));
-      fillDryRunForm(cfg);   // 2026-09-29: automation.dryRun + one switch per feature (queue.dryRun among them)
-      ck("s-q-route", cv(cfg,"queue.routing.enabled",false));
-      val("s-q-starve", cv(cfg,"queue.routing.starveMinutes",0));
+      fillDryRunForm(cfg);   // 2026-09-29: automation.dryRun + one switch per feature
       ck("s-br-en",  cv(cfg,"bridge.enabled",false));
       val("s-br-int", cv(cfg,"bridge.intervalSeconds",2));
       ck("s-e-en",   cv(cfg,"escalation.enabled",false));
@@ -20138,8 +19913,6 @@ local HTML = [[
       function num(id,d){ var n=parseInt(document.getElementById(id).value,10); return isNaN(n)?d:n; }
       function txt(id){ return document.getElementById(id).value||""; }
       var config = {
-        queue: { autofeed: ck("s-q-auto"),
-                 routing: { enabled: ck("s-q-route"), starveMinutes: num("s-q-starve",0) } },
         escalation: { enabled: ck("s-e-en"), minutes: num("s-e-min",5), sound: ck("s-e-snd"),
                       push: ck("s-e-push"), pushTopic: txt("s-e-topic"),
                       loop: { enabled: ck("s-loop-en"), repeats: num("s-loop-rep",3) } },
@@ -21817,14 +21590,12 @@ local HTML = [[
       ba.style.color = it.autopilot ? "#8fd4a3" : "#e8e9ee";
       // Remote (bridge) tiles are headless-only: grey every keystroke-shaped
       // control. Approve/Deny stay live only while the remote gate is waiting
-      // (they route over ssh as decision files). Queue add/edit and the route
-      // toggle stay enabled -- queues are LOCAL data (a future remote feed
-      // would use them) -- but Feed next is blocked (no local window).
+      // (they route over ssh as decision files).
       var remote = !!it.remote;
       var remoteWait = remote && it.gate === "waiting";
       // Shared window (2026-09-10): this session's VS Code window hosts other Claude
       // sessions, and Shepherd types into the window, not a tab -- so every keystroke
-      // control greys out (Lua refuses them anyway). Jump, Queue, Gate and Policy stay live.
+      // control greys out (Lua refuses them anyway). Jump, Gate and Policy stay live.
       var sharedN = (!remote && it.editor !== "kitty") ? (it.sharedWindow|0) : 0;
       var shared = sharedN > 1;
       var gateWait = it.gate === "waiting";
@@ -23853,7 +23624,6 @@ local HTML = [[
       else if(e.type === "auto_continue") detail = "resumed after API error" + (e.attempt ? (" (attempt " + e.attempt + ")") : "");
       else if(e.type === "rule") detail = (e.rule || e.kind || "");
       else if(e.type === "loop") detail = (e.repeats != null ? (e.repeats + "x") : "");
-      else if(e.type === "queue_starved") detail = (e.depth != null ? (e.depth + " queued") : "");
       else if(e.type === "error") detail = (e.reason || e.message || "");
       else if(e.type === "auto_respawn_blocked") detail = (e.reason || e.outcome || "");
       else if(e.type === "usage_limit") detail = usageLimitDetail(e);
@@ -25058,9 +24828,6 @@ local HTML = [[
       if(headsUp(it) && it.needsYouWhy){ meta = (meta ? meta + " · " : "") + it.needsYouWhy; }
       if(it.remote){ meta = (meta ? meta + " · " : "") + "⇄ " + (it.remote.host || "remote")
                             + (it.bridgeStale ? " (bridge offline)" : ""); }
-      if(it.queue > 0){ meta = (meta ? meta + " · " : "") + (it.routed ? "⇉" : "+") + it.queue + " queued"; }
-      else if(it.routed){ meta = (meta ? meta + " · " : "") + "⇉ routed"; }
-      if(it.starved){ meta = (meta ? meta + " · " : "") + "⌛ queue starved"; }
       if(it.autopilot){ meta = (meta ? meta + " · " : "") + "🛫 autopilot"; }
       if(it.draining){ meta = (meta ? meta + " · " : "") + "⛔ draining"; }
       if(it.collide){ meta = (meta ? meta + " · " : "") + "⚠ shared dir"; }
@@ -25608,7 +25375,7 @@ wv:windowTitle("Claude Shepherd")
 wv:level(hs.drawing.windowLevels.floating)
 wv:behavior(hs.drawing.windowBehaviors.canJoinAllSpaces | hs.drawing.windowBehaviors.stationary)
 wv:html(HTML)
-wv:allowTextEntry(true)  -- let the Nudge/Queue input accept keyboard input
+wv:allowTextEntry(true)  -- let the Nudge input accept keyboard input
 wv:show()
 PANEL_START_TS = FX.now()  -- anchor the Shift report's "since opened" window
 print("[cc-dashboard] panel shown")
@@ -25989,17 +25756,17 @@ local function runRules(ruleSet, it, edgeKind)
     if not (r.once and ruleFired[mark]) then
       if r.once then ruleFired[mark] = true end
       local p = r.processor or {}
-      -- 2026-09-29: a log, relabel or feed acts here, through FX.automationAct (a dry run records
+      -- 2026-09-29: a log or relabel acts here, through FX.automationAct (a dry run records
       -- would_rule and changes nothing); a nudge or continue goes through FX.typeWhenReady's door.
+      -- (2026-11-19: the feed processor, which queued a task, went with the task queue.)
       local ruleSays = tostring(r.name) .. " on " .. tostring(edgeKind) .. ": " .. tostring(p.kind)
-      if p.kind == "log" or (p.kind == "relabel" and p.label and p.label ~= "")
-         or (p.kind == "feed" and p.text and p.text ~= "") then
+      if p.kind == "log" or (p.kind == "relabel" and p.label and p.label ~= "") then
         FX.automationAct("rule", it, { summary = ruleSays .. ((p.kind == "relabel") and (" -> " .. tostring(p.label))
-          or (p.kind == "feed") and (" '" .. tostring(p.text):sub(1, 120) .. "'") or ""), by = "rule" }, function()
+          or ""), by = "rule" }, function()
           if p.kind == "log" then
             ledgerFor(it, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
                             processor = "log", note = p.text })
-          elseif p.kind == "relabel" then
+          else
             local lkey = it.projectKey or it.cwd
             if lkey then
               labels = core.setLabel(labels, lkey, p.label, it.name); FX.saveLabels(labels); it.label = p.label
@@ -26007,17 +25774,6 @@ local function runRules(ruleSet, it, edgeKind)
             ledgerFor(it, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
                             processor = "relabel", to = p.label })
             if not lkey then return false, "no project to label" end
-          else
-            -- Enqueue a task onto the tile's queue; the existing auto-feed delivers it
-            -- when the session next reaches done/idle (no direct keystroke). Resolve the
-            -- key EXACTLY as the reader does -- FX.queueKeyFor -> core.queueKey SANITIZES
-            -- it (a raw projectKey/cwd has slashes, which both break the write path and
-            -- diverge from the key auto-feed/router read; review-caught silent data loss).
-            local qk = FX.queueKeyFor(it)
-            if not qk then return false, "no queue for this session" end
-            FX.writeQueue(qk, core.queuePush(FX.readQueue(qk), tostring(p.text)))
-            ledgerFor(it, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
-                            processor = "feed", text = tostring(p.text):sub(1, 200) })
           end
         end)
       elseif p.kind == "nudge" and p.text and p.text ~= "" then
@@ -26067,8 +25823,8 @@ local function runRules(ruleSet, it, edgeKind)
   end
 end
 
--- Push current statuses into the webview + deck; run queue auto-feed and
--- stale-approval escalation; keep the heartbeat fresh.
+-- Push current statuses into the webview + deck; run stale-approval escalation;
+-- keep the heartbeat fresh.
 -- R3-24: refresh() is a thin re-entrancy guard around refreshBody(). A dispatchSerialized
 -- closure for a KITTY target blocks on FX.runKittyChecked's t:waitUntilExit(), which PUMPS
 -- the Hammerspoon run loop -- so the 1Hz timer could otherwise fire a NESTED refresh mid-feed
@@ -26087,14 +25843,10 @@ function FX._refreshBody()
   reconcileBridge(cfg)  -- SSH bridge timers track config (cheap diff per tick)
   pcall(function() FX.pollHostStats(false, cfg) end)  -- #6 host stats: self-gating (off by default) + throttled (HOST_TTL)
   local list = refreshList()
-  -- Cohort tag (.group) MUST be applied before the routing dispatcher below: L4
-  -- @role: routing matches a task's role against a member's GROUP, and routeGroups
-  -- holds references to these same tiles. (Also feeds the filter chips, group-scoped
-  -- bulk actions, and L2 attachment matching — all later in the tick.)
+  -- Cohort tag (.group): feeds the filter chips, group-scoped bulk actions, and L2
+  -- attachment matching — all later in the tick.
   core.applyGroups(list, groups)
   core.stampProviders(list, cfg)   -- 2026-09-30: it.providerId, before any rule matches a provider
-  local autofeed   = core.config(cfg, "queue.autofeed", false) == true
-  local routingOn  = core.config(cfg, "queue.routing.enabled", false) == true  -- 4c-E
   local autoTitleOn = core.config(cfg, "autoTitle.enabled", false) == true  -- L5 derived tile titles
   local loopOn      = core.config(cfg, "escalation.loop.enabled", false) == true  -- L5 loop watchdog
   local loopRepeats = tonumber(core.config(cfg, "escalation.loop.repeats", 3)) or 3
@@ -26107,8 +25859,6 @@ function FX._refreshBody()
   local rulesOn     = core.config(cfg, "rules.enabled", false) == true  -- L6 event-callback rules
   local ruleSet     = rulesOn and core.ruleList(FX.readRules()) or nil  -- loaded once per refresh
   local schedulesOn = core.config(cfg, "schedules.enabled", false) == true  -- L7 scheduled routines
-  local starveMin  = tonumber(core.config(cfg, "queue.routing.starveMinutes", 0)) or 0
-  local routeGroups = {}  -- queueKey -> { items }: members per project, for the dispatcher
   local escEnabled = core.config(cfg, "escalation.enabled", false) == true
   local escMin     = tonumber(core.config(cfg, "escalation.minutes", 5)) or 5
   local escSound   = core.config(cfg, "escalation.sound", false) == true
@@ -26477,30 +26227,7 @@ function FX._refreshBody()
     -- blocked / needs follow-up), for the card and its Instances row.
     FX.stepTurnLabel(it, pv, ledgerOn)
 
-    -- L4 per-task timing: a fed queue task finishes on its first done edge -- ledger
-    -- the duration + role, then clear the marker (the autofeed below may re-stamp the
-    -- next task). Fires before drain/feed so a completing task is always recorded.
-    local started = taskStart[it.key]
-    if started then
-      -- Abandon only past the RESPAWN death threshold (autoRespawnStale), NOT the 90s
-      -- display staleness: no hook fires mid-tool-call, so a healthy session running one
-      -- long build/test (Bash tool timeout up to 600s) goes display-stale mid-task -- its
-      -- eventual done edge must still ledger task_done (abandoning at it.stale silently
-      -- lost timing for exactly the long tasks this exists to measure).
-      if it.updated ~= nil and (now - it.updated) > autoRespawnStale then
-        taskStart[it.key] = nil  -- abandon: frozen past the death threshold, no done edge is coming
-      else
-        local td = core.stepTaskDone(started, pv and pv.status, it.status, now)
-        if td then
-          ledgerFor(it, { type = "task_done", durationS = td.durationS,
-                          role = started.role, by = started.by or "queue" })
-          taskStart[it.key] = nil
-        end
-      end
-    end
-
-    -- Graceful drain (Feature F): if armed, close on the SAME fresh `done` transition
-    -- the queue uses. Drain WINS over auto-feed (an explicit stop beats a queued task).
+    -- Graceful drain (Feature F): if armed, close on a fresh `done` transition.
     local drained = false
     if drainOn and core.shouldDrainClose(draining[it.key], pv and pv.status, it.status) then
       draining[it.key] = nil
@@ -26515,80 +26242,6 @@ function FX._refreshBody()
     -- shouldDrainClose block (which clears the flag when it fires) so a tile whose
     -- drain just fired doesn't render a stale badge on its final frame.
     it.draining = core.drainingBadge(drainOn, draining[it.key] ~= nil)
-
-    -- Task queue: depth badge + auto-feed on a fresh done transition. Stale tiles
-    -- are never fed (same invariant as selectActionable: a dead window can't act --
-    -- the paste would land in whatever window the editor happens to focus).
-    -- Queues are PROJECT-keyed (FX.queueKeyFor) so a respawned or /clear'd session
-    -- inherits its project's pending tasks instead of stranding them on disk.
-    local qk = FX.queueKeyFor(it)
-    local q = FX.readQueue(qk)
-    it.queue = core.queueDepth(q)
-    -- 4c-E routing bookkeeping: retire a satisfied/expired in-flight marker,
-    -- collect project membership for the post-loop dispatcher, and badge armed
-    -- projects. An ARMED project skips the per-tile 4b autofeed below -- the
-    -- single dispatcher owns its feeds (otherwise the finisher's edge-feed and
-    -- the router could both fire in one tick).
-    if core.routePendingDone(routePending[it.key], it.status, now, core.ROUTE_PENDING_TIMEOUT) then
-      routePending[it.key] = nil
-    end
-    it.routed = core.queueRouted(q) or nil  -- armed flag (file truth; toggle state)
-    it.routeSeq = (core.queueRouteMode(q) == "sequential") or nil  -- L4 process mode
-    local routedHere = routingOn and it.routed or false
-    if routingOn then
-      routeGroups[qk] = routeGroups[qk] or {}
-      table.insert(routeGroups[qk], it)
-    end
-    -- (a session in a shared window is never auto-fed: the task would be pasted into
-    -- whichever tab is in front -- it stays queued; core.keystrokeBlocked)
-    local feedNow = false
-    if not drained and not it.stale and not it.remote and not routedHere
-       and not core.keystrokeBlocked(it) then
-      feedNow = core.shouldFeed(pv and pv.status, it.status, q, autofeed)
-    end
-    if feedNow then
-      do
-        -- 2026-09-29: queue.dryRun (and automation.dryRun) are judged by FX.automationAct in the
-        -- typist's slot, like every other automatic send: a dry run records would_feed, pops nothing.
-        -- Serialized on the shared injection tail (R3 #2): the paste is a
-        -- multi-second keystroke ladder, and refresh() firing it mid-chain
-        -- would land the task text in whichever session holds focus. The pop
-        -- runs INSIDE the slot -- the queue is re-read at dispatch time (a
-        -- manual feed may have consumed the head while this slot waited) --
-        -- and only a DELIVERED paste pops the queue (FX.feedTask returns false
-        -- when the no-window-match guard skipped it).
-        -- #34: FX.feedGuard -- a kitty delivery pumps the run loop mid-slot, so a
-        -- nested tick/bridge feed would double-pop the same head (see FX.feedGuard).
-        -- 2026-09-28: FX.typeWhenReady -- fed only once the session can take it; a refusal
-        -- keeps the task queued for the next done edge.
-        FX.typeWhenReady(it, "autofeed", function()
-          FX.feedGuard(function()
-          local task, q2 = core.queuePop(FX.readQueue(qk))
-          if not task then return end
-          local typed, notFed = renderFeed(task, it)
-          if not typed then
-            print("[cc-queue] not fed: " .. tostring(notFed) .. " -- task kept queued")
-            FX.automationRefuse(notFed)
-            return
-          end
-          print("[cc-queue] feeding '" .. tostring(task) .. "' to " .. it.name)
-          local pre = FX.autoModelPreface(it, task)   -- DR6 (nil unless opted-in + a different tier)
-          local commit = core.queueFeedCommit(FX.feedTask(winTarget(it), typed, pre and pre.cmd))
-          if commit.persist then
-            FX.writeQueue(qk, q2)
-            it.queue = core.queueDepth(q2)
-            stampTaskStart(it, task, "autofeed")
-            if pre then ledgerFor(it, { type = "model_change", from = pre.from, to = pre.model, by = "auto", reason = pre.reason }); it.model = pre.model; FX.patchStatus(it.key, { model = pre.model }) end
-          else
-            print("[cc-queue] feed skipped (no window match) -- task kept queued")
-            FX.automationRefuse("no window match")
-          end
-          ledgerFor(it, { type = commit.event, task = tostring(task):sub(1, 200), by = "autofeed" })
-          end)
-        end, { extraStagger = it.auto_model and 0.8 or 0,   -- DR6: reserve extra stagger for the /model preface ladder
-               summary = "feed '" .. tostring(core.queuePeek(q) or ""):sub(1, 120) .. "'" })
-      end
-    end
 
     -- Escalation: nag harder when an approval sits too long (once per episode). nowEsc is an
     -- accumulator, NOT a mutation of pv: pv is last refresh's read-only snapshot (and may be
@@ -26807,7 +26460,6 @@ function FX._refreshBody()
   -- removeStatus) without a done edge -- the loop above only visits live tiles, so a gone
   -- key would leak forever (mirrors the usageState seen-set reap). Single-sourced through
   -- core.reapUnbacked so the unbounded-growth guard can't drift per table.
-  core.reapUnbacked(taskStart, newPrev)
   core.reapUnbacked(loopAlerted, newPrev)
   core.reapUnbacked(FX._healedDone, newPrev)         -- stale-"done" self-heal latch
   core.reapUnbacked(FX._healedApproval, newPrev)     -- stale-"approval" self-heal latch
@@ -26831,11 +26483,6 @@ function FX._refreshBody()
   -- (SessionEnd/prune/respawn) before that edge leaks forever -- reap like the siblings.
   core.reapUnbacked(watchdog, newPrev)
   core.reapUnbacked(draining, newPrev)
-  -- R3-20: routePending (tile-key -> dispatch ts) is cleared only on a LIVE-tile visit
-  -- (routePendingDone) or inside the router's slot. A tile holding a fresh marker that
-  -- VANISHES (prune/SessionEnd/respawn/close) before the next visit leaks forever -- reap
-  -- it against the live tile set like the watchdog/draining siblings.
-  core.reapUnbacked(routePending, newPrev)
   -- respawnAttempts / autoContinueState.attempts are now budgetKey-keyed (R2-21:
   -- per terminal window, falling back to projectKey/cwd); cleared only on sustained
   -- health or a clean done, so a folder/window abandoned while frozen leaks. Build a
@@ -26923,125 +26570,6 @@ function FX._refreshBody()
       end
       FX.writeSchedules(sstate)
     end
-  end
-
-  -- 4c-E project routing dispatcher: ONE feed per armed project per tick, to
-  -- whichever member is free (done, not error/draining/pending; display-stale
-  -- `done` is the NORMAL between-turns state and stays routable -- #36). Runs
-  -- AFTER the tile loop so it sees every member's final status this tick --
-  -- two sessions finishing simultaneously yield exactly one deterministic
-  -- pick. The pop stays inside the dispatchSerialized slot and delivery-gated
-  -- (same contract as 4b); a skipped paste clears the pending marker so the
-  -- session stays eligible.
-  if routingOn then
-    for qk, members in pairs(routeGroups) do
-      local q = FX.readQueue(qk)
-      -- 2026-09-28: a member a send was refused for sits out until its status changes, so the
-      -- level-triggered router can't re-pick it (and re-ledger the refusal) every tick.
-      local held = {}
-      for _, m in ipairs(members) do
-        if core.typingHeld(FX._typing.held, m) then held[m.key] = true end
-      end
-      local pick = core.routeTask(members, q, { globalOn = true, skip = held, draining = draining,
-        pending = routePending, now = now, pendingTimeout = core.ROUTE_PENDING_TIMEOUT })
-      if pick then
-        starvedSince[qk] = nil; starvedAlerted[qk] = nil
-        local item
-        for _, m in ipairs(members) do if m.key == pick.key then item = m; break end end
-        if item then
-          do
-            -- 2026-09-29: queue.dryRun is judged in the router's slot by FX.automationAct (would_route,
-            -- nothing popped); the pending marker holds the member until its status moves or it expires.
-            routePending[item.key] = now
-            -- #34: FX.feedGuard -- a kitty delivery pumps the run loop mid-slot, so
-            -- a nested tick/bridge feed would double-pop the same head. A skipped
-            -- (guarded-out) attempt clears the pending marker: the member stays
-            -- eligible and the level-triggered router re-picks next tick.
-            -- 2026-09-28: FX.typeWhenReady -- a refused member is held (skipped above) until its
-            -- status changes, and its pending marker is released.
-            FX.typeWhenReady(item, "router", function()
-              if not FX.feedGuard(function()
-              local freshQ = FX.readQueue(qk)
-              -- R1-18: the head may have changed since routeTask peeked (a queue-move
-              -- during the stagger delay). Re-validate the head's role/barrier against
-              -- the chosen member; on a mismatch, do NOT pop/feed -- clear pending and
-              -- let the next tick re-peek + re-pick against the reordered head.
-              if not core.routeFeedMatches(item, core.queuePeek(freshQ), members) then
-                print("[cc-route] head changed under the router slot -- refusing mismatched feed, task kept queued")
-                FX.automationRefuse("the queue's head changed")
-                routePending[item.key] = nil; return
-              end
-              -- R2-20: re-check the chosen member is STILL free at dispatch time. The
-              -- snapshot item.status is frozen at tick time (still "done" here), so a
-              -- manual feed/nudge that drove this member into working/approval during
-              -- the stagger is invisible to routeFeedMatches -- a live re-stat catches
-              -- it so the routed paste never lands mid-turn. On not-free: keep queued.
-              local fresh = FX.liveStatusFor(item.key)
-              if fresh and not core.sessionFree(fresh, { now = now, pendingTimeout = core.ROUTE_PENDING_TIMEOUT }) then
-                print("[cc-route] member busy under the router slot -- task kept queued")
-                FX.automationRefuse("busy")
-                routePending[item.key] = nil; return
-              end
-              local task, q2 = core.queuePop(freshQ)
-              if not task then FX.automationRefuse("queue empty"); routePending[item.key] = nil; return end
-              local typed, notFed = renderFeed(task, item)
-              if not typed then
-                print("[cc-route] not fed: " .. tostring(notFed) .. " -- task kept queued")
-                FX.automationRefuse(notFed)
-                routePending[item.key] = nil; return
-              end
-              print("[cc-route] feeding '" .. tostring(task) .. "' to " .. tostring(item.name))
-              local pre = FX.autoModelPreface(item, task)   -- DR6 (nil unless opted-in + a different tier)
-              local commit = core.queueFeedCommit(FX.feedTask(winTarget(item), typed, pre and pre.cmd))
-              if commit.persist then
-                FX.writeQueue(qk, q2)
-                stampTaskStart(item, task, "router")
-                if pre then ledgerFor(item, { type = "model_change", from = pre.from, to = pre.model, by = "auto", reason = pre.reason }); item.model = pre.model; FX.patchStatus(item.key, { model = pre.model }) end
-              else
-                print("[cc-route] feed skipped (no window match) -- task kept queued")
-                FX.automationRefuse("no window match")
-                routePending[item.key] = nil  -- session stays eligible
-              end
-              ledgerFor(item, { type = commit.event, task = tostring(task):sub(1, 200), by = "router" })
-              end) then routePending[item.key] = nil end
-            end, { extraStagger = item.auto_model and 0.8 or 0,   -- DR6: reserve extra stagger for the /model preface ladder
-                   summary = "feed '" .. tostring(core.queuePeek(q) or ""):sub(1, 120) .. "'",
-                   onRefused = function() routePending[item.key] = nil end })
-          end
-        end
-      elseif core.queueRouted(q) and core.queuePeek(q) ~= nil then
-        -- Armed + work queued + nobody free: starvation clock. One ledger event
-        -- + tile tint per episode when queue.routing.starveMinutes > 0.
-        -- 2026-10-03 (D4b): a queue whose every line is held has nothing to feed, so its clock resets.
-        starvedSince[qk] = starvedSince[qk] or now
-        if core.queueStarved(members, q, { minutes = starveMin, sinceTs = starvedSince[qk],
-             now = now, draining = draining, pending = routePending }) then
-          for _, m in ipairs(members) do m.starved = true end
-          if not starvedAlerted[qk] then
-            starvedAlerted[qk] = true
-            -- #6: if host stats are on and the box is resource-pressured, note it -- a
-            -- starvation can be the machine choking, not just a missing free session.
-            local pressure = lastHostHealth and lastHostHealth.pressured and lastHostHealth.pressure or nil
-            print("[cc-route] " .. qk .. " starved: " .. core.queueDepth(q)
-              .. " task(s) queued, no free session for " .. starveMin .. "m+"
-              .. (pressure and (" (host pressured: " .. pressure .. ")") or ""))
-            ledgerFor(members[1], { type = "queue_starved", depth = core.queueDepth(q), hostPressure = pressure })
-            runRules(ruleSet, members[1], "starved")  -- L6 starved trigger (rising edge, once per episode)
-          end
-        end
-      else
-        starvedSince[qk] = nil; starvedAlerted[qk] = nil
-      end
-    end
-  end
-  -- R3-20: starvedSince/starvedAlerted are queueKey-keyed and cleared only inside the
-  -- routing loop. A project whose tiles all vanish mid-episode (prune/respawn) never
-  -- gets that clear -- reap both against the live queueKey set (routeGroups keys).
-  do
-    local liveQk = {}
-    for qk in pairs(routeGroups) do liveQk[qk] = true end
-    core.reapUnbacked(starvedSince, liveQk)
-    core.reapUnbacked(starvedAlerted, liveQk)
   end
 
   FX.reapWorkingOn(list)   -- 2026-09-29: ended sessions leave the working-on cache

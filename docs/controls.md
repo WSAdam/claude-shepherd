@@ -57,7 +57,7 @@ In order (a remote SSH-bridge tile offers only Relabel and Set group):
   window (⌘⇧W), found by **title**, so for two sessions sharing a name prefer **Forget tile** or
   **Hide tile**. The project's saved label is kept.
 - **Hide tile (keep session running)**: takes a session **off the grid** without touching it. It
-  keeps running and Shepherd keeps managing it: gate decisions, auto-feed, escalation, policies and
+  keeps running and Shepherd keeps managing it: gate decisions, escalation, policies and
   auto-respawn all still apply. Only the drawing stops (panel and Stream Deck). The mark belongs to
   that one session, so reopening the project gives a fresh, visible tile. Restore any time from
   **☰ → 🙈 Hidden sessions**, which shows each hidden session's live status.
@@ -107,8 +107,7 @@ In order (a remote SSH-bridge tile offers only Relabel and Set group):
   insights are already claimed, and needs `LB_URL` / `GRADE_PREVIEW_TOKEN` in your shell.
 - **Nudge box**: a multi-line input. **Enter** sends, **Shift+Enter** adds a newline, so a pasted
   list arrives intact. **Paste an image** and it's attached as a chip; **Send** delivers text and
-  image through the clipboard (one ⌘V). **Queue** saves the text for later instead
-  ([Automation → Task queue](automation.md#task-queue)); **Tpl ▾** inserts a saved template.
+  image through the clipboard (one ⌘V). **Tpl ▾** inserts a saved template.
 
 **Model controls** (off by default; ⚙ Settings → Appearance → **Model controls**) add a row of six:
 
@@ -148,8 +147,9 @@ Two paths, and it matters which one your sessions use:
    element, and there's no supported API to type into a running session). This needs Hammerspoon's
    **Accessibility** permission.
 
-For reliable approve and deny, use the gate or Kitty. For handing over work, **Queue** stores it
-reliably; the typing into the VS Code chat input is the fragile part.
+For reliable approve and deny, use the gate or Kitty. For handing over work, the
+[session mailbox](automation.md#session-mailbox) is the reliable path; the typing into the VS Code
+chat input is the fragile part.
 
 ### Editor auto-detection
 
@@ -164,13 +164,13 @@ in [claude-dashboard.lua](../claude-dashboard.lua); add or reorder editors there
 ### Sessions that share a window
 
 When several Claude tabs run in one VS Code window, keys land in whichever tab is in front. So a
-session whose window hosts other sessions gets **no keystroke action at all**: no nudge, queue feed,
-routed task, auto-continue, `/clear`, `/compact`, `/rc`, model / effort / mode switch or key
+session whose window hosts other sessions gets **no keystroke action at all**: no nudge,
+auto-continue, `/clear`, `/compact`, `/rc`, model / effort / mode switch or key
 approval. The detail panel greys those controls and says how many sessions share the window; each
 refusal is logged and raises a toast (at most once a minute per session).
 
 Everything that isn't a keystroke still works: **Jump**, gate approvals, held questions,
-ready-to-merge answers, Queue add, Gate and Policy. A queued task simply waits, and a message in
+ready-to-merge answers, Gate and Policy. A message in
 the [session mailbox](automation.md#session-mailbox) arrives at the session's next turn end or
 start, with **1 message waiting** on its card until then. **Close** goes
 through the tab bridge, which closes just that session's Claude tab: a batch unit's by the tag the

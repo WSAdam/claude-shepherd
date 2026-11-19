@@ -90,8 +90,6 @@ Every feature below has a reference page one click away. The panel lists the sam
 A fresh install turns on auto-continue, handoff notes, auto-compact and
 the fleet idle alert; every other automatic behaviour here waits for its switch.
 
-- [**Task queue & auto-feed**](docs/automation.md#task-queue): line up tasks per session, feed the
-  next when one finishes, and route a project's tasks to whichever session is free.
 - [**Prompt templates**](docs/automation.md#prompt-templates): reusable, versioned prompts with
   variables filled in at send time.
 - [**Model auto-routing**](docs/automation.md#model-auto-routing): a queued task switches the
@@ -105,7 +103,7 @@ the fleet idle alert; every other automatic behaviour here waits for its switch.
 - [**Auto-compact with notes**](docs/automation.md#auto-compact-with-notes): sessions compact at 85%
   of their window, write their notes just before, and get them back right after.
 - [**Automation rules**](docs/automation.md#automation-rules): when a session finishes, errors or
-  stalls, log it, relabel it, nudge it, continue it or feed its queue.
+  stalls, log it, relabel it, nudge it or continue it.
 - [**Automation dry run & trace**](docs/automation.md#dry-run-and-the-automation-trace): see what
   automation would do, did, or refused and why.
 - [**Routines**](docs/automation.md#routines): spawn a session, push a digest, or run a [**Main-green check**](docs/merging-and-batches.md#is-main-still-green-a-scheduled-check) on a cron schedule.
@@ -245,7 +243,7 @@ any key you haven't set).
 auto-compact (`compact`), worktree leases (`lease`), the audit ledger (`ledger`),
 the three Stop guards (`stopGuards`), the fleet idle alert (`alerts.idleMinutes`) and the My List review heads-up (`worklist.reviewCount`), plus the merge
 checker, the worktree fence, held questions, Remote Control for spawned sessions, ending leftover
-processes that have no tab, the main moved notice and grant grading. Auto-feed, rules, routines,
+processes that have no tab, the main moved notice and grant grading. Rules, routines,
 escalation and the coach start off. Reference: [docs/configuration.md](docs/configuration.md).
 
 ## Safety model
@@ -286,7 +284,7 @@ Full detail: [docs/approvals-and-policies.md](docs/approvals-and-policies.md#the
 | [Controls](docs/controls.md) | Clicks and menus, detail-panel buttons, shared windows, spawning, hotkeys, Stream Deck, awake and lock |
 | [Approvals and policies](docs/approvals-and-policies.md) | The safety model, the gate, always-ask commands, the worktree fence, policies, questions, the three Stop guards |
 | [Merging and batches](docs/merging-and-batches.md) | Worktree tabs, ready to merge, gates, gate blame, the main-green check, the checker, red-first, receipts, batches, brief pre-flight, grant grading, the overlap radar, main moved, the demo, the tab bridge |
-| [Automation](docs/automation.md) | When automation types, dry run, the queue, templates, respawn, notes, the mailbox, tickets, rules, routines, the coach, the fleet idle alert, A/B compare |
+| [Automation](docs/automation.md) | When automation types, dry run, templates, respawn, notes, the mailbox, tickets, rules, routines, the coach, the fleet idle alert, A/B compare |
 | [Usage and cost](docs/usage-and-cost.md) | Context bars, plan usage, cost, commits, where the time went, the audit ledger and its views, past sessions and Resume |
 | [Providers and integrations](docs/providers-and-integrations.md) | Providers and models, agent profiles, the find-only audit, MCPs and skills, Remote Control, the SSH bridge |
 | [Make it yours](docs/customizing.md) | Layouts, themes, colours, sizing |
