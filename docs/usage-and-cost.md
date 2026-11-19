@@ -280,9 +280,7 @@ the ledger was off or never saw it:
   - no process's command line holds its id (`claude -r`, `--resume`, VS Code's `--resume=<id>`, a
     Seance fork).
 
-  A session still in the [restart](fleet.md#restart-the-fleet-in-place) snapshot (it ended within
-  `restart.keepHours`) is checked by Restart fleet's own, stricter rule instead. It checks again
-  right before the tab opens. A session that ran in a folder that's gone (a removed worktree) can't
+  It checks again right before the tab opens. A session that ran in a folder that's gone (a removed worktree) can't
   be resumed, and neither can one in a worktree another live session works in. A terminal or kitty
   Resume launches like a spawn, so with `spawn.live` off nothing is launched (it says so).
 - **Only a kept copy left:** VS Code's session link opens a new empty tab when the transcript is

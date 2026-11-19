@@ -2917,7 +2917,7 @@ end
 -- reads a capped batch of heads and tails (core.pastScanPlan: only what changed, newest first) into
 -- scratch files; its callback parses them (core.pastScanApply: whole lines, walked with find) and
 -- re-sends History; a batch left behind chains the next. Resume (FX.pastResume) reopens only a session
--- verified dead (FX.restartVerifyDead -> FX.pastVerifyDead: no card, no live session file, no process
+-- verified dead (FX.pastVerifyDead: no card, no live session file, no process
 -- using its id): VS Code through FX.openClaudeTab's session-link rule (D-14), a terminal or kitty
 -- session through FX.spawnSession's claude -r; a kept-only one gets its copy back first
 -- (core.pastRestoreArgv: never over a file). State on FX: the main chunk is at Lua's 200-local cap.
@@ -3046,7 +3046,7 @@ function FX.refreshPastSessions(force)
   return ok
 end
 
--- A past session (in no restart snapshot) verified dead RIGHT NOW? true, or false + why: one ps
+-- A past session verified dead RIGHT NOW? true, or false + why: one ps
 -- for every process, with Shepherd's own pid as its control (core.pastLiveness decides).
 function FX.pastVerifyDead(id)
   local me = tostring(type(rawget(hs, "processInfo")) == "table" and hs.processInfo.processID or ""):match("^%d+$")
@@ -3089,7 +3089,7 @@ function FX.pastResume(text)
   if not plan then return refuse(why) end
   local occupant = FX.worktreeOccupantOf(plan.dir, nil)
   if occupant then return refuse(core.occupantReason(occupant)) end
-  local dead, whyNot = FX.restartVerifyDead(sid)
+  local dead, whyNot = FX.pastVerifyDead(sid)
   if not dead then return refuse(whyNot or "it can't be verified dead") end
   local name = core.capChars(tostring(facts.prompt or sid:sub(1, 8)), 40)
   if not plan.restore then return FX.pastResumeLaunch(plan, name) end
@@ -3125,7 +3125,7 @@ function FX.pastResumeLaunch(plan, name)
       restored = plan.restore and true or nil, outcome = outcome, reason = why,
       summary = (outcome == "ok") and ("reopened " .. tostring(name)) or ("not reopened: " .. tostring(why)) })
   end
-  local dead, whyNot = FX.restartVerifyDead(plan.id)
+  local dead, whyNot = FX.pastVerifyDead(plan.id)
   if not dead then
     note("refused", whyNot)
     FX.alert("⚠️ Resume: " .. tostring(whyNot), 5)
@@ -5130,9 +5130,6 @@ end
 -- session (cc_remove leaves it too).
 function FX.removeStatus(key)
   local home = os.getenv("HOME") or ""
-  -- 2026-09-30: a session Shepherd drops itself (closed from the panel, pruned, respawned) also
-  -- leaves the restart snapshot at the next tick -- it is never offered for reopening
-  if type(FX._restart) == "table" then FX._restart.forget[tostring(key)] = true end
   os.remove(STATUS_DIR .. "/" .. key .. ".json")
   os.remove(STATUS_DIR .. "/" .. key .. ".decision")
   os.remove(STATUS_DIR .. "/" .. key .. ".decision.note")   -- the reason typed beside Deny
@@ -12190,7 +12187,7 @@ function FX.spawnSession(editor, project, task, permissionMode, providerId, agen
     opts.pluginDirs = agentOpts.pluginDirs
     opts.allowedTools = agentOpts.allowedTools   -- the find-only audit preset (core.auditLaunchOpts)
     opts.settings = agentOpts.settings
-    opts.resume = agentOpts.resume   -- 2026-09-30: restart in place reopens that session (`-r <id>`)
+    opts.resume = agentOpts.resume   -- 2026-09-30: History's Resume reopens that session (`-r <id>`)
   end
   -- Auto-enable Remote Control via the --remote-control launch flag, but only for a LOCAL,
   -- native-Anthropic session: RC needs claude.ai auth and rejects third-party/gateway
@@ -12221,7 +12218,7 @@ function FX.spawnSession(editor, project, task, permissionMode, providerId, agen
   end
   -- 2026-09-28: a respawn (agentOpts.except = the dead tile it replaces) leaves the new session the
   -- dead one's handoff note, written before the launch so its SessionStart can't miss it.
-  -- 2026-09-30: not for a restart in place (agentOpts.resume): that session gets its conversation back.
+  -- 2026-09-30: not for a resumed session (agentOpts.resume): that session gets its conversation back.
   local handoff = nil
   if type(agentOpts) == "table" and type(agentOpts.except) == "string" and not agentOpts.resume then
     local okh, p = pcall(FX.writePendingHandoff, agentOpts.except, editor, lineage, project)
@@ -13120,7 +13117,8 @@ end
 -- out, then onDone(true), or onDone(false, why) when nothing was opened. quiet = no "check the
 -- prompt" alert (a batch unit's tab gets its task by message).
 -- restartSession (2026-09-30) = a session id: the tab reopens THAT session instead of a new one.
--- Only FX.restartOne passes it, and only a verified-dead session gets through (D-14, revised).
+-- Only History's Resume (FX.pastResumeLaunch) passes it -- restart in place, its first caller, was
+-- removed 2026-11-19 -- and only a verified-dead session gets through (D-14, revised).
 function FX.openClaudeTab(opts)
   opts = type(opts) == "table" and opts or {}
   local root = type(opts.root) == "string" and opts.root ~= "" and core.normDir(opts.root) or nil
@@ -13142,13 +13140,13 @@ function FX.openClaudeTab(opts)
     end
     local app = w:application()
     local uri = core.claudeTabUri(app and app:bundleID() or nil, opts.prompt, editor)
-    -- 2026-09-30 (D-14, revised for restart in place): a session's own tab is reopened by id only
-    -- when that session is verified dead, checked here, right before the URI goes out
+    -- 2026-09-30 (D-14, revised): a session's own tab is reopened by id only when that session is
+    -- verified dead, checked here, right before the URI goes out
     if opts.restartSession ~= nil then
-      local dead, whyNot = FX.restartVerifyDead(opts.restartSession)
+      local dead, whyNot = FX.pastVerifyDead(opts.restartSession)
       uri = dead and core.restartTabUri(app and app:bundleID() or nil, opts.restartSession, editor) or nil
       if not uri then
-        print("[cc-dashboard] ⚠️ restart: " .. tostring(opts.restartSession) .. " NOT reopened -- " .. tostring(whyNot or "not a session id"))
+        print("[cc-dashboard] ⚠️ reopen: " .. tostring(opts.restartSession) .. " NOT reopened -- " .. tostring(whyNot or "not a session id"))
         return done(false, whyNot or "not a session id")
       end
     end
@@ -13230,468 +13228,6 @@ function FX.newWorktreeTab(stackKey, specJson)
   if not okl then print("[cc-dashboard] ❌ lease for " .. req.path .. " failed: " .. tostring(lease)); lease = nil end
   FX.openClaudeTab({ root = any.mainRoot, editor = editor, label = any.stackName,
                      prompt = core.worktreeTabPrompt(req, spec.task, lease) })
-end
-
--- ---- Restart the fleet in place (2026-09-30) ----
--- Build program unit 41 (the rules and the pure halves: cc-core's "Restart the fleet in place").
--- Each tick FX.stepRestartSnapshot keeps ~/.claude/cc-restart.json in step with the fleet, written
--- whole (temp, then renamed) and only when something changed. ☰ → Restart fleet asks for the plan
--- (FX.restartPreview: the dry run -- it opens nothing); Reopen sends the ids Adam left ticked to
--- FX.restartFleet, which re-plans from fresh facts and reopens them ONE AT A TIME (FX.restartNext):
--- each is verified dead again, stamped `restarted` in the snapshot BEFORE anything launches (so it
--- is never reopened twice), then a VS Code/Cursor tab through FX.openClaudeTab -- which verifies
--- once more right before the URI goes out -- or a kitty/Terminal `claude -r` (FX.restartLaunch).
--- Every reopen goes through FX.automationAct: restart.dryRun / automation.dryRun records what it
--- would do and opens nothing. State on FX: the main chunk is at Lua's 200-local cap.
-FX.RESTART_FILE = os.getenv("CC_RESTART_FILE") or ((os.getenv("HOME") or "") .. "/.claude/cc-restart.json")
--- forget: status keys Shepherd dropped since the last tick; idOf: key -> session id (last tick);
--- live / regAt: the open sessions last tick, and when the session files were last read;
--- shellTried: Terminal sessions whose shell was asked of ps; run: the restart under way;
--- pending: sessions reopened mid-turn that still get their Continue (in memory: a reload drops them)
--- outcomes (2026-10-03): session id -> its latest reopen, the same table as that row's result on its
--- run -- opened or not, and once it is back or given up on, how it ended (FX.stepRestartOutcome;
--- in memory too)
-FX._restart = { snap = nil, dirty = false, forget = {}, idOf = {}, live = {}, regAt = 0, shellTried = {}, run = nil, pending = {},
-                outcomes = {} }
-FX.RESTART_ROW_TIMEOUT = 90   -- seconds one session may take before the run moves on (its stamp stays)
-
--- The snapshot: read once per load (Shepherd is its only writer), then kept in memory.
-function FX.restartSnapshot()
-  if FX._restart.snap == nil then
-    FX._restart.snap = core.parseRestartSnapshot(FX.readFile(FX.RESTART_FILE))
-  end
-  return FX._restart.snap
-end
-function FX.restartWrite(snap)
-  local now = FX.now()
-  snap.written = now
-  FX._restart.snap = snap
-  local ok = FX.writeFileAtomic(FX.RESTART_FILE, core.restartSnapshotJson(snap, now))
-  if not ok then print("[cc-dashboard] ❌ restart: couldn't write " .. FX.RESTART_FILE) end
-  FX._restart.dirty = not ok   -- a failed write is tried again next tick
-  return ok
-end
-
--- Each tick, after the labels, origins and stacks are stamped: the snapshot follows the fleet.
--- No process is run except, once per new Terminal session, the ps that finds its tab's shell;
--- Claude Code's session files are read when a session shows up and at most once a minute after.
-function FX.stepRestartSnapshot(list)
-  local st, now = FX._restart, FX.now()
-  local prev = FX.restartSnapshot()
-  local entries, updated, idOf = {}, {}, {}
-  for _, it in ipairs(list or {}) do
-    local e = core.restartEntry(it, FX.launchDirOf(it))
-    if e then
-      entries[#entries + 1] = e
-      updated[e.id] = it.updated
-      if it.key then idOf[it.key] = e.id end
-    end
-  end
-  local forget = {}
-  for key in pairs(st.forget) do forget[st.idOf[key] or key] = true end
-  st.forget, st.idOf = {}, idOf
-  local keepHours = tonumber(core.config(loadConfig(), "restart.keepHours", nil))
-  local nxt, changed = core.restartSnapshotStep(prev, entries, now,
-    { forget = forget, updated = updated, keepSeconds = keepHours and keepHours * 3600 or nil })
-  -- each open session's process, from Claude Code's own session files: read when a session shows
-  -- up (or comes back), and again every registryRetry seconds (a resumed session changes process)
-  local live, fresh = {}, false
-  for id, e in pairs(nxt.sessions) do
-    if e.ended == nil then
-      live[id] = true
-      if not st.live[id] then fresh = true end
-    end
-  end
-  st.live = live
-  if next(live) ~= nil and (fresh or now - st.regAt >= core.RESTART.registryRetry) then
-    st.regAt = now
-    local reg = FX.readSessions()
-    for id in pairs(live) do
-      if core.restartApplyRegistry(nxt.sessions[id], reg) then changed = true end
-    end
-  end
-  for id, e in pairs(nxt.sessions) do
-    -- a Terminal session's tab: the shell that runs it, asked of ps once per process
-    if e.ended == nil and e.editor == "terminal" and e.window.pid and not e.window.tty
-       and st.shellTried[id] ~= e.window.pid then
-      st.shellTried[id] = e.window.pid
-      local out
-      pcall(function() out = hs.execute(core.restartShellProbeCmd(e.window.pid)) end)
-      if core.restartApplyShell(e, out) then changed = true end
-    end
-  end
-  core.reapUnbacked(st.shellTried, nxt.sessions)
-  st.snap = nxt
-  if changed or st.dirty then
-    if FX.restartWrite(nxt) then
-      -- one log line when a session joins, ends or leaves -- not for every turn that starts or stops
-      local n, ended = 0, 0
-      for _, e in pairs(nxt.sessions) do n = n + 1; if e.ended then ended = ended + 1 end end
-      local line = n .. " session(s), " .. ended .. " ended"
-      if line ~= st.logged then
-        st.logged = line
-        print("[cc-dashboard] ✅ restart snapshot: " .. line)
-      end
-    end
-  end
-end
-
--- The facts a plan hangs on, fresh: Claude Code's session files, and ONE ps for every process in
--- them and in the snapshot -- with Shepherd's own pid as a control: a ps that can't see us proves
--- nothing, and then no session counts as dead.
-function FX.restartFacts(snap)
-  local reg = FX.readSessions()
-  local asked = core.restartProbePids(snap, reg)
-  local facts = { now = FX.now(), registry = reg, asked = asked, lstart = {}, probed = false,
-    exists = function(p) return hs.fs.attributes(p, "mode") == "directory" end,
-    kittyState = function(e) return FX.restartKittyState(e) end }
-  local me = tostring(type(rawget(hs, "processInfo")) == "table" and hs.processInfo.processID or ""):match("^%d+$")
-  if not me then return facts end
-  local pids = { [me] = true }
-  for p in pairs(asked) do pids[p] = true end
-  local out
-  pcall(function() out = hs.execute(core.restartPsCmd(pids)) end)
-  local lstart = core.parsePsLstart(out)
-  if lstart[tostring(tonumber(me))] then
-    facts.probed, facts.lstart = true, lstart
-  else
-    print("[cc-dashboard] ⚠️ restart: ps didn't report Shepherd's own pid -- no session can be verified dead")
-  end
-  return facts
-end
-
--- A kitty session's old window: "idle" (there, at a shell prompt), "busy" or "gone".
-function FX.restartKittyState(e)
-  local w = type(e) == "table" and type(e.window) == "table" and e.window or {}
-  if not w.kittyWindowId then return "gone" end
-  local argv = core.kittyCmd("ls", { kitty_window_id = w.kittyWindowId, kitty_listen_on = w.kittyListenOn })
-  local bin = resolveBin("kitty", core.config(loadConfig(), "spawn.kittyBin", nil))
-  local out = ""
-  pcall(function()
-    local t = hs.task.new(bin, function(_, so) out = so or "" end, argv)
-    if t then t:start(); t:waitUntilExit() end
-  end)
-  return core.kittyWindowIdle(out)
-end
-
--- Is this session verified dead RIGHT NOW? true, or false + why. Asked before a session is
--- stamped and again right before its tab's URI goes out (FX.openClaudeTab).
--- 2026-10-04 (F2): a past session reopened from 🗂 History is in no snapshot (that keeps 72h): it is
--- verified by the past-session rule instead -- no card, no live session file, no process using its id.
-function FX.restartVerifyDead(id)
-  if not core.restartIdOk(id) then return false, "not a session id" end
-  local e = FX.restartSnapshot().sessions[id]
-  if not e then return FX.pastVerifyDead(id) end
-  local live, why = core.restartLiveness(e, FX.restartFacts({ sessions = { [id] = e } }))
-  if live == "dead" then return true end
-  if live == "alive" then return false, tostring(why or "it is running") end
-  return false, "can't tell that it is dead: " .. tostring(why)
-end
-
-function FX.restartPlanNow()
-  local cfg = loadConfig()
-  local snap = FX.restartSnapshot()
-  local waveMinutes = tonumber(core.config(cfg, "restart.waveMinutes", nil))
-  local plan = core.restartPlan(snap, FX.restartFacts(snap), { cfg = cfg, waveSeconds = waveMinutes and waveMinutes * 60 or nil })
-  core.restartStampOutcomes(plan, FX._restart.outcomes)   -- each reopened row: how it ended, or waiting
-  plan.now = FX.now()
-  plan.running = FX._restart.run ~= nil
-  plan.dry = core.automationDryRun(cfg, "restart") and true or false
-  return plan
-end
--- The dry run: exactly what a restart would reopen, where and how -- logged, returned, and shown
--- by the panel. It opens nothing, types nothing and writes nothing.
-function FX.restartPreview()
-  local plan = FX.restartPlanNow()
-  print("[cc-dashboard] 🔍 " .. (core.restartPlanText(plan, plan.now):gsub("\n", "\n[cc-dashboard]    ")))
-  return plan
-end
-function FX.restartPreviewText()
-  local plan = FX.restartPlanNow()
-  return core.restartPlanText(plan, plan.now)
-end
--- onlyIfOpen: a run that finished refreshes the overlay without reopening one Adam closed.
-function FX.restartPushPreview(onlyIfOpen)
-  local plan = FX.restartPreview()
-  if wv then
-    pcall(function()
-      wv:evaluateJavaScript("window.ccRestart(" .. hs.json.encode(plan) .. ", " .. tostring(onlyIfOpen == true) .. ")")
-    end)
-  end
-  return plan
-end
-
--- Stamp (or, with at = nil, unstamp) a snapshot entry as reopened, on disk before anything launches.
-function FX.restartMark(id, at)
-  local snap = FX.restartSnapshot()
-  local e = snap.sessions[id]
-  if not e then return false end
-  e.restarted = at
-  return FX.restartWrite(snap)
-end
-
--- kitty / Terminal: `claude -r <id>` in the session's own window when it is still there and idle,
--- else in a new one (FX.spawnSession, with its one-worktree-one-agent check, spawn.live and
--- ledger). Returns true + whether it went into its own window, or false + why.
-function FX.restartLaunch(row)
-  local cfg = loadConfig()
-  local e = FX.restartSnapshot().sessions[row.id] or {}
-  local w = type(e.window) == "table" and e.window or {}
-  local rs = core.respawnSpec({ cwd = row.dir, editor = row.editor, permission_mode = row.mode,
-                                model = row.model, base_url = e.baseUrl }, cfg)
-  if not rs.canRespawn then return false, tostring(rs.reason) end
-  local occupant = FX.worktreeOccupantOf(row.dir, row.id)
-  if occupant then return false, core.occupantReason(occupant) end
-  local profile = core.providerById(cfg, rs.providerId)
-  local live = core.config(cfg, "spawn.live", false) == true
-  if (row.how == "kitty-window" or row.how == "terminal-tab") and not (ORCH_DRY_RUN and not live)
-     and not (profile and type(profile.ssh) == "table") then
-    local env = profile and core.providerEnv(profile) or nil
-    if not env and rs.model then env = { { name = "ANTHROPIC_MODEL", value = rs.model, secret = false } } end
-    local line = core.restartShellLine(row.dir, row.id,
-      { permissionMode = rs.permissionMode, env = env, claudeBin = FX.claudeBinPath() })
-    local typed = false
-    if line and row.how == "kitty-window" and FX.restartKittyState(e) == "idle" then
-      typed = FX.kittyType({ editor = "kitty", kittyWindowId = w.kittyWindowId, kittyListenOn = w.kittyListenOn }, { line }) == true
-    elseif line and row.how == "terminal-tab" then
-      local script = core.restartTerminalScript(ORCH_TERMINAL, w.tty, line)
-      if script then
-        local ok, res = hs.osascript.applescript(script)
-        typed = ok == true and res == "tab"
-      end
-    end
-    if typed then
-      print("[cc-dashboard] 🚀 restart: " .. tostring(row.name) .. " -> " .. tostring(row.where) .. ": " .. line)
-      return true, true
-    end
-    print("[cc-dashboard] ⚠️ restart: " .. tostring(row.name) .. "'s own window didn't take the line -- opening a new one")
-  end
-  local launched = FX.spawnSession(row.editor, row.dir, nil, rs.permissionMode, rs.providerId or "",
-    { resume = row.id, except = row.id }, false, rs.model)
-  if not launched then return false, "not launched (spawn.live off, or no launch command)" end
-  return true, false
-end
-
--- Reopen one planned session. finish(outcome, why, window) is called exactly once: "opened", "would"
--- (a dry run) or "refused" -- for a tab, only when FX.openClaudeTab reports back. window = the kitty
--- window it was relaunched in, when that was its own (its outcome looks there too).
-function FX.restartOne(row, finish)
-  local st = FX._restart
-  local it = { key = row.id, name = row.name, label = row.name, editor = row.editor, cwd = row.dir }
-  local detail = { summary = "reopen " .. tostring(row.where) .. " (" .. tostring(row.command) .. ")", by = "restart" }
-  local state, failed = "none", nil
-  local function opened(ownWindow)
-    local w = (st.snap and st.snap.sessions[row.id] or {}).window or {}
-    if row.continue then
-      st.pending[row.id] = { id = row.id, at = FX.now(), name = row.name,
-        kittyListenOn = ownWindow and w.kittyListenOn or nil, kittyWindowId = ownWindow and w.kittyWindowId or nil }
-    end
-    FX.appendLedger({ type = "restart_session", session_id = row.id, name = row.name, cwd = row.dir,
-      editor = row.editor, how = row.how, outcome = "ok", summary = "reopened " .. tostring(row.where) })
-    finish("opened", nil, ownWindow and { kittyListenOn = w.kittyListenOn, kittyWindowId = w.kittyWindowId } or nil)
-  end
-  local _, why = FX.automationAct("restart", it, detail, function()
-    local dead, whyNot = FX.restartVerifyDead(row.id)
-    if not dead then return false, whyNot end
-    -- stamped first: whatever happens next, this session is never reopened a second time unless
-    -- Shepherd knows nothing was opened (then the stamp is taken back)
-    if not FX.restartMark(row.id, FX.now()) then return false, "couldn't write the restart snapshot" end
-    if row.how == "tab" then
-      state = "async"
-      local scheduled = FX.openClaudeTab({ root = row.root, editor = row.editor, prompt = "", label = row.name,
-        quiet = true, restartSession = row.id, onDone = function(ok, whyFail)
-          if ok then return opened(false) end
-          FX.restartMark(row.id, nil)   -- FX.openClaudeTab opened nothing
-          FX.automationNote("restart", it, "refused", whyFail, detail)
-          finish("refused", whyFail)
-        end })
-      if not scheduled then
-        state = "failed"
-        FX.restartMark(row.id, nil)
-        failed = "no window folder on record"
-        return false, failed
-      end
-      return
-    end
-    local ok, ownWindow = FX.restartLaunch(row)
-    if not ok then
-      state = "failed"
-      FX.restartMark(row.id, nil)
-      failed = tostring(ownWindow or "not launched")
-      return false, failed
-    end
-    state = "opened"
-    opened(ownWindow == true)
-  end)
-  if why == core.AUTOMATION_DRY then return finish("would") end
-  if state == "none" or state == "failed" then finish("refused", failed or why or "not verified dead") end
-end
-
--- The run's next session; when none is left, the summary.
-function FX.restartNext()
-  local st = FX._restart
-  local run = st.run
-  if not run then return end
-  run.i = run.i + 1
-  local row = run.queue[run.i]
-  if not row then
-    st.run = nil
-    local n = { opened = 0, would = 0, refused = 0 }
-    for _, r in ipairs(run.results) do n[r.outcome] = (n[r.outcome] or 0) + 1 end
-    local msg = "Restart: " .. n.opened .. " reopened"
-      .. (n.would > 0 and (", " .. n.would .. " would reopen (dry run)") or "")
-      .. (n.refused > 0 and (", " .. n.refused .. " not reopened") or "")
-    print("[cc-dashboard] ✅ " .. msg)
-    FX.appendLedger({ type = "restart_fleet_done", opened = n.opened, would = n.would, refused = n.refused, summary = msg })
-    FX.alert(msg)
-    run.done = true
-    FX.restartOutcomeDone(run)   -- every row already back (or none opened)? then say how it ended now
-    FX.restartPushPreview(true)
-    return
-  end
-  -- 2026-10-03: the row's result, kept on the run AND as the session's latest reopen, from the
-  -- start of the attempt (a session opening right now is in flight too: core.restartOutcome's
-  -- rivals). known = every session open now -- one of them showing up later is not this one.
-  local known = {}
-  for id in pairs(st.live) do known[id] = true end
-  local res = { id = row.id, name = row.name, dir = row.dir, root = row.root, editor = row.editor, how = row.how,
-                at = FX.now(), opening = true, known = known, run = run }
-  run.results[#run.results + 1] = res
-  st.outcomes[row.id] = res
-  local settled, backstop = false, nil
-  local function finish(outcome, why, window)
-    if settled then return end
-    settled = true
-    if backstop then backstop.stop() end
-    res.outcome, res.why, res.opening = outcome, why, nil
-    if outcome == "opened" then
-      res.at = FX.now()   -- when it was relaunched: what "back since" is measured from
-      if type(window) == "table" then res.kittyWindowId, res.kittyListenOn = window.kittyWindowId, window.kittyListenOn end
-    end
-    print("[cc-dashboard] " .. (outcome == "refused" and "⚠️" or "✅") .. " restart: " .. tostring(row.name)
-      .. " (" .. tostring(row.id) .. ") " .. outcome .. (why and (" -- " .. tostring(why)) or ""))
-    if outcome == "refused" then
-      FX.appendLedger({ type = "restart_session", session_id = row.id, name = row.name, cwd = row.dir,
-        editor = row.editor, how = row.how, outcome = "refused", reason = why,
-        summary = "not reopened: " .. tostring(why) })
-    end
-    run.timer = after((outcome == "opened") and core.RESTART.gapSeconds or 0.1, FX.restartNext)
-  end
-  -- a session that never reports back doesn't hold the rest up; its stamp stays (it may have opened)
-  backstop = after(FX.RESTART_ROW_TIMEOUT, function() finish("refused", "no answer in " .. FX.RESTART_ROW_TIMEOUT .. "s") end)
-  local ok, err = pcall(FX.restartOne, row, finish)
-  if not ok then finish("refused", "error: " .. tostring(err)) end
-end
-
--- Reopen: `ids` = the session ids Adam left ticked in the preview (required -- nothing restarts
--- without a list that came from a plan). Re-planned from fresh facts: only the rows that are still
--- "reopen" are taken, each id once; a session alive now is left alone. One run at a time.
-function FX.restartFleet(ids)
-  local st = FX._restart
-  if st.run then
-    FX.alert("Restart: already reopening sessions")
-    return false, "already running"
-  end
-  local want = {}
-  for _, id in ipairs(type(ids) == "table" and ids or {}) do
-    if core.restartIdOk(id) then want[id] = true end
-  end
-  if next(want) == nil then return false, "no sessions picked" end
-  local plan = FX.restartPlanNow()
-  local queue, seen = {}, {}
-  for _, row in ipairs(plan.rows) do
-    if row.verdict == "reopen" and want[row.id] and not seen[row.id] then
-      seen[row.id] = true
-      queue[#queue + 1] = row
-    end
-  end
-  if #queue == 0 then
-    FX.alert("Restart: nothing to reopen -- none of those sessions is verified dead")
-    FX.restartPushPreview(true)
-    return false, "nothing to reopen"
-  end
-  st.run = { queue = queue, i = 0, results = {}, startedAt = FX.now() }
-  print("[cc-dashboard] 🚀 restart: reopening " .. #queue .. " session(s), one at a time")
-  FX.appendLedger({ type = "restart_fleet", sessions = #queue, summary = #queue .. " session(s), one at a time" })
-  FX.alert("Restart: reopening " .. #queue .. " session" .. (#queue == 1 and "" or "s") .. ", one at a time")
-  FX.restartNext()
-  return true
-end
-
--- Each tick: a session reopened mid-turn gets its Continue once it is back and ready
--- (FX.typeWhenReady asks core.readyToType) -- typed at most once, dropped if it never comes back.
-function FX.stepRestartContinue(list)
-  local st = FX._restart
-  if next(st.pending) == nil then return end
-  local now = FX.now()
-  for id, p in pairs(st.pending) do
-    local it = core.restartContinueTile(p, list)
-    local due = core.restartContinueDue(p, it, now)
-    if due == "drop" then
-      st.pending[id] = nil
-      print("[cc-dashboard] ⚠️ restart: " .. tostring(p.name) .. " didn't come back in "
-        .. core.RESTART.continueSeconds .. "s -- its Continue was dropped")
-    elseif due == "type" and not p.inflight then
-      p.inflight = true
-      local scheduled = FX.typeWhenReady(it, "restart", function()
-        st.pending[id] = nil   -- once, whether or not it lands
-        local acted = core.handleAction(FX, it, "continue", core.shepherdSays(core.RESTART.continueLine))
-        ledgerFor(it, { type = "restart_continue", outcome = (acted == "continue") and "ok" or "skipped" })
-        if acted ~= "continue" then return false, "not delivered" end
-      end, { summary = "Continue: a turn was in progress when the fleet went down",
-             onRefused = function() p.inflight = nil end, onDry = function() st.pending[id] = nil end })
-      if not scheduled then p.inflight = nil end
-    end
-  end
-end
-
--- Each tick (2026-10-03): every reopened session that may still come back gets its ending
--- (core.restartOutcome): resumed, came back fresh, or didn't come back. Claude Code's session files
--- are read only while one is waiting. Each outcome is logged and recorded once (restart_outcome);
--- the overlay, if open, shows it; when a run's last row has its outcome, one toast says how it went.
-function FX.restartOutcomeDone(run)
-  if type(run) ~= "table" or not run.done or run.summarized then return end
-  local msg = core.restartOutcomeSummary(run.results)
-  if not msg then return end
-  run.summarized = true
-  print("[cc-dashboard] ✅ " .. msg)
-  FX.alert(msg)
-end
-function FX.stepRestartOutcome(list)
-  local st = FX._restart
-  core.reapUnbacked(st.outcomes, FX.restartSnapshot().sessions)
-  local waiting = {}
-  for _, r in pairs(st.outcomes) do
-    if r.opening or (r.outcome == "opened" and r.back == nil) then waiting[#waiting + 1] = r end
-  end
-  if #waiting == 0 then return end
-  table.sort(waiting, function(a, b) if a.at ~= b.at then return a.at < b.at end return a.id < b.id end)
-  local now, reg, runs, any = FX.now(), FX.readSessions(), {}, false
-  for _, r in ipairs(waiting) do
-    if not r.opening and r.back == nil then
-      local rivals = {}
-      for _, o in ipairs(waiting) do if o ~= r and o.back == nil then rivals[#rivals + 1] = o end end
-      r.rivals = rivals
-      local outcome, it = core.restartOutcome(r, list, reg, now)
-      r.rivals = nil
-      if outcome then
-        any = true
-        r.back, r.backAt = outcome, now
-        r.freshId = (outcome == "fresh" and type(it) == "table") and it.session_id or nil
-        -- a new session one row came back as is no other row's
-        if r.freshId then for _, o in ipairs(waiting) do if o ~= r then o.known[r.freshId] = true end end end
-        local label = core.RESTART_OUTCOMES[outcome] .. (r.freshId and (" as " .. r.freshId) or "")
-        print("[cc-dashboard] " .. (outcome == "lost" and "⚠️" or "✅") .. " restart: " .. tostring(r.name)
-          .. " (" .. tostring(r.id) .. ") " .. label .. " after " .. (now - (tonumber(r.at) or now)) .. "s")
-        FX.appendLedger({ type = "restart_outcome", session_id = r.id, name = r.name, cwd = r.dir, editor = r.editor,
-          how = r.how, outcome = outcome, fresh_id = r.freshId, seconds = now - (tonumber(r.at) or now), summary = label })
-        if r.run then runs[r.run] = true end
-      end
-    end
-  end
-  if not any then return end
-  for run in pairs(runs) do FX.restartOutcomeDone(run) end
-  FX.restartPushPreview(true)
 end
 
 -- ---- DR7: A/B fork-to-compare (explicitly-invoked, operator-aware) ------------
@@ -15381,17 +14917,6 @@ local function handleBridgeMsg(msg)
     print("[cc-dashboard] 🔍 automation trace: " .. #out.entries .. " row(s)"
       .. (out.focus ~= "" and (" (opened for " .. out.focus .. ")") or ""))
     pcall(function() wv:evaluateJavaScript("window.ccTrace(" .. hs.json.encode(out) .. ")") end)
-    return
-  end
-  if a == "open-restart" then
-    -- 2026-09-30: restart in place -- the dry run: the plan, shown. Nothing reopens from here.
-    FX.restartPushPreview()
-    return
-  end
-  if a == "restart-fleet" then
-    -- ...and Reopen: text = JSON list of the session ids Adam left ticked in that preview
-    local okd, ids = pcall(function() return hs.json.decode(tostring(payload.text or "")) end)
-    if okd and type(ids) == "table" and #ids > 0 then FX.restartFleet(ids) end
     return
   end
   if a == "open-features-view" then
@@ -18164,31 +17689,6 @@ local HTML = [[
 #trace .ov-foot span{ min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .tr-dry{ display:none; padding:8px 16px; border-bottom:1px solid var(--border); color:var(--st-approval); font-weight:600; }
 .tr-dry.on{ display:block; }
-/* Restart fleet (2026-09-30): the dry-run preview -- what would reopen, where and how */
-#restart{ position:fixed; inset:0; background:var(--bg-overlay); z-index:12; display:none; flex-direction:column; font-size:12px; }
-#restart.show{ display:flex; }
-#restart .ov-head{ display:flex; align-items:center; justify-content:space-between; padding:12px 16px; border-bottom:1px solid var(--border); font-weight:600; color:var(--text); }
-#restart .ov-body{ flex:1; overflow-y:auto; padding:6px 16px 14px; }
-#restart .ov-foot{ padding:10px 16px; border-top:1px solid var(--border); display:flex; gap:12px; align-items:center; color:var(--dim); font-size:11px; }
-#restart .ov-foot button{ background:var(--surface); color:var(--text-2); border:1px solid var(--border); border-radius:7px; padding:5px 12px; cursor:pointer; font-size:12px; white-space:nowrap; }
-#restart .ov-foot button:disabled{ opacity:.5; cursor:default; }
-#restart .ov-foot span{ min-width:0; }
-.rs-sec{ color:var(--accent); font-weight:700; font-size:11px; text-transform:uppercase; letter-spacing:.06em; margin:14px 0 2px; }
-.rs-row{ display:flex; align-items:baseline; gap:8px; padding:5px 0; border-bottom:1px solid var(--border); min-width:0; }
-.rs-row .rs-pick{ flex:none; margin:0; align-self:center; }
-.rs-no{ flex:none; width:13px; text-align:center; color:var(--dim); }
-.rs-name{ flex:none; max-width:32%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text); font-weight:600; }
-.rs-ed{ flex:none; color:var(--dim); font-size:11px; }
-.rs-how{ flex:1; min-width:0; color:var(--text-2); overflow-wrap:anywhere; }
-.rs-how code{ font-family:ui-monospace,Menlo,monospace; font-size:11px; color:var(--accent-text); }
-.rs-bits{ color:var(--dim); font-style:normal; }
-.rs-skip .rs-name, .rs-skip .rs-how{ color:var(--dim); font-weight:400; }
-.rs-older .rs-name{ font-weight:400; }
-.rs-out{ flex:none; font-size:10px; font-weight:700; padding:0 6px; border:1px solid currentColor; border-radius:8px; white-space:nowrap; }
-.rs-out-resumed{ color:var(--ok); }
-.rs-out-fresh{ color:var(--warn); }
-.rs-out-lost{ color:var(--danger); }
-.rs-out-waiting{ color:var(--dim); font-weight:400; }
 /* the shared row styles (the 📥 Inbox's, 2026-09-29; the Inbox went 2026-11-19): Tickets, Queues and Coach */
 .ib-empty{ color:var(--dim); padding:20px 0; text-align:center; }
 .ib-row{ border:1px solid var(--border); border-radius:9px; padding:10px 12px; margin-bottom:10px; background:var(--surface); }
@@ -18642,7 +18142,6 @@ local HTML = [[
           <button class="tm-item" onclick="menuPick('policies')"><span class="tm-ic">🛡</span> Policy bundles</button>
           <button class="tm-item" onclick="menuPick('rules')"><span class="tm-ic">⚙️</span> Automation rules</button>
           <button class="tm-item" onclick="menuPick('trace')"><span class="tm-ic">⚡</span> Automation trace</button>
-          <button class="tm-item" onclick="menuPick('restart')" title="After a Claude Code update or a reboot: reopen every session that went down, with its conversation. Shows what it would do first."><span class="tm-ic">♻️</span> Restart fleet</button>
           <button class="tm-item" onclick="menuPick('cost')"><span class="tm-ic">💰</span> Cost &amp; tokens</button>
           <button class="tm-item" onclick="menuPick('doctor')"><span class="tm-ic">🩺</span> Diagnostics</button>
           <button class="tm-item" onclick="menuPick('features')"><span class="tm-ic">✨</span> Features list</button>
@@ -19359,17 +18858,6 @@ local HTML = [[
       <select id="tr-session" onchange="renderTrace()"></select>
       <button onclick="openTrace(document.getElementById('tr-session').value)">Refresh</button>
       <span>What automation did, would do in a dry run, and was refused -- since Shepherd loaded.</span>
-    </div>
-  </div>
-
-  <div id="restart">
-    <div class="ov-head"><span>♻️ Restart fleet</span><button class="s-x" onclick="closeRestart()">✕</button></div>
-    <div id="rs-dry" class="tr-dry"></div>
-    <div class="ov-body" id="rs-body"></div>
-    <div class="ov-foot">
-      <button id="rs-go" onclick="restartGo()" disabled>Reopen</button>
-      <button onclick="openRestart()">Re-check</button>
-      <span>A preview: nothing reopens until you press Reopen. Only sessions Shepherd can verify are dead come back, one at a time, each at most once.</span>
     </div>
   </div>
 
@@ -24498,102 +23986,6 @@ local HTML = [[
       document.getElementById("trace").classList.add("show");
       renderTrace();
     };
-    // ---- Restart fleet (2026-09-30): the dry-run preview of a restart in place ----
-    // Lua answers open-restart with window.ccRestart(plan): core.restartPlan's rows (reopen first,
-    // then the ones closed before the last wave, then the ones left alone) plus now, running, dry.
-    // Every word of a row -- session names, folders, reasons -- came from a status file or the
-    // snapshot on disk, so each goes through esc(). Reopen sends only the ticked session ids.
-    var RESTART = { rows: [] };
-    function openRestart(){ send("open-restart"); }
-    function closeRestart(){ document.getElementById("restart").classList.remove("show"); }
-    function restartAgo(sec){
-      sec = Math.max(0, Math.floor(+sec || 0));
-      if(sec < 90) return sec + "s";
-      if(sec < 5400) return Math.floor(sec / 60) + "m";
-      if(sec < 172800) return Math.floor(sec / 3600) + "h";
-      return Math.floor(sec / 86400) + "d";
-    }
-    function restartRowHtml(r, now){
-      if(!r || typeof r !== "object") return "";
-      var reopen = r.verdict === "reopen";
-      var follows = reopen && r["continue"] === true;
-      var bits = [];
-      if(reopen){
-        if(r.turn && !follows) bits.push("a turn was in progress");
-        if(r.mode) bits.push(r.mode);
-        if(r.model) bits.push(r.model);
-        if(r.ended) bits.push("ended " + restartAgo((+now || 0) - (+r.ended || 0)) + " ago");
-      }
-      // 2026-10-03: how its last reopen ended (core.restartStampOutcomes): resumed, came back fresh,
-      // didn't come back, or still waiting. Only a known code makes a chip; the new id is esc()'d.
-      var outs = { resumed: "resumed", fresh: "came back fresh", lost: "didn't come back", waiting: "waiting for it to come back" };
-      var code = (typeof r.back === "string" && Object.prototype.hasOwnProperty.call(outs, r.back)) ? r.back : "";
-      var chip = code
-        ? '<span class="rs-out rs-out-' + code + '"'
-          + ((code === "fresh" && r.backId) ? ' title="' + esc("new session " + r.backId) + '"' : '')
-          + '>' + esc(outs[code]) + '</span>'
-        : '';
-      return '<label class="rs-row ' + (reopen ? (r.older ? "rs-older" : "rs-reopen") : "rs-skip") + '">'
-        + (reopen
-            ? '<input type="checkbox" class="rs-pick" value="' + esc(r.id) + '"' + (r.older ? '' : ' checked') + ' onchange="restartCount()">'
-            : '<span class="rs-no">–</span>')
-        + '<span class="rs-name">' + esc(r.name || r.id || "") + '</span>'
-        + chip
-        + '<span class="rs-ed">' + esc(r.editor || "?") + '</span>'
-        + '<span class="rs-how">'
-        + (reopen
-            ? esc(r.where || "") + ': <code>' + esc(r.command || "") + '</code>' + (follows ? ', then Continue' : '')
-            : esc(r.why || ""))
-        + (bits.length ? ' <i class="rs-bits">· ' + esc(bits.join(" · ")) + '</i>' : '')
-        + '</span></label>';
-    }
-    function restartRowsHtml(plan){
-      var rows = (plan && Array.isArray(plan.rows)) ? plan.rows : [];
-      var html = "", sec = "";
-      rows.forEach(function(r){
-        if(!r || typeof r !== "object") return;
-        var s = (r.verdict === "reopen") ? (r.older ? "Closed earlier — tick to reopen" : "Would reopen") : "Left alone";
-        if(s !== sec){ sec = s; html += '<div class="rs-sec">' + s + '</div>'; }
-        html += restartRowHtml(r, plan.now);
-      });
-      return html;
-    }
-    function restartPicked(){
-      var out = [], boxes = document.querySelectorAll("#rs-body .rs-pick");
-      for(var i = 0; i < boxes.length; i++){ var b = boxes.item(i); if(b.checked) out.push(b.value); }
-      return out;
-    }
-    function restartCount(){
-      var n = restartPicked().length, go = document.getElementById("rs-go");
-      go.textContent = RESTART.running ? "Reopening…" : ("Reopen " + n + " session" + (n === 1 ? "" : "s"));
-      go.disabled = !!RESTART.running || n === 0;
-    }
-    function restartGo(){
-      var ids = restartPicked();
-      if(!ids.length || RESTART.running) return;
-      if(!confirm("Reopen " + ids.length + " session" + (ids.length === 1 ? "" : "s")
-          + "? Each comes back with its conversation, one at a time.")) return;
-      RESTART.running = true;
-      restartCount();
-      send("restart-fleet", "", JSON.stringify(ids));
-    }
-    window.ccRestart = function(plan, onlyIfOpen){
-      var ov = document.getElementById("restart");
-      if(onlyIfOpen && !ov.classList.contains("show")) return;
-      RESTART = (plan && typeof plan === "object") ? plan : { rows: [] };
-      document.getElementById("rs-body").innerHTML = restartRowsHtml(RESTART)
-        || '<div class="tl-empty">No sessions in the restart snapshot yet.</div>';
-      var dry = document.getElementById("rs-dry");
-      dry.textContent = RESTART.dry ? "Dry run is on (restart.dryRun or automation.dryRun): Reopen opens nothing and records what it would do in ⚡ Automation trace." : "";
-      dry.classList.toggle("on", !!RESTART.dry);
-      ov.classList.add("show");
-      restartCount();
-    };
-    document.addEventListener("keydown", function(e){
-      if(e.key !== "Escape") return;
-      var ov = document.getElementById("restart");
-      if(ov && ov.classList.contains("show")) closeRestart();
-    });
     // ---- F9: Features list overlay (plain-language what + why per feature) ----
     function openFeatures(){ send("open-features-view"); document.getElementById("features").classList.add("show"); }
     function closeFeatures(){ document.getElementById("features").classList.remove("show"); }
@@ -26502,7 +25894,6 @@ local HTML = [[
       else if(which === "policies") openPolicyEd();
       else if(which === "rules") openRuleEd();
       else if(which === "trace") openTrace("");
-      else if(which === "restart") openRestart();
       else if(which === "cost") openCost();
       else if(which === "doctor") openDoctor();
       else if(which === "features") openFeatures();
@@ -28245,7 +27636,7 @@ if panelHasFocus then pcall(function() M.pasteTap:start() end) end
 -- before Shepherd's hooks were installed, or runs with hooks off). Built right after the status
 -- files are parsed (refreshList) and kept HERE, on FX.hookless -- never in the tick's `list`, byKey
 -- or lastRenderList, so no keystroke sender, needs-you stamp, empty-chats / unnamed-tabs verdict,
--- restart snapshot, Instances view or card count can see one. The panel push is its only reader.
+-- Instances view or card count can see one. The panel push is its only reader.
 -- Cost: the session files are a handful of small reads a tick; ps is asked (FX.probeAlive, cached
 -- ALIVE_TTL) only while an unmatched pid exists.
 FX.hookless = {}        -- the cards (core.hooklessSessions): display data only
@@ -29719,17 +29110,6 @@ function FX._refreshBody()
     if not okl then print("[cc-dashboard] ❌ coach lessons step failed: " .. tostring(errl)) end
     local okc, errc = pcall(FX.stepCoach, list, cfg)
     if not okc then print("[cc-dashboard] ❌ coach step failed: " .. tostring(errc)) end
-  end
-  -- 2026-09-30: restart in place -- the snapshot follows the fleet (it reads the labels, origins
-  -- and launch folders stamped above), and a session reopened mid-turn gets its Continue once ready
-  do
-    local oks, errs = pcall(FX.stepRestartSnapshot, list)
-    if not oks then print("[cc-dashboard] ❌ restart snapshot step failed: " .. tostring(errs)) end
-    local okc, errc = pcall(FX.stepRestartContinue, list)
-    if not okc then print("[cc-dashboard] ❌ restart continue step failed: " .. tostring(errc)) end
-    -- 2026-10-03: each reopened session ends as resumed, came back fresh, or didn't come back
-    local oko, erro = pcall(FX.stepRestartOutcome, list)
-    if not oko then print("[cc-dashboard] ❌ restart outcome step failed: " .. tostring(erro)) end
   end
   -- 2026-09-29: Claude Code compatibility -- a new version in the session files starts one
   -- background check (at most a registry read a minute here; the check itself is an hs.task)

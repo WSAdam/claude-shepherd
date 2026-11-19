@@ -302,8 +302,6 @@ delegation, idle/auto-spawn routing targets) are intentionally omitted until the
 - As a **fleet operator**, I want a ☕ keep-awake toggle that prevents sleep even with the lid closed, so that long unattended agent runs aren't interrupted.
 - As a **fleet operator**, I want a 🔒 soft-lock overlay that blocks input while everything keeps running, so that I can step away with the fleet working and casual access deterred.
 - As a **fleet operator**, I want a force-unlock chord and release on quit/reboot, so that a typo at the lock screen can never lock me out.
-- As a **fleet operator**, I want ☰ → ♻️ Restart fleet to show what would reopen and then reopen every session that went down after a Claude Code update or a reboot, only those verified dead and each at most once, so that I don't resume every conversation by hand.
-- As a **fleet operator**, I want each reopened session's row to end as resumed, came back fresh or didn't come back, with one summary toast per run, so that I know which ones still need me.
 
 ## Personalization & ergonomics
 

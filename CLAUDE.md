@@ -75,11 +75,11 @@ and the README's "Testing & development" section.
   Claude tabs equal its live sessions with a tab (no restored old chat), the tabs no named session
   claims close too -- "Claude Code" by count, any other by its own single-match name (`core.unclaimedTabs`). Nothing
   closes a finished session on its own: Close selected suggests, Adam confirms. Never add another op, and never use the
-  Claude URI to reveal a tab (D-14). The one exception (2026-09-30) is restart in place: `?session=`
+  Claude URI to reveal a tab (D-14). The one exception (2026-09-30): `?session=`
   may reopen a session that is VERIFIED DEAD, written only by `core.restartTabUri` and sent only by
-  `FX.openClaudeTab` (`tests/ui.test.lua` pins both). Its only two callers are restart (`FX.restartOne`) and,
-  from 2026-10-04 (Adam's call), History's Resume (`FX.pastResumeLaunch`). A session in no restart snapshot
-  is verified dead by `core.pastLiveness`: no card, no live session file, and no process holding its id.
+  `FX.openClaudeTab` (`tests/ui.test.lua` pins both). Its only caller is History's Resume
+  (`FX.pastResumeLaunch`, from 2026-10-04, Adam's call); restart in place, the first, was removed 2026-11-19.
+  A session is verified dead by `core.pastLiveness`: no card, no live session file, and no process holding its id.
   A missing transcript makes the link open an EMPTY tab. Bump its `package.json` version with every change, or
   `make install` won't reinstall it; running windows pick it up after a reload. A window keeps
   the bridge it loaded, so before relying on an op check `core.tabBridgeSupports(reg.version, op)`

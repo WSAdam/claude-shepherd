@@ -8506,7 +8506,8 @@ do
   -- 2026-11-19: 63 -> 62, REQUIREMENT CHANGE: the decisions inbox ("decisions", flagged new) was removed.
   -- 2026-11-19: 62 -> 61, REQUIREMENT CHANGE: talk mode ("talk", flagged new) was removed.
   -- 2026-11-19: 61 -> 60, REQUIREMENT CHANGE: the hands-off hold ("hold", flagged new) was removed.
-  eq("FEATURES: the 60 new features are flagged", newCount, 60)
+  -- 2026-11-19: 60 -> 59, REQUIREMENT CHANGE: restarting the fleet in place ("restart", flagged new) was removed.
+  eq("FEATURES: the 59 new features are flagged", newCount, 59)
   check("FEATURES: lists the Compare tab", keys.compare == true)
   check("FEATURES: lists crossings", keys.crossings == true)
   check("FEATURES: lists queue hold and the Queues view", keys.queuehold == true)
@@ -8521,7 +8522,7 @@ do
   check("FEATURES: lists the unfinished-unit reminder", keys.unfinished == true)
   check("FEATURES: lists the brief pre-flight", keys.preflight == true)
   check("FEATURES: lists the Stop guards", keys.stopguards == true)
-  check("FEATURES: lists restarting the fleet in place", keys.restart == true)
+  check("FEATURES: no restarting the fleet in place (removed 2026-11-19, REQUIREMENT CHANGE)", keys.restart == nil)
   check("FEATURES: lists TODO lines that need a live run", keys.liverun == true)
   check("FEATURES: lists the scheduled-tasks lock check", keys.schedlock == true)
   check("FEATURES: lists Claude Code compatibility alarms", keys.compat == true)
@@ -13139,19 +13140,20 @@ do
   for _, k in ipairs(core.AUTOMATION_KINDS or {}) do byKind[k.kind] = k end
   for _, want in ipairs({ { "continue", "autoContinue" }, { "feed", "queue" }, { "route", "queue" }, { "rule", "rules" },
                           { "respawn", "respawn" }, { "summary", "summary" }, { "resume", "resume" },
-                          { "tabless_end", "tabless" }, { "mailbox", "mailbox" }, { "rc", "remoteControl" },
-                          -- 2026-09-30: restart in place -- each reopen and its Continue are a kind of their own
-                          { "restart", "restart" } }) do
+                          { "tabless_end", "tabless" }, { "mailbox", "mailbox" }, { "rc", "remoteControl" } }) do
     eq("dry run: " .. want[1] .. " is switched by " .. want[2] .. ".dryRun", byKind[want[1]] and byKind[want[1]].feature, want[2])
   end
   local labelled = true
   for _, k in ipairs(core.AUTOMATION_KINDS or {}) do if type(k.label) ~= "string" or k.label == "" then labelled = false end end
   -- 2026-09-30: 10 -> 11 kinds, for "restart" (the requirement grew by one kind; nothing was removed)
-  check("dry run: every kind has a label for the Trace", labelled and #(core.AUTOMATION_KINDS or {}) == 11)
+  -- 2026-11-19: 11 -> 10, REQUIREMENT CHANGE: restart in place was removed, and its kind with it
+  check("dry run: every kind has a label for the Trace", labelled and #(core.AUTOMATION_KINDS or {}) == 10)
+  check("dry run: no restart kind or typist (restart in place was removed 2026-11-19)",
+        byKind.restart == nil and (core.AUTOMATION_TYPISTS or {}).restart == nil)
   -- every automated typist maps to its kind
   for typist, kind in pairs({ autofeed = "feed", router = "route", ["rule-nudge"] = "rule", ["rule-continue"] = "rule",
                               ["auto-continue"] = "continue", summary = "summary", mailbox = "mailbox",
-                              resume = "resume", ["rc-sweep"] = "rc", restart = "restart" }) do
+                              resume = "resume", ["rc-sweep"] = "rc" }) do
     eq("dry run: typist " .. typist .. " is kind " .. kind, (core.AUTOMATION_TYPISTS or {})[typist], kind)
   end
 
@@ -17119,6 +17121,41 @@ do
   eq("empty close: a named session closes by its name", core.closeAsEmptyChat({ emptyChat = true }, "Fix the bug", nil), false)
   eq("empty close: a batch unit's tab closes by its tag", core.closeAsEmptyChat({ emptyChat = true }, nil, "b1:slug"), false)
   eq("empty close: a session not known to be empty never does", core.closeAsEmptyChat({ status = "idle" }, nil, nil), false)
+end
+
+
+-- ---- History's Resume: the resume argv and the session link (moved here 2026-11-19) ----
+-- These were tests/restart.test.lua's. Restart in place was removed 2026-11-19 (Adam: "prune features
+-- I have no use for") and that suite with it; History's Resume still reopens a session with
+-- `claude -r <id>` (core.spawnExtraFlags / core.spawnSpec) or its tab's link (core.restartTabUri), and
+-- only a real session id (core.restartIdOk) reaches either.
+do
+  local C = "33333333-aaaa-4bbb-8ccc-000000000003"
+  local D = "44444444-aaaa-4bbb-8ccc-000000000004"
+  local A = "11111111-aaaa-4bbb-8ccc-000000000001"
+  check("restartIdOk: a session id", core.restartIdOk(A) == true)
+  check("restartIdOk: ...not a shell word or a URI part", not core.restartIdOk("x; rm -rf ~") and not core.restartIdOk("a&prompt=rm")
+        and not core.restartIdOk(nil) and not core.restartIdOk(string.rep("a", 65)))
+  check("RESTART_EDITORS: the editors a session comes back in", core.RESTART_EDITORS.vscode == "VS Code"
+        and core.RESTART_EDITORS.cursor == "Cursor" and core.RESTART_EDITORS.kitty == "kitty" and core.RESTART_EDITORS.terminal == "Terminal")
+  eq("argv: spawnExtraFlags gains resume", table.concat(core.spawnExtraFlags({ resume = C }), " "), "-r " .. C)
+  eq("argv: ...first, before any variadic flag",
+     table.concat(core.spawnExtraFlags({ resume = C, addDirs = { "/k" }, allowedTools = { "Read" } }), " "),
+     "-r " .. C .. " --add-dir=/k --allowedTools=Read")
+  eq("argv: no resume, no flag (every other spawn is byte-identical)", #core.spawnExtraFlags({}), 0)
+  eq("argv: something that isn't a session id never reaches the command line", #core.spawnExtraFlags({ resume = "x; rm -rf ~" }), 0)
+  local spec = core.spawnSpec("kitty", "/Users/u/code/api", nil, { resume = C, permissionMode = "default", kittyBin = "kitty", claudeBin = "/bin/claude" })
+  eq("argv: a kitty relaunch is claude --permission-mode <mode> -r <id> in that folder",
+     table.concat(spec.argv, " "):match("%-%-directory .*$"), "--directory /Users/u/code/api /bin/claude --permission-mode default -r " .. C)
+  spec = core.spawnSpec("terminal", "/Users/u/code/docs", nil, { resume = D, permissionMode = "plan" })
+  check("argv: a Terminal relaunch runs cd <folder> && claude ... -r <id>",
+        spec.applescript:find("cd '/Users/u/code/docs' && claude --permission-mode plan -r " .. D, 1, true) ~= nil)
+  eq("uri: VS Code", core.restartTabUri("com.microsoft.VSCode", A, "vscode"), "vscode://anthropic.claude-code/open?session=" .. A)
+  eq("uri: Cursor, by its bundle id", core.restartTabUri("com.todesktop.230313mzl4w4u92", A, "vscode"), "cursor://anthropic.claude-code/open?session=" .. A)
+  eq("uri: no bundle id, the editor kind", core.restartTabUri(nil, A, "cursor"), "cursor://anthropic.claude-code/open?session=" .. A)
+  eq("uri: nothing for an id that isn't one", core.restartTabUri("com.microsoft.VSCode", "a&prompt=rm", "vscode"), nil)
+  check("uri: the New-tab URI still can't carry a session (a prompt is percent-encoded)",
+        core.claudeTabUri("com.microsoft.VSCode", "x&session=" .. A, "vscode") == "vscode://anthropic.claude-code/open?prompt=x%26session%3D" .. A)
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

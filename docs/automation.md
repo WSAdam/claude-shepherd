@@ -20,9 +20,8 @@ session can take the text ([below](#when-automation-types)), and are recorded in
 ## When automation types
 
 Auto-feed, project routing, a rule's `nudge` or `continue`, auto-continue, the post-run
-self-summary, the startup `/rc` sweep, a waiting [mailbox](#session-mailbox) message and the
-`Continue` after a [fleet restart](fleet.md#restart-the-fleet-in-place) all type into a session
-without you. (The [Stop guards](approvals-and-policies.md#questions-asked-in-prose-come-back) never
+self-summary, the startup `/rc` sweep and a waiting [mailbox](#session-mailbox) message all type
+into a session without you. (The [Stop guards](approvals-and-policies.md#questions-asked-in-prose-come-back) never
 type: they send a turn back through the session's own Stop hook.) Each one waits until the session
 can take it:
 
@@ -62,12 +61,11 @@ let it, and what it did while you were away. Your own clicks never go through it
 - **What counts.** Auto-continue, auto-feed, project routing, a rule firing (log, relabel, feed,
   nudge, continue), auto-respawn, the post-run self-summary, resuming at the limit reset (arming the
   hook, its typed line, its phone push), ending a tab-less leftover, a mailbox message (leaving it,
-  and typing it into an idle session), the startup `/rc` sweep, and each session a
-  [fleet restart](fleet.md#restart-the-fleet-in-place) reopens (with the `Continue` after it).
+  and typing it into an idle session), and the startup `/rc` sweep.
 - **Dry run.** ⚙ Settings → Automation → **Dry run** switches it on for all automation
   (`automation.dryRun`) or for one feature at a time (`autoContinue.dryRun`, `queue.dryRun` for
   auto-feed and routing, `rules.dryRun`, `respawn.dryRun`, `summary.dryRun`, `resume.dryRun`,
-  `tabless.dryRun`, `mailbox.dryRun`, `remoteControl.dryRun`, `restart.dryRun`). In a dry run Shepherd records what it
+  `tabless.dryRun`, `mailbox.dryRun`, `remoteControl.dryRun`). In a dry run Shepherd records what it
   would have done and does nothing: nothing typed, no task taken off a queue, nothing launched or
   ended, no message left, and a resume is planned as *skip* so the hook stops without waking the
   session. A typed action still waits until the session [can take it](#when-automation-types)

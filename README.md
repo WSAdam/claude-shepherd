@@ -82,8 +82,6 @@ Every feature below has a reference page one click away. The panel lists the sam
   a turn that ends "Want me to push?" in prose is sent back once to ask it on the card instead.
 - [**Spawn new sessions**](docs/controls.md#spawn-new-sessions): start a session in any project with
   an editor, permission mode, provider and first task, or from a saved preset.
-- [**Restart the fleet in place**](docs/fleet.md#restart-the-fleet-in-place): reopen every session
-  an update or reboot took down, preview first, never twice; each row then says if it came back.
 - [**Global hotkeys**](docs/controls.md#global-hotkeys): approve, jump to whoever needs you, cycle,
   spawn and show the panel from any app.
 - [**Stream Deck**](docs/controls.md#stream-deck): sessions and fleet actions on physical keys, with
@@ -292,7 +290,7 @@ Full detail: [docs/approvals-and-policies.md](docs/approvals-and-policies.md#the
 | Page | What's in it |
 |------|--------------|
 | [Install](docs/install.md) | Install, upgrade, uninstall, what the installer changes, the tab bridge, the Dock launcher |
-| [Fleet](docs/fleet.md) | Statuses, grey cards, project cards, Instances, leases, restart in place and its outcomes, the detail panel and its tabs, search, groups, My List, playbooks, Run selected |
+| [Fleet](docs/fleet.md) | Statuses, grey cards, project cards, Instances, leases, the detail panel and its tabs, search, groups, My List, playbooks, Run selected |
 | [Controls](docs/controls.md) | Clicks and menus, detail-panel buttons, Seance, pinned links, shared windows, spawning, hotkeys, Stream Deck, awake and lock |
 | [Approvals and policies](docs/approvals-and-policies.md) | The safety model, the gate, always-ask commands, the worktree fence, policies, questions, the three Stop guards |
 | [Merging and batches](docs/merging-and-batches.md) | Worktree tabs, ready to merge, gates, gate blame, the main-green check, the checker, red-first, receipts, batches, brief pre-flight, grant grading, the overlap radar, main moved, the demo, the tab bridge |

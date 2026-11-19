@@ -2,7 +2,7 @@
 -- (2026-10-04, mining round 2 unit F2). Opening 🗂 History starts a background scan (hs.task, never
 -- the tick) of every transcript in ~/.claude/projects plus the kept copies whose originals Claude Code
 -- deleted; its callback merges the rows into History. Resume reopens only a session verified dead
--- (FX.restartVerifyDead -> for a session in no restart snapshot, core.pastLiveness over one ps):
+-- (FX.pastVerifyDead: core.pastLiveness over one ps):
 -- a VS Code session through FX.openClaudeTab with restartSession (the ?session= link, D-14's rule), a
 -- terminal one through FX.spawnSession with resume (`claude -r`). A kept-only session's copy goes
 -- back to its original path first, by an async task that never overwrites a file.
@@ -254,7 +254,7 @@ post({ a = "past-resume", text = json.encode({ sessionId = S[2], projectKey = PK
 check("Resume refuses a session with a card", #opened == 0 and #spawned == 0)
 check("...and says why", #alerts > 0 and table.concat(alerts, " "):find("card", 1, true) ~= nil)
 
--- 4. an ended VS Code session reopens as its tab, through the restart path's ?session= rule
+-- 4. an ended VS Code session reopens as its tab, through D-14's ?session= rule
 post({ a = "past-resume", text = json.encode({ sessionId = S[1], projectKey = PK }) })
 check("an ended VS Code session reopens through FX.openClaudeTab", #opened == 1)
 check("...handing it the session (restartSession), in its own folder's window",
@@ -345,11 +345,13 @@ post({ a = "past-resume", text = json.encode({ sessionId = S[1], projectKey = ".
 post({ a = "past-resume", text = "not json" })
 check("a bad id, project key or payload opens nothing", #opened == nO and #spawned == nS and #TASKS == nT)
 
--- 9. FX.restartVerifyDead: a session in the restart snapshot keeps the restart rule; one in no
--- snapshot is checked by the past-session rule
-local dead1 = fx.restartVerifyDead(S[1])
-check("FX.restartVerifyDead verifies a past session (in no snapshot) by the past-session rule", dead1 == true)
-local dead2, why2 = fx.restartVerifyDead(S[2])
+-- 9. FX.pastVerifyDead: every session is checked by the past-session rule.
+-- 2026-11-19: REQUIREMENT CHANGE -- FX.restartVerifyDead (a session in the restart snapshot kept the
+-- restart rule) went with restart in place; History's Resume asks FX.pastVerifyDead directly.
+check("FX.restartVerifyDead is gone with restart in place", fx.restartVerifyDead == nil)
+local dead1 = fx.pastVerifyDead(S[1])
+check("FX.pastVerifyDead verifies a past session by the past-session rule", dead1 == true)
+local dead2, why2 = fx.pastVerifyDead(S[2])
 check("...and refuses a live one (" .. tostring(why2) .. ")", dead2 == false)
 
 sh("rm -r " .. q(T))

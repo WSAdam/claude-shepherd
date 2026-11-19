@@ -73,8 +73,8 @@ auto-memory) only on your click.
   git (D-16), runs a project's test gate itself, re-runs a red gate at the merge-base to say which
   failures main already has (gate blame), checks main on a schedule (main-green), merges on a
   batch grant only on its own gate pass for that commit (D-18), ticks a My List item off only on
-  its own reading of the item's file or that item's own session's `cc-run.sh` report (D-24), and
-  says how each restarted session came back. Beyond that it reports *operations* (prompts,
+  its own reading of the item's file or that item's own session's `cc-run.sh` report (D-24).
+  Beyond that it reports *operations* (prompts,
   approvals, spawns): it has no CI of its own, and a PR's state is only read through `gh`.
   **[DECISION D-5, revised]**
 
@@ -137,7 +137,7 @@ and the panel (decision and answer files, a batch's own state, `cc-main-green.js
   `~/.claude/sessions/` that no status file covers (started before Shepherd's hooks, or with hooks
   off): its folder, Claude Code's own busy/idle, and "restart it to get live status". It must stay
   alive and unmatched for 15 s first and is never an `sdk-*` headless run (Shepherd's own `claude -p`
-  included). No sender, count, needs-you verdict or restart snapshot sees one.
+  included). No sender, count or needs-you verdict sees one.
 - Badges ride on top of the status: **⚠ main is red** on every card of a repo whose scheduled main-green
   check last failed, with the failing lines in its tooltip.
 - Tiles **dim** after ~90s of silence (a crash), **disappear** on SessionEnd.
@@ -202,15 +202,11 @@ refuses to resume a session live elsewhere. **[DECISION D-14]**
 D-14 has **one exception** (2026-09-30): reopening a session that is **verified dead**. A session
 with no process anywhere cannot be forked, so `?session=<id>` may reopen its tab. The URI is
 written in one place (`core.restartTabUri`) and sent by one function (`FX.openClaudeTab`, which
-verifies again right before it goes out), and it has exactly two callers:
+verifies again right before it goes out), and it has exactly one caller (restart in place,
+`FX.restartOne`, was the other from 2026-09-30 until it was removed 2026-11-19):
 
-- **Restart in place** (`FX.restartOne`, 2026-09-30): after a Claude Code update or a reboot,
-  ☰ → ♻️ Restart fleet reopens the sessions of its snapshot one at a time, each stamped so it is
-  never reopened twice. Dead means no session file of Claude Code's (`~/.claude/sessions/`) names
-  it under a process `ps` still shows, and its own recorded process is gone or is another process
-  now (start times compared, Shepherd's own pid as the control).
-- **History's ↻ Resume** (`FX.pastResumeLaunch`, 2026-10-04, Adam's call): a past session in no
-  restart snapshot is judged by `core.pastLiveness` — no card in Shepherd, no live
+- **History's ↻ Resume** (`FX.pastResumeLaunch`, 2026-10-04, Adam's call): a past session is
+  judged by `core.pastLiveness` — no card in Shepherd, no live
   `~/.claude/sessions` entry, and no process whose command line holds its id. A spike found a
   missing transcript makes the link open an *empty* tab, so a session whose original transcript
   Claude Code has deleted but whose kept copy remains gets that copy put back at its original path
@@ -417,12 +413,9 @@ The capability ladder:
   with Hold / Release, ▲ ▼ and ✕ (which asks first).
 - **Recovery:** manual + automatic **respawn** of a session frozen mid-turn (capped per folder);
   **Auto-Continue** of a session frozen on an API error (capped per folder); **escalation** nag
-  when an approval waits too long. A session waiting on *you* is never auto-respawned. After a
-  Claude Code update or a reboot, ☰ → ♻️ **Restart fleet** previews and then reopens every session
-  that went down (D-14), and each reopened row ends as **resumed** (its hooks wrote again, or a
-  session file names it under a new process), **came back fresh** (a new session in its folder) or
-  **didn't come back** (neither within 5 minutes), recorded as `restart_outcome` and summed up in
-  one toast per run.
+  when an approval waits too long. A session waiting on *you* is never auto-respawned. (☰ → ♻️
+  Restart fleet, which reopened every session an update or a reboot took down, was removed
+  2026-11-19.)
 - **Detection:** risk indicator, shared-directory collision, loop/hung watchdogs — badges only.
 
 **Stop guards** (2026-10-02/03). A guard reads how a turn ended and, when it shouldn't have ended
@@ -610,8 +603,7 @@ cc-keep/<project>/<session>.jsonl  kept transcripts of ★ projects, plus pins.j
   the grid. Header: New, ☕ keep-awake, 🔒 lock, the ☰ views menu, ⚙ settings, theme.
 - **☰ views menu:** 🎫 Tickets, **📑 Queues**, 🔍 Filter sessions, 🔎 Find in fleet,
   📊 Fleet insights, 📜 Audit ledger (with 🗂 History), ⏰ Routines, 📝 Templates, ✦ Agents,
-  🔌 MCPs & Skills, 🛡 Policy bundles, ⚙️ Automation rules, ⚡ Automation trace, **♻️ Restart
-  fleet**, 💰 Cost & tokens, 🩺 Diagnostics, ✨ Features list, 📋 Shift report, 🔔 Notifications.
+  🔌 MCPs & Skills, 🛡 Policy bundles, ⚙️ Automation rules, ⚡ Automation trace, 💰 Cost & tokens, 🩺 Diagnostics, ✨ Features list, 📋 Shift report, 🔔 Notifications.
 - **Detail panel** with a tab strip — Activity, Transcript, Rewind, Decisions, Usage, Changes
   (git status + diff), **User Stories** (gated on `spec/product/user-stories.md`), On purpose and
   Requirements (gated on a git repo), Agents, Queue — expensive tabs load on open; the ⋯ menu hides

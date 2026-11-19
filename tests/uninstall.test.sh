@@ -144,7 +144,8 @@ assert_eq "--purge removes the find-only audits" "gone" "$([ -e "$C/cc-audit" ] 
 assert_eq "--purge removes the skill-run labels" "gone" "$([ -e "$C/cc-skill-labels.json" ] && echo there || echo gone)"
 # 2026-09-29: the coach's records and its log of merge notes (cc-coach/) too
 assert_eq "--purge removes the coach's records" "gone" "$([ -e "$C/cc-coach" ] && echo there || echo gone)"
-# 2026-09-30: and the restart snapshot (cc-restart.json): the fleet Shepherd would reopen
+# 2026-09-30: and the restart snapshot (cc-restart.json): the fleet Shepherd would reopen (2026-11-19:
+# a leftover of the removed restart in place on an old install, still purged)
 assert_eq "--purge removes the restart snapshot" "gone" "$([ -e "$C/cc-restart.json" ] && echo there || echo gone)"
 # 2026-09-30: My List's archive (cc-worklist-archive.json) was never added to the purge list, so
 # PURGE=1 took cc-worklist.json and left the done items it had moved out of it

@@ -53,7 +53,7 @@ form-managed block is dropped on Save. Its tabs:
 
 File-only switches include, among others: `rules.enabled`, `schedules.enabled` and
 `schedules.maxConcurrent`, `hotkeys`, `voice`, `automodel.*`, `pricing.*`, `merge.*`, `verify.*`,
-`gate.fence`, `resume.enabled`, `restart.waveMinutes` and `restart.keepHours`, `lease.*`,
+`gate.fence`, `resume.enabled`, `lease.*`,
 `coach.*`, `radar.*`, `schedLock.*`, `timeLost.*`, `score.weights`,
 `subagents.*`, `status.resumeSlack`, `autoContinue.backoff.*`, `fleet.enabled`, `commits.*`,
 `usage.limitAlerts.*`, `ask.waitSeconds`, `ask.awayIdleSeconds`, `tabless.autoEndMinutes`, `escalation.hung`, `search.*`,
@@ -85,7 +85,6 @@ The panel re-reads the file within about a second (except `hotkeys`, which need 
 | `spawn`, `providers`, `remoteControl`, `bridge` | Launching sessions, backends, Remote Control, remote tiles | [Controls](controls.md#spawn-new-sessions), [Providers and integrations](providers-and-integrations.md) |
 | `stacks`, `keystrokes`, `search`, `hotkeys`, `voice` | Project cards, the shared-window guard, search, shortcuts, Stream Deck voice | [Fleet](fleet.md), [Controls](controls.md) |
 | `lease` | Each worktree's own port (`portFrom`–`portTo`) and database folder (`dbDir`) | [Fleet](fleet.md#worktree-leases) |
-| `restart` | Restart in place: which ended sessions count as the last wave (`waveMinutes`, default 30), how long an ended session stays in the snapshot (`keepHours`, default 72), and its `dryRun` | [Fleet](fleet.md#restart-the-fleet-in-place) |
 | `appearance`, `alerts`, `worklist` | Look, on-screen alerts, the fleet idle alert and spoken alerts, My List archive | [Make it yours](customizing.md), [Automation](automation.md#fleet-idle-alert), [Fleet](fleet.md#my-list) |
 | `seance` | Asking a session a question: its budget cap and timeout | [Controls](controls.md#ask-a-session-seance) |
 
@@ -105,7 +104,6 @@ install's [defaults](../defaults/cc-config.json) differ.
 | `coach.enabled` | `false` (the 🧭 Coach button works either way) | | [The coach](automation.md#the-coach) |
 | `coach.day` / `maxBudgetUsd` / `timeoutSeconds` | `"mon"` / `1` / `600` | | [The coach](automation.md#the-coach) |
 | `coach.evidence.minItems` / `cooldownHours` / `dailyUsd` | unset: no evidence runs / `24` / `3` (evidence runs also need `coach.enabled`) | `10` | [Evidence runs](automation.md#the-coach) |
-| `restart.waveMinutes` / `keepHours` | `30` / `72` | | [Restart the fleet in place](fleet.md#restart-the-fleet-in-place) |
 | `lease.enabled` | `true` | | [Worktree leases](fleet.md#worktree-leases) |
 | `lease.portFrom` / `portTo` / `dbDir` | `4100` / `4199` / `~/.claude/cc-lease/db` | | [Worktree leases](fleet.md#worktree-leases) |
 | `gate.fence` | `false` | `true` | [Worktree fence](approvals-and-policies.md#worktree-fence) |
@@ -186,7 +184,7 @@ Everything lives under `~/.claude/`:
 | `cc-notes/` | [Handoff notes](automation.md#handoff-notes), and [auto-compact](automation.md#auto-compact-with-notes)'s due-ats and each session's own notes; `pending/` also holds an [agent profile](providers-and-integrations.md#agent-profiles)'s policy bundle until the session it spawned takes it |
 | `cc-bridge/` | The tab bridge's per-window tab lists and command folders |
 | `cc-lease/` | [Worktree leases](fleet.md#worktree-leases): each repo's leased ports and database paths, and (by default) the databases in `db/` |
-| `cc-restart.json` | The [restart snapshot](fleet.md#restart-the-fleet-in-place): every session Shepherd could reopen, and the ones it already did (Shepherd is its only writer) |
+| `cc-restart.json` | Left by restart in place, removed 2026-11-19: nothing reads it; `--purge` deletes it |
 | `cc-coach/` | [The coach](automation.md#the-coach)'s files per repo, named by the main checkout's encoded project folder (`-Users-you-code-app`): its suggestions, its log (merge notes, checker findings, filed lessons, main-went-red entries), `<repo>.applied.json` (applied edits), `<repo>.lessons.json` (the lessons ledger) and `<repo>.memory-backup/` (auto-memory backups for Undo); `evidence-spend.json` (today's evidence-run spend); `global.json` and `global.claude-backup/` for [lessons learned across repos](automation.md#across-repos) |
 | `cc-lesson/` | Lessons filed with `cc-lesson.sh`, until Shepherd moves them into the coach's log |
 | `cc-policy/`, `cc-policy-override/`, `cc-gate-tools/`, `cc-automodel/` | Per-session policy (the resolved rules, and the **Policy** dropdown's choice), gated-tool and auto-model settings |

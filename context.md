@@ -172,8 +172,8 @@ disk, `FX.alert`, interrupted turns, FSEvents). These are the others.
   `vscode://anthropic.claude-code/open?prompt=`, sent only by `FX.openClaudeTab` after a positive
   window match, the prompt typed in and never sent. `?session=` is the one exception: written only
   by `core.restartTabUri`, sent only by `FX.openClaudeTab` after it re-checks the session is dead
-  (`FX.restartVerifyDead`). Its two callers are `FX.restartOne` (Restart fleet) and
-  `FX.pastResumeLaunch` (History's Resume, Adam's call 2026-10-04). `tests/ui.test.lua` pins both.
+  (`FX.pastVerifyDead`). Its one caller is `FX.pastResumeLaunch` (History's Resume, Adam's call
+  2026-10-04; restart in place, the first caller, was removed 2026-11-19). `tests/ui.test.lua` pins both.
 - **The context bar tracks the editor, not the raw window.** `core.contextFractionFor` divides by
   Claude Code's compaction point (`core.compactThreshold` at `compact.atPct`) when Shepherd's
   auto-compact is on, else by `window * context.autoCompactFraction` (default 0.92, an undocumented
@@ -256,7 +256,7 @@ disk, `FX.alert`, interrupted turns, FSEvents). These are the others.
   is answered through `cc-ask.sh` (`updatedInput`) from the card; approvals go through the gate's
   decision file; new tabs open through the Claude URI (`FX.openClaudeTab`) for New worktree tab,
   batch units, Instances Open, Run selected items, a ticket's tab, a new session in a window that
-  already has one, Restart fleet and History Resume. The permission-mode switcher still has no
+  already has one, and History Resume. The permission-mode switcher still has no
   keyboard path.
 - **Keystrokes go to a window, not a tab**, so a VS Code window with several sessions gets none
   (mailbox instead). Kitty (`kitty @`) is the one surface where typing is fully reliable.
@@ -387,7 +387,7 @@ green. See [the CHANGELOG section](CHANGELOG.md#2026-10-04--mining-round-2):
 - The coach: a lessons ledger, evidence runs and `cc-lesson.sh`, edit outcomes and Sharpen, a review
   of the repo's auto-memory, lessons across repos into the global CLAUDE.md.
 - Steering: Seance, the fleet idle alert, playbooks and Run selected
-  in My List (`cc-run.sh`), queue hold and the 📑 Queues view, Restart fleet outcomes.
+  in My List (`cc-run.sh`), queue hold and the 📑 Queues view.
 - Merging: brief pre-flight, gate blame, the main-moved notice, the main-green check (a routine with
   `"action": "gate"`), grant grading (a risky merge on a batch grant waits for Adam's click).
 - Unseen sessions: grey cards for live sessions with no status file; the transcript keeper
