@@ -220,19 +220,16 @@ delegation, idle/auto-spawn routing targets) are intentionally omitted until the
 - As a **reviewer**, I want a Fleet insights overlay aggregating turns, approval/denial rates, decision provenance, and time the fleet spent blocked on me, so that I can see where my attention is the bottleneck.
 - As a **fleet operator**, I want a notification-history view of what fired while I was away, so that I can catch up on escalations, stalls, and auto-actions I missed.
 - As a **reviewer**, I want a one-click shift report rolling up what the fleet did over a window, so that I can summarize unattended activity and copy it out.
-- As a **reviewer**, I want a session-history browser with filter/sort/pin and scoped multi-select delete of the recorded history (never Claude's transcripts), listing every transcript Claude Code still has and every kept copy beside the ledger's sessions, so that I can review, prune and find any past conversation in one place.
+- As a **reviewer**, I want a session-history browser with filter/sort/pin and scoped multi-select delete of the recorded history (never Claude's transcripts), listing every transcript Claude Code still has beside the ledger's sessions, so that I can review, prune and find any past conversation in one place.
 - As a **reviewer**, I want per-row redact/export/purge and a GC'd retention policy on the ledger, so that I can keep the record useful without it growing unbounded or leaking sensitive lines.
 - As a **reviewer**, I want session-lineage rollups for auto-respawns and /clears, so that I can recognize a crash-loop survivor instead of seeing a churn of unrelated session ids.
-- As a **fleet operator**, I want to search every live and dead session's transcript (a kept copy once Claude Code has deleted the original) and the ledger, so that I can answer "which session touched this file?" across the fleet.
+- As a **fleet operator**, I want to search every live and dead session's transcript Claude Code still has and the ledger, so that I can answer "which session touched this file?" across the fleet.
 - As a **reviewer**, I want a "Review activity" prompt that sends a ledger slice to a session as a read-only governance review, so that an agent can assess risky actions without editing anything.
 
 ## Past sessions & transcripts
 
 - As a **reviewer**, I want to ask any session a question (live or long finished) from its detail panel, a fleet-search hit or a History row, answered by a read-only fork of its own conversation, so that I learn what it did or why without interrupting it or reviving it.
 - As a **developer**, I want ↻ Resume on a History row to reopen a past session with its conversation, as its VS Code tab or with claude -r, only once Shepherd has verified it isn't running anywhere, so that I pick up last week's work without forking a session that's still live.
-- As a **developer**, I want a session whose transcript Claude Code already deleted to resume from its kept copy, put back at its original path first and never over a file, so that the conversation comes back whole instead of as an empty tab.
-- As a **reviewer**, I want every transcript of a project I ★ in History copied to ~/.claude/cc-keep once its session ends, and never deleted unless I confirm, so that the sessions I care about outlive Claude Code's 30-day cleanup.
-- As a **fleet operator**, I want Diagnostics to show Claude Code's cleanupPeriodDays and offer to raise it to 365 days, writing only that key, so that I can keep every transcript longer without editing settings.json by hand.
 
 ## Token & usage tracking
 

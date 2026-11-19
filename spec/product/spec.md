@@ -119,7 +119,7 @@ mailbox message, a notes request, a Stop guard). Each writer owns its own files:
 `<key>.notyet` a Not yet leaves; `cc-fleet.sh` → a batch's proposal; `cc-lesson.sh` → `cc-lesson/`;
 `cc-run.sh` → reports in `cc-run/`; `cc-ticket.sh`);
 and the panel (decision and answer files, a batch's own state, `cc-main-green.json`,
-`cc-keep/`, checklist runs). **[DECISION D-6, revised]**
+checklist runs). **[DECISION D-6, revised]**
 
 ## 4. Status model
 
@@ -207,10 +207,9 @@ verifies again right before it goes out), and it has exactly one caller (restart
 - **History's ↻ Resume** (`FX.pastResumeLaunch`, 2026-10-04, Adam's call): a past session is
   judged by `core.pastLiveness` — no card in Shepherd, no live
   `~/.claude/sessions` entry, and no process whose command line holds its id. A spike found a
-  missing transcript makes the link open an *empty* tab, so a session whose original transcript
-  Claude Code has deleted but whose kept copy remains gets that copy put back at its original path
-  first: clone-copied to a part file beside it, then linked into place, never over a file that is
-  there. A terminal session comes back with `claude -r <id>` instead.
+  missing transcript makes the link open an *empty* tab, so a session whose transcript Claude Code
+  has deleted is never reopened. (Until 2026-11-19 the transcript keeper's copy was put back first;
+  the keeper was removed.) A terminal session comes back with `claude -r <id>` instead.
 
 Anything that can't be verified counts as alive and is never reopened. Every other use stays
 banned: Jump, Open and New worktree tab never pass a session id. **[DECISION D-14, revised]**
@@ -518,16 +517,12 @@ install's defaults) is the data source for **Fleet insights**, **notification hi
 Round 2 adds `stop_guard`, `restart_outcome` and `past_resume` events. Retention is GC'd by
 days/size; rows can be redacted/exported/purged. The ledger never records Claude's own transcripts.
 
-**Past sessions and kept transcripts** (2026-10-03/04). 🗂 History also lists every transcript
-Claude Code still has in `~/.claude/projects` and every kept copy (AI title or first prompt, size,
-date), read by a background scan, never the tick; each row offers ↻ Resume
-(D-14). The **transcript keeper** copies every transcript of a project ★-pinned in History into
-`~/.claude/cc-keep/<project>/<session>.jsonl` once its session ends (an APFS clone on its own
-5-minute timer), and again when it grows. History and fleet search read the copy once
-Claude Code has deleted the original. Nothing deletes a copy on its own: unstarring offers
-**Remove kept copies**, confirmed first, and `uninstall.sh --purge` leaves the folder. Diagnostics
-shows Claude Code's `cleanupPeriodDays` (30 when unset) and offers **Keep transcripts 365 days**,
-which writes only that key.
+**Past sessions** (2026-10-04). 🗂 History also lists every transcript Claude Code still has in
+`~/.claude/projects` (AI title or first prompt, size, date), read by a background scan, never the
+tick; each row offers ↻ Resume (D-14). The **transcript keeper** (2026-10-03), which copied the
+★ projects' transcripts into `~/.claude/cc-keep` and offered to raise Claude Code's
+`cleanupPeriodDays`, was removed 2026-11-19 (Adam: "prune features I have no use for"); an old
+install's `cc-keep/` is left alone, even by `uninstall.sh --purge`, since its copies are transcripts.
 
 ## 8. Providers & models
 
@@ -581,7 +576,7 @@ cc-coach/                       per repo: <repo>.json (the run), .log.json, .les
                                 .applied.json, .memory-backup/; across repos: global.json,
                                 global.claude-backup/; evidence-spend.json (today's evidence runs)
 cc-scratch/                     scratch worktrees and runs
-cc-keep/<project>/<session>.jsonl  kept transcripts of ★ projects, plus pins.json; --purge leaves it
+cc-keep/                        left by the transcript keeper (removed 2026-11-19); --purge leaves it
 ```
 
 `uninstall.sh`'s `STATE` list is the full inventory of what `--purge` removes.
@@ -598,8 +593,8 @@ cc-keep/<project>/<session>.jsonl  kept transcripts of ★ projects, plus pins.j
   (git status + diff), **User Stories** (gated on `spec/product/user-stories.md`), On purpose and
   Requirements (gated on a git repo), Agents, Queue — expensive tabs load on open; the ⋯ menu hides
   tabs and remembers your last-open tab per project.
-- **🗂 History:** the ledger's sessions plus every past transcript and kept copy (📦 kept /
-  📦 kept copy only), ★ to keep a project's transcripts, ↻ Resume on each row.
+- **🗂 History:** the ledger's sessions plus every past transcript Claude Code still has, ★ to pin a
+  project, ↻ Resume on each row.
 - **Coach overlay** (from a card's 🧭 chip or a session's 🧭 Coach): the waiting suggestions (Apply,
   Skip with *Why skip?*, Bring back), memory rows (Delete it / Rewrite it, Undo), **Applied edits**
   (each one's verdict, **Sharpen**, Undo) and **Across repos**.

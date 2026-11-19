@@ -257,9 +257,10 @@ confirmed purge the Purge button uses. It never deletes Claude Code's own transc
 
 ### Past sessions
 
-Opening 🗂 History also reads Claude Code's own transcripts (`~/.claude/projects/<project>/<session>.jsonl`)
-and the [kept copies](#kept-transcripts) whose originals it deleted, so a session shows up even when
-the ledger was off or never saw it:
+Opening 🗂 History also reads Claude Code's own transcripts (`~/.claude/projects/<project>/<session>.jsonl`),
+so a session shows up even when the ledger was off or never saw it. Claude Code deletes a transcript
+once it is `cleanupPeriodDays` old (30 days unless you set it in `~/.claude/settings.json`), and
+History lists whatever it still keeps:
 
 - **What a row shows:** its AI title (or its first prompt), the first prompt, the transcript's size
   and when it last changed. A unit's brief from another session counts as its first prompt. Title-only
@@ -268,8 +269,8 @@ the ledger was off or never saw it:
   the panel's tick. It reads each transcript's first 32 KB and last 16 KB; after that only the tail of
   a transcript that changed.
 - **● live** marks a session that is running now (a card, or a Claude Code session file whose process
-  is still there). **transcript gone** marks a ledger row whose transcript was deleted with no copy
-  kept; it has no Ask and no Resume.
+  is still there). **transcript gone** marks a ledger row whose transcript Claude Code deleted; it
+  has no Resume.
 - **↻ Resume** reopens a session with its conversation: a VS Code session as its tab (Cursor's when
   `spawn.editor` is cursor), a terminal session with `claude -r <id>` in its folder, in kitty or
   Terminal per `spawn.editor`. It runs only once Shepherd has verified the session is dead:
@@ -280,36 +281,8 @@ the ledger was off or never saw it:
   It checks again right before the tab opens. A session that ran in a folder that's gone (a removed worktree) can't
   be resumed, and neither can one in a worktree another live session works in. A terminal or kitty
   Resume launches like a spawn, so with `spawn.live` off nothing is launched (it says so).
-- **Only a kept copy left:** VS Code's session link opens a new empty tab when the transcript is
-  missing, so Resume first copies the kept copy back to where Claude Code keeps transcripts, with a
-  fresh date so Claude Code's cleanup doesn't take it again at once. It never overwrites a file that
-  is already there.
 
 Each Resume is logged in the audit ledger (`past_resume`), with why when it refused.
-
-### Kept transcripts
-
-Claude Code deletes a transcript once it is `cleanupPeriodDays` old (30 days unless you set it in
-`~/.claude/settings.json`). ★-pin a project in the 🗂 History tab and Shepherd keeps a copy of each of
-its transcripts in `~/.claude/cc-keep/<project>/<session>.jsonl` (a private folder, mode 700):
-
-- **When:** once the session has ended (no card or `~/.claude/sessions` entry for it, and its
-  transcript untouched for 10 minutes; a leftover `~/.claude/sessions` entry stops counting once its
-  transcript has gone a day untouched), and again whenever the original grows, say after a resume.
-  A copy is never replaced by a smaller original.
-- **How:** an APFS clone (`cp -c`, a plain copy elsewhere), one at a time in the background, every
-  5 minutes and right after you star a project. It never runs on the panel's tick.
-- **Reading them:** once Claude Code has deleted the original, the History row says **📦 kept copy
-  only** (**📦 kept** while both exist), and fleet search finds the copy (**📦 kept** on the hit).
-- **Removing them:** nothing deletes a copy on its own. Unstarring a project stops new copies and
-  shows **Remove kept copies** at the top of the History tab; Shepherd asks before it deletes them.
-  `uninstall.sh --purge` leaves the folder too.
-- **Diagnostics** shows how long Claude Code keeps transcripts and offers **Keep transcripts 365
-  days**, which sets `cleanupPeriodDays` to 365 in `~/.claude/settings.json` and changes nothing else
-  there. It also counts the kept copies and names a copy that failed.
-
-The ★ set lives in the panel; Shepherd keeps its own record of it in `~/.claude/cc-keep/pins.json`.
-Subagents' transcripts aren't kept, only each session's own.
 
 ### Run score
 

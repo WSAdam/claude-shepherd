@@ -69,7 +69,7 @@ Every feature below has a reference page one click away. The panel lists the sam
 
 - [**Jump, nudge, stop, clear**](docs/controls.md#the-detail-panel): focus a session's tab, send it
   a message, stop its turn, or clear or compact it, from its tile.
-- [**Past sessions**](docs/usage-and-cost.md#past-sessions) lists every transcript in History, and ↻ Resume reopens one that's verified dead; [**Kept transcripts**](docs/usage-and-cost.md#kept-transcripts) keep your ★ projects' sessions past Claude Code's 30-day cleanup.
+- [**Past sessions**](docs/usage-and-cost.md#past-sessions) lists every transcript in History, and ↻ Resume reopens one that's verified dead.
 - [**Cross-repo tickets**](docs/automation.md#cross-repo-tickets): `cc-ticket.sh file --repo <repo>` hands another repo's sessions
   work and gets their replies back. [**Crossings**](docs/automation.md#crossings): every word waits for your approval, edited if you like.
 - [**Answer questions from Shepherd**](docs/approvals-and-policies.md#answer-questions-from-shepherd):
@@ -288,8 +288,8 @@ Full detail: [docs/approvals-and-policies.md](docs/approvals-and-policies.md#the
 | [Controls](docs/controls.md) | Clicks and menus, detail-panel buttons, shared windows, spawning, hotkeys, Stream Deck, awake and lock |
 | [Approvals and policies](docs/approvals-and-policies.md) | The safety model, the gate, always-ask commands, the worktree fence, policies, questions, the three Stop guards |
 | [Merging and batches](docs/merging-and-batches.md) | Worktree tabs, ready to merge, gates, gate blame, the main-green check, the checker, red-first, receipts, batches, brief pre-flight, grant grading, the overlap radar, main moved, the demo, the tab bridge |
-| [Automation](docs/automation.md) | When automation types, dry run, queue and packets, queue hold and the Queues view, templates, respawn, notes, the mailbox, tickets, resume, rules, routines, the coach, the fleet idle alert, A/B compare |
-| [Usage and cost](docs/usage-and-cost.md) | Context bars, plan usage, cost, commits, where the time went, the audit ledger and its views, past sessions and Resume, kept transcripts |
+| [Automation](docs/automation.md) | When automation types, dry run, queue and packets, queue hold and the Queues view, templates, respawn, notes, the mailbox, tickets, rules, routines, the coach, the fleet idle alert, A/B compare |
+| [Usage and cost](docs/usage-and-cost.md) | Context bars, plan usage, cost, commits, where the time went, the audit ledger and its views, past sessions and Resume |
 | [Providers and integrations](docs/providers-and-integrations.md) | Providers and models, agent profiles, the find-only audit, MCPs and skills, Remote Control, the SSH bridge |
 | [Make it yours](docs/customizing.md) | Layouts, themes, colours, sizing |
 | [Configuration](docs/configuration.md) | Settings tabs, `cc-config.json` block by block, what's on by default, the files Shepherd keeps, environment variables |

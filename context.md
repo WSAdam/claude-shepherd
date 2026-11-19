@@ -16,7 +16,7 @@ A local, single-user macOS console for a fleet of Claude Code sessions (renamed 
 write each session's status to `~/.claude/cc-status/`; the panel turns that into one card per
 project, and lets Adam approve, deny, answer a held question, stop, nudge, jump to or close a
 session. It also runs Adam's parallel-worktree method end to end. What it automates, by area
-(the README's [feature tour](README.md#feature-tour) has the full list; `core.FEATURES` holds 82
+(the README's [feature tour](README.md#feature-tour) has the full list; `core.FEATURES` holds 81
 entries):
 
 - **Feeding work:** task queues with auto-feed and routing, routines (cron spawns, digests, the
@@ -30,7 +30,7 @@ entries):
   the merge checker, batches driven by a session with grant grading, the overlap radar, worktree
   leases, the main-moved notice.
 - **Learning and looking back:** the coach (CLAUDE.md and memory edits, across repos too), the
-  audit ledger, History (every transcript, kept copies, Resume), the Time view, usage and
+  audit ledger, History (every transcript, Resume), the Time view, usage and
   cost, commit stats, My List (TODO.md import, playbooks, Run selected).
 
 It is not offline. What reaches the network:
@@ -58,7 +58,7 @@ Single user, no server, no accounts. Records store env-var names, never secrets.
   200-local cap: new state and functions hang on `FX` or go inside a `do … end` (CLAUDE.md).
 - **The glue is tested.** About 50 Lua suites load the real dashboard, or an `FX` block cut from it,
   under a stubbed `hs`: `smoke`, `readiness`, `shared-window`, `fleet`, `merge-request`,
-  `fleet-idle`, `maingreen`, `worklist-runner`, `past-sessions-wiring`, `keeper-copy` and more.
+  `fleet-idle`, `maingreen`, `worklist-runner`, `past-sessions-wiring` and more.
   `tests/ui.test.lua` pins wiring at the source level.
 - **Panel HTML/CSS/JS** lives in one Lua long string, `local HTML = [[ … ]]` (about lines
   16,360–27,770). A literal `]]` or `[[` inside it ends the string (CLAUDE.md). Small pure helpers
@@ -113,8 +113,8 @@ Single user, no server, no accounts. Records store env-var names, never secrets.
   `STATE` is the full list (what `--purge` removes);
   [docs/configuration.md](docs/configuration.md#files-shepherd-keeps) says what each holds. Newer ones: `cc-guard/`, `cc-lesson/`, `cc-run/`,
   `cc-main-green.json`, `cc-coach/`, `cc-merge/<key>.notyet` and `cc-merge/main-moved.seen`,
-  `cc-scratch/` (red-first and gate-blame worktrees), and `cc-keep/` (kept transcripts,
-  which `--purge` leaves in place).
+  `cc-scratch/` (red-first and gate-blame worktrees), and `cc-keep/` (left by the transcript
+  keeper, removed 2026-11-19; its copies are transcripts, so `--purge` leaves it in place).
 
 ## Invariants worth knowing
 
@@ -140,8 +140,7 @@ disk, `FX.alert`, interrupted turns, FSEvents). These are the others.
   blocks on write while `hs.task` waits for it to exit. Anything that can print a lot runs as
   `/bin/sh -c "<cmd> > <tmpfile>"` and is read on exit, with a retained-timer backstop
   (`core.folderScanShellCommand`; the compatibility check hit the same wall at 64KB).
-- **Nothing heavy on the tick.** Scans (radar, time index, past sessions, schedLock, commits, the
-  transcript keeper) run as background tasks on their own timers, cached, with a hung task
+- **Nothing heavy on the tick.** Scans (radar, time index, past sessions, schedLock, commits) run as background tasks on their own timers, cached, with a hung task
   reclaimed. Time the tick before blaming a feature for a freeze (CLAUDE.md).
 - **Typing into a session is a contract.**
   - `FX.pasteIntoWindow` / `FX.sendKeys` / `feedTask` return whether they delivered; with no
@@ -163,9 +162,8 @@ disk, `FX.alert`, interrupted turns, FSEvents). These are the others.
   claim. The merge (`FX.writeMergeDecision`) and question (`FX.answerAsk`) channels use the same
   shape.
 - **The panel's localStorage holds per-viewer state only**: detail-tab state keyed by projectKey,
-  the commit drawer's open state, and History's ★ pins (`cc-historyPins`). The pins are also sent to
-  Lua (`keep-pins`) and kept in `~/.claude/cc-keep/pins.json`, because the transcript keeper acts on
-  them.
+  the commit drawer's open state, and History's ★ pins (`cc-historyPins`). (Until 2026-11-19 the pins
+  also went to Lua for the transcript keeper, now removed.)
 - **"Needs you" is one decision**, `core.needsYouKind`: needs, heads-up (`core.TIER_FYI`) or nothing.
   A new source joins that predicate, never a new branch in `core.instanceTier` (CLAUDE.md has why).
 - **The Claude URI never reveals an existing tab (D-14).** New tabs open through
@@ -384,10 +382,9 @@ green. See [the CHANGELOG section](CHANGELOG.md#2026-10-04--mining-round-2):
   in My List (`cc-run.sh`), queue hold and the 📑 Queues view.
 - Merging: brief pre-flight, gate blame, the main-moved notice, the main-green check (a routine with
   `"action": "gate"`), grant grading (a risky merge on a batch grant waits for Adam's click).
-- Unseen sessions: grey cards for live sessions with no status file; the transcript keeper
-  (`cc-keep/`, and Diagnostics can set `cleanupPeriodDays`); History listing every transcript and
-  kept copy (`FX.refreshPastSessions`, a background scan) with Resume, which puts a kept copy back
-  first when Claude Code has deleted the original.
+- Unseen sessions: grey cards for live sessions with no status file; History listing every transcript
+  (`FX.refreshPastSessions`, a background scan) with Resume. (The transcript keeper, `cc-keep/` and
+  Diagnostics' `cleanupPeriodDays` offer, was removed 2026-11-19.)
 
 A fix after the round (78f3a73) stopped the stub check reading `/TODO.md` paths as TODO comments.
 Open after it: the E5 "land together" design note (`docs/feature-mining/e5-land-together-design.md`,

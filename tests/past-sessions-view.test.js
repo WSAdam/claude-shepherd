@@ -3,8 +3,8 @@
 //
 // A History row now carries what its transcript says (r.past: first prompt, AI title, size), and a
 // session the ledger never saw is a row of its own. Each row offers ↻ Resume (🔮 Ask went with Seance, 2026-11-19):
-// Resume only where Lua said it can (r.canResume -- an ended session with a transcript or a kept
-// copy), never on a live one (● live) or one whose transcript is gone (transcript gone, and no Ask
+// Resume only where Lua said it can (r.canResume -- an ended session with a transcript; 2026-11-19: no
+// longer a kept copy, the keeper was removed), never on a live one (● live) or one whose transcript is gone (transcript gone, and no Ask
 // either: there's nothing to ask). Resume sends past-resume with the row's session id and project
 // key read from data- attributes (never inside the handler), and can't be clicked twice. Every word
 // from a transcript goes in through esc().
@@ -82,9 +82,13 @@ eq("a session whose transcript is gone has no Resume", count(html, "h-resume"), 
 check("...it says so", html.indexOf('class="h-gone"') >= 0 && html.indexOf("transcript gone") >= 0);
 html = lib.historyRow({ session_id: SID, projectKey: PK, name: "plain", lastTs: 5 });
 eq("a ledger row before the scan lands: no Resume yet", count(html, "h-resume"), 0);
+// 2026-11-19, REQUIREMENT CHANGE: a kept-only row said "📦 kept copy only" and its Resume put the copy
+// back first; the transcript keeper was removed, so a stale kept mark says nothing
 html = lib.historyRow({ session_id: SID, projectKey: PK, lastTs: 5, canResume: true, kept: true, keptOnly: true, past: { prompt: "kept" } });
-check("a kept-only row resumes (its copy goes back first) and says so",
-      count(html, "h-resume") === 1 && html.indexOf("kept copy only") >= 0 && /h-resume[^>]*title="[^"]*kept copy/.test(html));
+check("a row shows no kept mark, and its Resume promises no copy",
+      count(html, "h-resume") === 1 && !/h-kept|kept cop|📦/.test(html));
+html = lib.historyRow({ session_id: SID, projectKey: PK, name: "old", lastTs: 5, noTranscript: true });
+check("...and a gone transcript no longer suggests ★ to keep one", html.indexOf("★") < 0 && html.indexOf("no copy was kept") < 0);
 
 // ---- every transcript word escaped ----------------------------------------------------------------
 html = lib.historyRow({ session_id: '"><script>x</script>', projectKey: '"><b>', lastTs: 5, canResume: true, transcriptOnly: true,

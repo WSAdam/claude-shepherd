@@ -124,7 +124,7 @@ dashboard it copied, its `init.lua` line, the methodology block in `~/.claude/CL
 Shepherd.app and the tab bridge. Shepherd's settings and history (`cc-config.json`, `cc-status/`,
 the ledger, …) stay: the double-click uninstaller asks first and deletes them only if you answer
 yes, while `make uninstall` always keeps them unless you ask for `make uninstall PURGE=1`. Even a
-purge leaves your [kept transcripts](usage-and-cost.md#kept-transcripts) in `~/.claude/cc-keep`.
+purge leaves the transcripts Shepherd's former transcript keeper copied into `~/.claude/cc-keep`.
 Hammerspoon, VS Code, Claude Code and the Homebrew packages stay installed. Reload Hammerspoon
 afterwards to close the panel.
 

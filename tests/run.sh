@@ -556,15 +556,6 @@ echo ""
 echo "== node: grey cards -- a live session with no status file drawn grey in its own row under the grid, busy/idle and why, no data-key, every field escaped (behavioral, runs the shipped hooklessCardHtml / ccHookless) =="
 node "$DIR/hookless-card.test.js" || fail=1
 echo ""
-echo "== lua: the transcript keeper -- which ★ transcripts need a copy (ended, and missing or grown), the cp -c copy run for real (atomic, mode 700), readers falling back to the copy, Diagnostics' cleanupPeriodDays row and its settings.json writer run for real (pure) =="
-lua "$DIR/keeper.test.lua" || fail=1
-echo ""
-echo "== lua: the transcript keeper's wiring -- pins from the panel to pins.json, one async copy at a time (never the tick), grown re-copied, a hung copy reclaimed, fleet search / History on a deleted original, unstarring never deletes, Remove only on a confirmed click, the cleanupPeriodDays offer (behavioral, stubbed hs) =="
-HOME="$(mktemp -d)" lua "$DIR/keeper-copy.test.lua" || fail=1
-echo ""
-echo "== node: the transcript keeper's panel side -- Diagnostics' offer button, ★ changes sent to Lua, History's kept marks and Remove offers, a kept fleet-search hit, escaped (behavioral, runs the shipped functions) =="
-node "$DIR/keeper-view.test.js" || fail=1
-echo ""
 echo "== lua: held queue lines and the Queue view -- peek/pop skip a held line and it keeps its place, the flag round-trips with the line and an old queue file reads as before, every reader (auto-feed, router, packets) skips held lines, the view's rows and its edits over real cc-queue/ files, read-only packet drift (pure + behavioral) =="
 lua "$DIR/queue-hold.test.lua" || fail=1
 echo ""

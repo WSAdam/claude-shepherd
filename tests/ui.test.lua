@@ -5009,7 +5009,8 @@ end
 -- ~/.claude/cc-restart.json (FX.RESTART_FILE, FX._restart), FX.stepRestartSnapshot / Continue /
 -- Outcome, the overlay and its renderer, and core's restart block. Kept: core.restartTabUri and
 -- FX.openClaudeTab's session link (History's Resume, FX.pastResumeLaunch), core.pastLiveness, and the
--- session-id check core.restartIdOk and core.RESTART_EDITORS, which History, the keeper and Seance share.
+-- session-id check core.restartIdOk and core.RESTART_EDITORS, which History shares (as did the keeper
+-- and Seance, both removed 2026-11-19).
 do
   local function slurp(name)
     local f = io.open(ROOT .. name, "r")
@@ -5369,35 +5370,57 @@ do
   check("grey cards: the empty-grid message steps aside for them", src:find('empty.style.display = HOOKLESS_N > 0 ? "none" : "block";', 1, true) ~= nil)
 end
 
--- ---- The transcript keeper: its own timer, the ★ set sent on load, no synchronous copy (2026-10-03, mining round 2 F3) ----
+-- ---- Kept transcripts are gone (2026-11-19) ----
+-- Adam, 2026-11-19: "prune features I have no use for". REQUIREMENT CHANGE: the 2026-10-03 pins here
+-- asserted the transcript keeper's own timer, the ★ set sent to Lua, fleet search reading the keep
+-- folder and the one confirmed delete. Gone with it: ~/.claude/cc-keep (FX.KEEP_DIR, pins.json),
+-- FX.stepKeeper and its timer, History's kept marks and "Remove kept copies", fleet search's kept
+-- hits, Resume's putting a kept copy back, Diagnostics' cleanupPeriodDays row and its offer (the only
+-- offer, so the offer button went too) and its settings.json number writer, and core's keeper block.
+-- Kept: History's ★ pin (a filter again), History listing every transcript Claude Code still has with
+-- ↻ Resume, fleet search over ~/.claude/projects and the ledger, and core.keeperProjectKeyOk (History's
+-- project-key check). uninstall.sh --purge still leaves an old cc-keep folder: those are transcripts.
 do
-  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
-  local src = f and f:read("*a") or ""
-  if f then f:close() end
-  local tickBody = src:match("\nfunction FX%._refreshBody%(%).-\nend\n") or ""
-  check("keeper: its pass runs on its own retained timer, never the tick",
-        src:find("FX.keepTimer = hs.timer.doEvery(60, function() pcall(FX.stepKeeper) end)", 1, true) ~= nil
-        and tickBody ~= "" and tickBody:find("stepKeeper", 1, true) == nil and tickBody:find("keepCopyNext", 1, true) == nil)
-  local block = src:match("\nfunction FX%.stepKeeper%(force%).-\nfunction FX%.keepReadPath") or ""
-  check("keeper: the scan and the copy are found", block ~= "")
-  check("keeper: the copy is an hs.task through /bin/sh, never hs.execute",
-        block:find('hs.task.new("/bin/sh"', 1, true) ~= nil and block:find("hs.execute", 1, true) == nil)
-  -- 2026-10-03: only a non-empty set -- a page load sends nothing when nothing is starred (the
-  -- My List archive check counts every message the page sends)
-  check("keeper: the panel sends its ★ set once when it loads, outside any function, when anything is starred",
-        src:find("\n    try { if(Object.keys(historyPins()).length) syncKeepPins(); } catch(e){}\n", 1, true) ~= nil)
-  check("keeper: and on every ★ change", (src:match("function setHistoryPin%(pk, on%).-\n    }\n") or ""):find("syncKeepPins();", 1, true) ~= nil)
-  -- 2026-11-19: "Seance reads the kept copy" went with Seance (REQUIREMENT CHANGE)
-  check("keeper: fleet search reads the keep folder and drops a copy whose original exists",
-        src:find("paths[#paths + 1] = FX.KEEP_DIR", 1, true) ~= nil
-        and src:find("core.keeperSearchHits(res.hits, FX.PROJECTS_DIR, FX.KEEP_DIR, FX.keepIsFile)", 1, true) ~= nil)
-  local removeBlock = src:match("\nfunction FX%.keepRemove%(pk%).-\nend\n") or ""
-  local keeperBlock = src:match("\n%-%- %-%-%-%- The transcript keeper .-\nfunction FX%.claudeSettingsEnv") or ""
-  local _, removes = keeperBlock:gsub("os%.remove%(", "")
-  check("keeper: a kept copy is deleted in one place, FX.keepRemove, after its question",
-        keeperBlock ~= "" and removes == 2   -- the files, then their emptied folder
-        and removeBlock:find('if answer ~= "Remove" then return false end', 1, true) ~= nil
-        and removeBlock:find('if answer ~= "Remove"', 1, true) < (removeBlock:find("os.remove(", 1, true) or 0))
+  local function slurp(name)
+    local f = io.open(ROOT .. name, "r")
+    local s = f and f:read("*a") or ""
+    if f then f:close() end
+    return s
+  end
+  local src, uninst = slurp("claude-dashboard.lua"), slurp("uninstall.sh")
+  local okCore, core2 = pcall(dofile, ROOT .. "cc-core.lua")
+  check("no keeper: no keep folder, no keeper pass or timer",
+        not src:find("FX.KEEP_DIR", 1, true) and not src:find("FX.stepKeeper", 1, true) and not src:find("FX.keepTimer", 1, true)
+        and not src:find("FX.keepCopyNext", 1, true) and not src:find("FX._keep ", 1, true))
+  check("no keeper: the panel sends no ★ set and offers no Remove kept copies",
+        not src:find("syncKeepPins", 1, true) and not src:find('"keep-pins"', 1, true) and not src:find('"keep-remove"', 1, true)
+        and not src:find("historyKeepOffersHtml", 1, true) and not src:find("HISTORY_KEPT", 1, true))
+  check("no keeper: History and fleet search mark no kept copy",
+        not src:find("h-kept", 1, true) and not src:find("fsKeptTag", 1, true) and not src:find("keptOnly", 1, true))
+  check("no keeper: Resume puts no kept copy back", not src:find("pastRestoreArgv", 1, true) and not src:find("keptPath", 1, true))
+  check("no keeper: Diagnostics has no cleanupPeriodDays row or offer",
+        not src:find("FX.keeperFacts", 1, true) and not src:find("FX.raiseCleanupDays", 1, true)
+        and not src:find("FX.setClaudeSettingsNumber", 1, true) and not src:find("doctorOffer", 1, true)
+        and not src:find('"doctor-offer"', 1, true))
+  check("no keeper: core keeps none of it", okCore and core2.KEEPER == nil and core2.keeperWants == nil
+        and core2.keeperCopyArgv == nil and core2.keeperSearchHits == nil and core2.keeperAnnotateHistory == nil
+        and core2.keptCopyOf == nil and core2.cleanupDaysFact == nil and core2.keeperDoctorRows == nil
+        and core2.settingsNumberCmd == nil and core2.pastRestoreArgv == nil and core2.keeperPins == nil)
+  local keys = {}
+  for _, f in ipairs(okCore and core2.FEATURES or {}) do keys[f.key] = true end
+  check("no keeper: no Kept transcripts in the feature list", okCore and not keys.keeper)
+  -- what stays
+  check("kept: History's ★ pin filters as before", src:find('id="h-fac-pin"', 1, true) ~= nil
+        and src:find("function setHistoryPin(pk, on)", 1, true) ~= nil)
+  check("kept: History lists Claude Code's own transcripts and offers Resume",
+        src:find("function FX.pastFiles()", 1, true) ~= nil and src:find("function FX.pastResume(text)", 1, true) ~= nil
+        and src:find('send("past-resume"', 1, true) ~= nil)
+  check("kept: fleet search still searches ~/.claude/projects", src:find('local paths = { (os.getenv("HOME") or "") .. "/.claude/projects" }', 1, true) ~= nil)
+  check("kept: a session whose transcript is gone can't be resumed", okCore
+        and core2.pastResumePlan({ sid = "abc-1", pk = "-r-A", original = "/p/-r-A/abc-1.jsonl", originalExists = false, cwd = "/r/A" },
+                                 function() return true end) == nil)
+  check("kept: uninstall --purge still leaves an old cc-keep folder (those are transcripts)",
+        uninst:find('[ -d "$CLAUDE_DIR/cc-keep" ]', 1, true) ~= nil)
 end
 
 -- ---- Held queue lines and the Queue view (2026-10-03, mining round 2 D4b) ----

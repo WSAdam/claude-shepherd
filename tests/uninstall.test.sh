@@ -110,7 +110,8 @@ purge_out="$(CC_INSTALL_CLAUDE_DIR="$C" CC_INSTALL_HS_DIR="$H" CC_UNINSTALL_APP_
   bash "$ROOT/uninstall.sh" --purge 2>&1)"
 assert_eq "--purge removes Shepherd's settings" "gone" "$([ -e "$C/cc-config.json" ] && echo there || echo gone)"
 # 2026-10-03: the transcript keeper's copies (cc-keep/) are transcripts Adam starred to keep, not
-# Shepherd's state: even --purge leaves them, and says where they are
+# Shepherd's state: even --purge leaves them, and says where they are. (2026-11-19: the keeper was
+# removed; an old install's copies are still transcripts, so this stands.)
 assert_eq "--purge keeps the kept transcripts" "there" "$([ -e "$C/cc-keep/-r-A/abc.jsonl" ] && echo there || echo gone)"
 assert_eq "...and says where they are" "yes" "$(printf '%s' "$purge_out" | grep -q 'cc-keep' && echo yes || echo no)"
 assert_eq "--purge removes Shepherd's state" "gone" "$([ -e "$C/cc-status" ] && echo there || echo gone)"

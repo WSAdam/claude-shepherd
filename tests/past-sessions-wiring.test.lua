@@ -1,11 +1,12 @@
 -- past-sessions-wiring.test.lua : browse and reopen past sessions under a STUBBED Hammerspoon
 -- (2026-10-04, mining round 2 unit F2). Opening 🗂 History starts a background scan (hs.task, never
--- the tick) of every transcript in ~/.claude/projects plus the kept copies whose originals Claude Code
--- deleted; its callback merges the rows into History. Resume reopens only a session verified dead
+-- the tick) of every transcript in ~/.claude/projects; its callback merges the rows into History. Resume reopens only a session verified dead
 -- (FX.pastVerifyDead: core.pastLiveness over one ps):
 -- a VS Code session through FX.openClaudeTab with restartSession (the ?session= link, D-14's rule), a
--- terminal one through FX.spawnSession with resume (`claude -r`). A kept-only session's copy goes
--- back to its original path first, by an async task that never overwrites a file.
+-- terminal one through FX.spawnSession with resume (`claude -r`).
+-- 2026-11-19, REQUIREMENT CHANGE: the transcript keeper was removed (Adam: "prune features I have no
+-- use for"). A copy an old install left in ~/.claude/cc-keep is no longer a History row, and Resume
+-- no longer puts one back: sections 2 and 7 now pin that, and 7b (the keeper's re-copy) went.
 -- This drives the real functions on real files in a temp HOME: tasks are recorders the test runs for
 -- real before firing their callbacks.
 
@@ -47,8 +48,8 @@ local function transcript(i, prompt, entry)
   return json.encode({ type = "user", sessionId = S[i], cwd = REPO, entrypoint = entry or "claude-vscode",
     timestamp = "2026-09-20T10:00:00.000Z", message = { role = "user", content = prompt } }) .. "\n"
 end
--- S1: an ended VS Code session. S2: live (it has a card). S3: Claude Code deleted it; only its kept copy
--- is left. S4: an ended terminal session. S5: Shepherd's own headless run. S6: ended, but a process
+-- S1: an ended VS Code session. S2: live (it has a card). S3: Claude Code deleted it; only a copy the
+-- removed keeper left in cc-keep is there. S4: an ended terminal session. S5: Shepherd's own headless run. S6: ended, but a process
 -- still resumes it (`--resume=<id>`, as VS Code runs one).
 write(orig(1), transcript(1, "ended vscode work"))
 write(orig(2), transcript(2, "the live one"))
@@ -227,8 +228,8 @@ check("the panel's tick starts no transcript scan", #scanTasks() == 0 and #TASKS
 post({ a = "open-history-view" })
 local scans = scanTasks()
 check("opening History starts a background scan", #scans == 1 and scans[1].running == true)
-check("...over the transcripts and the kept copy whose original is gone",
-      scans[1] and scans[1].args[2]:find(q(orig(1)), 1, true) ~= nil and scans[1].args[2]:find(q(kept(3)), 1, true) ~= nil)
+check("...over the transcripts, never an old cc-keep folder's copies",
+      scans[1] and scans[1].args[2]:find(q(orig(1)), 1, true) ~= nil and scans[1].args[2]:find("cc-keep", 1, true) == nil)
 local _, h0 = rowsById()
 check("...while History already shows what the ledger has", h0 and h0.scanning == true)
 post({ a = "open-history-view" })
@@ -236,7 +237,7 @@ check("a second open while it runs starts no second scan", #scanTasks() == 1)
 runTask(scans[1])
 local by, h = rowsById()
 check("the scan's rows reach History", by[S[1]] and by[S[1]].past and by[S[1]].past.prompt == "ended vscode work")
-check("...the kept-only session is a row, marked so", by[S[3]] and by[S[3]].keptOnly == true and by[S[3]].canResume == true)
+check("...a session with only a leftover kept copy is no row", by[S[3]] == nil)
 check("...the live session is marked live, not resumable", by[S[2]] and by[S[2]].live == true and not by[S[2]].canResume)
 check("...Shepherd's own headless run is left out", by[S[5]] == nil)
 check("...and the scan is done", h and not h.scanning)
@@ -284,59 +285,14 @@ check("an ended terminal session reopens through FX.spawnSession", #spawned == 1
 check("...with resume = its id, in its folder", spawned[1] and spawned[1][1] == "kitty" and spawned[1][2] == REPO
       and type(spawned[1][6]) == "table" and spawned[1][6].resume == S[4])
 
--- 7. kept-only: its copy goes back first (never over a file), then the tab
-post({ a = "past-resume", text = json.encode({ sessionId = S[3], projectKey = PK }) })
-local rs = restoreTasks()
-check("a kept-only session starts a restore first", #rs == 1 and rs[1].running == true)
-check("...and opens nothing until it lands", #opened == 1)
-runTask(rs[1])
-check("the kept copy is back at its original path", read(orig(3)) == read(kept(3)))
-check("...and then the tab opens with the session", #opened == 2 and opened[2].restartSession == S[3])
--- the original came back (or another session wrote there) before the restore ran: left alone
-os.remove(orig(3))
-post({ a = "past-resume", text = json.encode({ sessionId = S[3], projectKey = PK }) })
-rs = restoreTasks()
-write(orig(3), "a session wrote here meanwhile\n")
+-- 7. its transcript is gone, only a leftover kept copy is there: refused, nothing put back or opened
+-- (2026-11-19, REQUIREMENT CHANGE: the keeper put the copy back first and opened the tab)
 alerts = {}
-runTask(rs[#rs])
-check("a restore never overwrites a transcript that appeared meanwhile", read(orig(3)) == "a session wrote here meanwhile\n")
-check("...opens nothing", #opened == 2)
-check("...and says why", #alerts > 0)
-
--- 7b. 2026-10-04 (the driver's review): a restored session must not SHARE its kept copy's inode. A
--- hard link from the kept copy would let the resumed session append straight into the copy, and the
--- keeper's "grown" re-copy (cp -c <original> <kept>) would then copy a file onto itself. The restore
--- clones into a part file and links THAT, so the two stay separate and the keeper stays quiet.
-local function inode(p) return (sh("stat -c %i " .. q(p) .. " 2>/dev/null || stat -f %i " .. q(p)):gsub("%s+$", "")) end
-local function keepTasks()
-  local out = {}
-  for _, t in ipairs(TASKS) do if t.bin == "/bin/sh" and t.args[6] == KEEP then out[#out + 1] = t end end
-  return out
-end
-write(kept(7), transcript(7, "kept and resumed later"))
-sh("touch -t " .. os.date("%Y%m%d%H%M.%S", NOW - 40 * 86400) .. " " .. q(kept(7)))
-post({ a = "past-resume", text = json.encode({ sessionId = S[7], projectKey = PK }) })
-rs = restoreTasks()
-runTask(rs[#rs])
-check("a restored transcript is its own file, not the kept copy's inode", exists(orig(7)) and inode(orig(7)) ~= inode(kept(7)))
--- the resumed session writes on; the original grows, the copy doesn't
-local f7 = assert(io.open(orig(7), "a")); f7:write(transcript(7, "more after the resume")); f7:close()
-check("...so the resumed session's writes stay out of the kept copy", read(orig(7)) ~= read(kept(7)))
-sh("touch -t " .. os.date("%Y%m%d%H%M.%S", NOW - 3600) .. " " .. q(orig(7)))
-local nKeep = #keepTasks()
-post({ a = "keep-pins", text = json.encode({ PK }) })
-quiet(function() fx.stepKeeper(true) end)
-local kt = keepTasks()
-local grew
-for i = nKeep + 1, #kt do if kt[i].args[4] == orig(7) then grew = kt[i] end end
-check("the keeper copies the grown original once", grew ~= nil)
-if grew then runTask(grew) end
-check("...and the copy lands (no \"are identical\" refusal)", read(kept(7)) == read(orig(7)) and inode(orig(7)) ~= inode(kept(7)))
-local nAfter = #keepTasks()
-quiet(function() fx.stepKeeper(true) end)
-quiet(function() fx.stepKeeper(true) end)
-check("...then stays quiet: no failing copy, no endless re-copy", #keepTasks() == nAfter)
-check("...and Diagnostics names no failed copy", fx._keep.lastError == nil)
+post({ a = "past-resume", text = json.encode({ sessionId = S[3], projectKey = PK }) })
+check("a session whose transcript is gone starts no restore", #restoreTasks() == 0)
+check("...opens nothing", #opened == 1)
+check("...leaves the leftover copy where it is, and nothing at the original path", exists(kept(3)) and not exists(orig(3)))
+check("...and says why", table.concat(alerts, " "):find("gone", 1, true) ~= nil)
 
 -- 8. what the panel sends is checked in Lua
 local nT, nO, nS = #TASKS, #opened, #spawned

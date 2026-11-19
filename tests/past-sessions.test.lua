@@ -1,7 +1,6 @@
 -- past-sessions.test.lua : browse and reopen past sessions, the pure half (2026-10-04, mining round 2
 -- unit F2). The 🗂 History tab lists every session the ledger saw; it now also lists every session
--- Claude Code still has a transcript for (~/.claude/projects/<project>/<session>.jsonl), and every one
--- the transcript keeper kept a copy of after Claude Code deleted the original (~/.claude/cc-keep). A
+-- Claude Code still has a transcript for (~/.claude/projects/<project>/<session>.jsonl). A
 -- background scan reads each transcript's head (its first prompt, where it ran, which surface ran it)
 -- and tail (its newest AI title), a capped batch at a time, never on the tick. A row offers
 -- Resume. Resume reopens only a session verified dead: no card, no ~/.claude/sessions entry
@@ -9,8 +8,11 @@
 -- `claude --resume=<id>`). VS Code reopens it with the extension's ?session= link (core.restartTabUri
 -- via FX.openClaudeTab, the restart path's rule); a terminal or kitty session with `claude -r <id>`.
 -- Spike S4 (2026-10-04, on 913fcf84): with its transcript moved away, ?session= opened a NEW EMPTY
--- tab (a fresh session id, no error); with the same bytes moved back, it resumed. So a kept-only
--- session is resumed by copying its kept copy back first -- never over an existing file.
+-- tab (a fresh session id, no error); with the same bytes moved back, it resumed. So a session whose
+-- transcript is gone is never reopened.
+-- 2026-11-19, REQUIREMENT CHANGE: the transcript keeper was removed (Adam: "prune features I have no
+-- use for"), so History no longer lists its kept copies (kept / keptOnly), and Resume no longer puts
+-- a kept copy back (core.pastRestoreArgv / pastRestoreResult and their run-for-real section went).
 
 local HERE = debug.getinfo(1, "S").source:sub(2):match("(.*/)") or "./"
 local ROOT = HERE .. "../"
@@ -38,12 +40,21 @@ local json = dofile(HERE .. "support/json.lua")
 core.json = core.json or json
 
 local fns = { "pastHeadFacts", "pastTailTitle", "pastScanPlan", "pastScanCommand", "pastScanApply", "pastSessionRows",
-  "pastSessionsMerge", "pastLiveness", "pastPsCmd", "pastResumePlan", "pastRestoreArgv", "pastRestoreResult" }
+  "pastSessionsMerge", "pastLiveness", "pastPsCmd", "pastResumePlan" }
 local missing = {}
 for _, f in ipairs(fns) do if type(core[f]) ~= "function" then missing[#missing + 1] = f end end
 check("core has the past-session functions (" .. table.concat(missing, ", ") .. " missing)", #missing == 0)
 check("core.PAST holds the scan's limits", type(core.PAST) == "table" and tonumber(core.PAST.headBytes) and tonumber(core.PAST.passFiles))
 if #missing > 0 or type(core.PAST) ~= "table" then finish() end
+check("no restore of a kept copy any more (the keeper was removed 2026-11-19)",
+      core.pastRestoreArgv == nil and core.pastRestoreResult == nil)
+
+-- ---- which project keys History and Resume accept (2026-10-03, moved from keeper.test.lua 2026-11-19) ----
+check("a project key is the encoded folder name Claude Code uses", core.keeperProjectKeyOk("-Users-adam-Programming-x"))
+check("...never a path", not core.keeperProjectKeyOk("/Users/adam/x"))
+check("...nor a way out of the projects folder", not core.keeperProjectKeyOk("..") and not core.keeperProjectKeyOk("a/b")
+      and not core.keeperProjectKeyOk("a/../b") and not core.keeperProjectKeyOk(""))
+check("...nor something that isn't a string", not core.keeperProjectKeyOk(nil) and not core.keeperProjectKeyOk(42))
 
 local SID = "913fcf84-2494-4bed-ade2-c31543c16c04"
 local function rec(t) return json.encode(t) .. "\n" end
@@ -192,37 +203,35 @@ do
   check("...and only the tail where the head isn't wanted", cmd:find("/tmp/out.2.h", 1, true) == nil and cmd:find("/tmp/out.2.t", 1, true) ~= nil)
 end
 
--- ---- rows: one per session with a prompt; kept copies; headless runs left out ----
+-- ---- rows: one per session with a prompt; headless runs left out ----
+-- (2026-11-19, REQUIREMENT CHANGE: a kept-only file s3 and a kept mark on s4 went with the keeper)
 do
-  local P, K = "/h/.claude/projects/", "/h/.claude/cc-keep/"
+  local P = "/h/.claude/projects/"
   local files = {
     { path = P .. "-r-A/s1.jsonl", pk = "-r-A", sid = "s1", size = 2048, mtime = 100 },
     { path = P .. "-r-A/s2.jsonl", pk = "-r-A", sid = "s2", size = 120, mtime = 90 },             -- a title-only stub
-    { path = K .. "-r-A/s3.jsonl", pk = "-r-A", sid = "s3", size = 4096, mtime = 80, keptOnly = true },
-    { path = P .. "-r-B/s4.jsonl", pk = "-r-B", sid = "s4", size = 999, mtime = 70, kept = true },
+    { path = P .. "-r-B/s4.jsonl", pk = "-r-B", sid = "s4", size = 999, mtime = 70 },
     { path = P .. "-r-B/s5.jsonl", pk = "-r-B", sid = "s5", size = 999, mtime = 60 },             -- Shepherd's own claude -p
     { path = P .. "-r-B/s6.jsonl", pk = "-r-B", sid = "s6", size = 99999, mtime = 55 },           -- opened with an image
   }
   local cache = {
     [files[1].path] = { facts = { prompt = "fix it", cwd = "/r/A", entrypoint = "claude-vscode", firstTs = 50 }, title = "Fixing it" },
     [files[2].path] = { facts = {}, title = "A stub" },
-    [files[3].path] = { facts = { prompt = "old work", cwd = "/r/A" } },
-    [files[4].path] = { facts = { prompt = "b work", cwd = "/r/B", entrypoint = "cli" } },
-    [files[5].path] = { facts = { prompt = "review this diff", cwd = "/r/B", entrypoint = "sdk-cli" } },
-    [files[6].path] = { facts = { user = true, cwd = "/r/B", entrypoint = "claude-vscode" } },
+    [files[3].path] = { facts = { prompt = "b work", cwd = "/r/B", entrypoint = "cli" } },
+    [files[4].path] = { facts = { prompt = "review this diff", cwd = "/r/B", entrypoint = "sdk-cli" } },
+    [files[5].path] = { facts = { user = true, cwd = "/r/B", entrypoint = "claude-vscode" } },
   }
   local rows = core.pastSessionRows(files, cache)
   local by = {}
   for _, r in ipairs(rows) do by[r.session_id] = r end
-  eq("a row per session that has a user line", #rows, 4)
+  eq("a row per session that has a user line", #rows, 3)
   check("...one that opened with an image is a row with no prompt", by.s6 and by.s6.prompt == nil)
   check("...not a title-only stub", by.s2 == nil)
   check("...not a headless run (Shepherd's coach or checker)", by.s5 == nil)
   check("a row carries its prompt, title, folder and size", by.s1 and by.s1.prompt == "fix it" and by.s1.title == "Fixing it"
         and by.s1.cwd == "/r/A" and by.s1.size == 2048 and by.s1.mtime == 100 and by.s1.projectKey == "-r-A")
   check("...and a readable size", by.s1 and by.s1.sizeHuman == core.fmtBytes(2048))
-  check("a kept-only row says so", by.s3 and by.s3.keptOnly == true and by.s3.kept == true)
-  check("a row with a copy besides its original says so", by.s4 and by.s4.kept == true and not by.s4.keptOnly)
+  check("a row carries no kept mark", by.s4 and by.s4.kept == nil and by.s4.keptOnly == nil)
   check("no scan entry yet: no row", #core.pastSessionRows(files, {}) == 0)
 end
 
@@ -234,7 +243,7 @@ do
   }
   local rows = {
     { session_id = "s1", projectKey = "-r-A", prompt = "fix it", size = 2048, sizeHuman = "2.0 KB", mtime = 200, cwd = "/r/A" },
-    { session_id = "s3", projectKey = "-r-A", prompt = "old work", size = 4096, sizeHuman = "4.0 KB", mtime = 80, keptOnly = true, kept = true },
+    { session_id = "s3", projectKey = "-r-A", prompt = "old work", size = 4096, sizeHuman = "4.0 KB", mtime = 80 },
     { session_id = "s4", projectKey = "-r-B", prompt = "live one", size = 10, sizeHuman = "10 B", mtime = 300 },
   }
   local out = core.pastSessionsMerge(recs, rows, { scanned = true, live = { s4 = true } })
@@ -245,12 +254,13 @@ do
   eq("...its last activity is the later of the two", by.s1 and by.s1.lastTs, 200)
   check("...and the ledger's own records are left untouched", recs[1].past == nil and recs[1].lastTs == 100)
   check("a transcript the ledger never saw is a row of its own", by.s3 and by.s3.transcriptOnly == true and by.s3.lastTs == 80
-        and by.s3.past.prompt == "old work" and by.s3.keptOnly == true)
+        and by.s3.past.prompt == "old work")
   check("a ledger record with no transcript anywhere, once the scan is done, says so", by.s9 and by.s9.noTranscript == true)
   check("...and can't be resumed", by.s9 and not by.s9.canResume)
   check("a live session can't be resumed", by.s4 and by.s4.live == true and not by.s4.canResume)
   check("an ended one with a transcript can", by.s1 and by.s1.canResume == true)
-  check("...and so can one with only its kept copy left (spike S4)", by.s3 and by.s3.canResume == true)
+  -- (2026-11-19, REQUIREMENT CHANGE: s3 was a kept-only row; it is a plain transcript now)
+  check("...and so can a transcript the ledger never saw", by.s3 and by.s3.canResume == true)
   local early = core.pastSessionsMerge(recs, nil, { scanned = false })
   check("before the scan has finished, no record is called transcript-less", early[1].noTranscript == nil and early[2].noTranscript == nil)
 end
@@ -300,8 +310,7 @@ do
   local dirs = { ["/r/A"] = true, ["/r/A/.claude/worktrees/x"] = false }
   local function isDir(d) return dirs[d] == true end
   local base = { sid = SID, pk = "-r-A", original = "/h/.claude/projects/-r-A/" .. SID .. ".jsonl", originalExists = true,
-                 keptPath = "/h/.claude/cc-keep/-r-A/" .. SID .. ".jsonl", keptExists = false, cwd = "/r/A",
-                 entrypoint = "claude-vscode", editor = "vscode" }
+                 cwd = "/r/A", entrypoint = "claude-vscode", editor = "vscode" }
   local function with(over) local t = {}; for k, v in pairs(base) do t[k] = v end; for k, v in pairs(over) do t[k] = v end; return t end
   local p, why = core.pastResumePlan(base, isDir)
   check("a VS Code session reopens as its tab (" .. tostring(why) .. ")", p and p.how == "tab" and p.editor == "vscode" and p.dir == "/r/A" and p.id == SID)
@@ -312,11 +321,11 @@ do
   check("a CLI session reopens with claude -r in kitty", p and p.how == "shell" and p.editor == "kitty")
   p = core.pastResumePlan(with({ entrypoint = "cli", editor = "vscode" }), isDir)
   check("...or in Terminal when Shepherd spawns VS Code tabs", p and p.how == "shell" and p.editor == "terminal")
-  p = core.pastResumePlan(with({ originalExists = false, keptExists = true }), isDir)
-  check("only its kept copy left: restored to its original path first (spike S4)", p and p.restore
-        and p.restore.from == base.keptPath and p.restore.to == base.original)
-  p, why = core.pastResumePlan(with({ originalExists = false, keptExists = false }), isDir)
-  check("no transcript and no copy: refused (" .. tostring(why) .. ")", p == nil and tostring(why):find("gone", 1, true) ~= nil)
+  -- 2026-11-19, REQUIREMENT CHANGE: "only its kept copy left: restored first" went with the keeper;
+  -- a kept copy the caller still names is ignored
+  p, why = core.pastResumePlan(with({ originalExists = false, keptExists = true, keptPath = "/h/.claude/cc-keep/-r-A/" .. SID .. ".jsonl" }), isDir)
+  check("its transcript is gone: refused, whatever copy is named (" .. tostring(why) .. ")",
+        p == nil and tostring(why):find("gone", 1, true) ~= nil)
   p, why = core.pastResumePlan(with({ entrypoint = "sdk-cli" }), isDir)
   check("a headless run: refused (" .. tostring(why) .. ")", p == nil)
   p, why = core.pastResumePlan(with({ pk = "-r-A--claude-worktrees-x", cwd = "/r/A/.claude/worktrees/x" }), isDir)
@@ -325,43 +334,6 @@ do
   check("a folder that doesn't encode to its project: refused (" .. tostring(why) .. ")", p == nil)
   check("not a session id: refused", core.pastResumePlan(with({ sid = "x; rm -rf /" }), isDir) == nil)
   check("not a project key: refused", core.pastResumePlan(with({ pk = "../etc" }), isDir) == nil)
-end
-
--- ---- the restore: the kept copy back to its original path, never over a file (run for real) ----
-do
-  local T = sh("mktemp -d 2>/dev/null"):gsub("%s+$", "")
-  check("mktemp a fixture dir", T ~= "")
-  local PROJ, KEEP = T .. "/projects", T .. "/cc-keep"
-  sh("mkdir -p " .. q(PROJ .. "/-r-A") .. " " .. q(KEEP .. "/-r-A"))
-  local from, to = KEEP .. "/-r-A/" .. SID .. ".jsonl", PROJ .. "/-r-A/" .. SID .. ".jsonl"
-  writeFile(from, user("kept bytes"))
-  sh("touch -t 202601010000 " .. q(from))
-  check("only a kept copy and its own original path pass",
-        core.pastRestoreArgv(from, PROJ .. "/-r-A/other.jsonl", KEEP, PROJ) == nil
-        and core.pastRestoreArgv(T .. "/x.jsonl", to, KEEP, PROJ) == nil
-        and core.pastRestoreArgv(from, to, KEEP, PROJ) ~= nil)
-  local function runArgv(argv)
-    local parts = { "/bin/sh" }
-    for _, a in ipairs(argv) do parts[#parts + 1] = q(a) end
-    local p = io.popen(table.concat(parts, " ") .. " 2>&1; echo \"@@rc $?\"")
-    local o = p:read("*a"); p:close()
-    return tonumber(o:match("@@rc (%d+)")), o
-  end
-  local code, out = runArgv(core.pastRestoreArgv(from, to, KEEP, PROJ))
-  local ok, res = core.pastRestoreResult(code, out)
-  check("the restore lands (" .. tostring(res) .. ")", ok == true)
-  eq("...byte for byte", readAll(to), readAll(from))
-  local mtime = tonumber((sh("stat -c %Y " .. q(to) .. " 2>/dev/null || stat -f %m " .. q(to)):gsub("%s+$", "")))
-  check("...with a fresh mtime, so cleanupPeriodDays doesn't take it again at once", mtime and mtime > os.time() - 600)
-  eq("...private, like Claude Code's own", (sh("stat -c %a " .. q(to) .. " 2>/dev/null || stat -f %Lp " .. q(to)):gsub("%s+$", "")), "600")
-  check("...and no part file is left behind", sh("ls " .. q(PROJ .. "/-r-A")):gsub("%s+$", "") == SID .. ".jsonl")
-  -- never over an existing transcript
-  writeFile(to, user("a newer session wrote here"))
-  code, out = runArgv(core.pastRestoreArgv(from, to, KEEP, PROJ))
-  ok, res = core.pastRestoreResult(code, out)
-  check("a file at the original path is never overwritten (" .. tostring(res) .. ")", ok == false and readAll(to) == user("a newer session wrote here"))
-  check("...and no part file is left behind", sh("ls " .. q(PROJ .. "/-r-A")):gsub("%s+$", "") == SID .. ".jsonl")
-  sh("rm -r " .. q(T))
 end
 
 finish()

@@ -356,8 +356,7 @@ All derived locally from the transcript Shepherd already reads, with no extra ho
   audit ledger: "which session touched `auth.ts`?", "who ran that migration?". Click a hit to select
   the live session (or open an ended one's audit timeline). Instant with
   [ripgrep](https://github.com/BurntSushi/ripgrep) installed; it falls back to grep otherwise.
-  `search.maxResults` caps the hits. Once Claude Code has deleted a transcript, its
-  [kept copy](usage-and-cost.md#kept-transcripts) is searched instead (**📦 kept** on the hit).
+  `search.maxResults` caps the hits. A transcript Claude Code has deleted can't be searched.
   Two folders inside the ledger are never searched:
   `quarantine/` and `exports/` (an audit export is a copy of ledger lines, so its events would
   show twice).
