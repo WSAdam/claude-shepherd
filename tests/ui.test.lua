@@ -2444,7 +2444,7 @@ do
   local src = f and f:read("*a") or ""
   if f then f:close() end
   check("lock: the overlay asks core what to draw",
-        src:find("core.lockBoard(lastRenderList, MAX_RINGS)", 1, true) ~= nil
+        src:find("core.lockBoard(lastRenderList, MAX_RINGS, FX.seenAt())", 1, true) ~= nil   -- 2026-11-19: + the seen record
         and src:find("core.lockSummary(board.counts, n)", 1, true) ~= nil)
   check("lock: ring slots are built once and mutated, never rebuilt per frame",
         src:find("local function lockBuild(f)", 1, true) ~= nil
@@ -5828,6 +5828,23 @@ do
         src:find('<button id="b-queue" onclick="queueAdd()">Queue</button>', 1, true) ~= nil
         and src:find('if a == "queue-add" then', 1, true) ~= nil and src:find('if a == "queue-add-bulk" then', 1, true) ~= nil
         and src:find('if a == "queue-view-edit" then', 1, true) ~= nil)
+end
+
+-- ---- The lock screen keeps a finished session as Ready for you (2026-11-19) ----
+-- core.lockBoard decides (tests/core.test.lua); these pin that the overlay passes the seen record and
+-- draws a ready ring as a steady green ring with a check mark.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("lock ready: the overlay's board gets the seen record",
+        src:find("local function lockBoardNow() return core.lockBoard(lastRenderList, MAX_RINGS, FX.seenAt()) end", 1, true) ~= nil)
+  local paint = src:match("\nlocal function lockPaint%(canvases, board, spin%)(.-)\nend\n") or ""
+  check("lock ready: lockPaint is found", #paint > 0)
+  check("lock ready: a ready ring wears the cards' Ready for you green",
+        paint:find('elseif e.state == "ready" then col = { hue = 0.394, saturation = 0.83, brightness = 0.77 }', 1, true) ~= nil)
+  check("lock ready: ...and its label carries a check mark", paint:find('lbl.text = (e.state == "ready") and ("✓ " .. e.label) or e.label', 1, true) ~= nil)
+  check("lock ready: ...and it holds still (only working spins)", paint:find('if e.state == "working" then', 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

@@ -17133,5 +17133,55 @@ do
   check("no inbox: ...and no source names it", src ~= "decide")
 end
 
+-- ---- The lock screen keeps a finished session as Ready for you (2026-11-19) ----
+-- Adam, 2026-11-19: "the lock screen should show when things are finished not fall off the lock screen
+-- after it's finished its loop, maybe a ready for you display?" Cause: core.lockState drew only
+-- needs-you and working sessions, so a ring vanished the moment its session finished. Ready is the
+-- cards' own "Ready for you" (core.doneUnseen): finished, and not jumped to since.
+do
+  local B, S = core.lockBoard, core.lockSummary
+  eq("ready: a finished session never looked at reads ready", core.lockState({ key = "k", status = "done", since = 100 }, {}), "ready")
+  eq("ready: ...not once Adam has jumped to it since it finished",
+     core.lockState({ key = "k", status = "done", since = 100 }, { k = 150 }), nil)
+  eq("ready: ...but again when it finishes another turn after that look",
+     core.lockState({ key = "k", status = "done", since = 200 }, { k = 150 }), "ready")
+  eq("ready: an idle session is not ready", core.lockState({ key = "k", status = "idle", since = 100 }, {}), nil)
+  eq("ready: what wants Adam still outranks it",
+     core.lockState({ key = "k", status = "done", since = 100, needsYou = "needs", needsYouSource = "ask" }, {}), "approval")
+  eq("ready: with no seen record passed, nothing is ready (the old callers' answer)",
+     core.lockState({ key = "k", status = "done", since = 100 }), nil)
+
+  -- one project: a session still working leads it, as on its card; the summary counts both
+  local mixed = B({ { key = "a1", stackKey = "repo:/a", stackName = "Alpha", status = "working" },
+                    { key = "a2", stackKey = "repo:/a", stackName = "Alpha", status = "done", since = 100 } }, 6, {})
+  eq("ready: a project with one working session and one finished reads working", mixed.entries[1].state, "working")
+  eq("ready: ...and both are counted", mixed.counts.working .. "/" .. mixed.counts.ready, "1/1")
+  eq("ready: ...the line says so", S(mixed.counts, #mixed.entries), "1 working  ·  1 ready for you")
+
+  -- across projects: what wants Adam first, then ready, then working
+  local fleet = {
+    { key = "w", stackKey = "w", stackName = "Working", status = "working" },
+    { key = "r", stackKey = "r", stackName = "Ready", status = "done", since = 100 },
+    { key = "e", stackKey = "e", stackName = "Errored", status = "error" },
+    { key = "q", stackKey = "q", stackName = "Asking", status = "approval" },
+  }
+  local b = B(fleet, 6, {})
+  local order = {}
+  for _, e in ipairs(b.entries) do order[#order + 1] = e.state end
+  eq("ready: rings sort approval, error, ready, working", table.concat(order, ","), "approval,error,ready,working")
+  -- six working projects and one finished: the cap drops a working ring, never the finished one
+  local busy = {}
+  for i = 1, 6 do busy[#busy + 1] = { key = "w" .. i, stackKey = "w" .. i, stackName = "W" .. i, status = "working" } end
+  busy[#busy + 1] = { key = "done1", stackKey = "d", stackName = "Done", status = "done", since = 100 }
+  local capped = B(busy, 6, {})
+  local kept = false
+  for _, e in ipairs(capped.entries) do if e.state == "ready" then kept = true end end
+  check("ready: the six-ring cap keeps the finished project's ring", #capped.entries == 6 and kept)
+
+  eq("ready: only finished sessions is not All quiet", S({ total = 3, ready = 2 }, 2), "2 ready for you")
+  eq("ready: the full line ends with them",
+     S({ total = 9, working = 4, approval = 2, error = 1, ready = 1 }, 6), "4 working  ·  2 need you  ·  1 errored  ·  1 ready for you")
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

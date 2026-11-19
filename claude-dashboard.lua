@@ -14442,13 +14442,15 @@ local function lockPaint(canvases, board, spin)
           -- wears the card's merge teal (.tile.merge, #14b8a6).
           if e.state == "approval" then col = { hue = 0.11, saturation = 0.85, brightness = 1.0 }
           elseif e.state == "merge" then col = { hue = 0.48, saturation = 0.89, brightness = 0.9 }
-          elseif e.state == "error" then col = { hue = 0.0, saturation = 0.75, brightness = 1.0 } end
+          elseif e.state == "error" then col = { hue = 0.0, saturation = 0.75, brightness = 1.0 }
+          -- 2026-11-19: a finished session he hasn't looked at wears the cards' Ready for you green (#22c55e)
+          elseif e.state == "ready" then col = { hue = 0.394, saturation = 0.83, brightness = 0.77 } end
           track.action, ring.action = "stroke", "stroke"
           track.center = { x = x, y = track.center.y }
           ring.center = { x = x, y = ring.center.y }
           ring.strokeColor = col
           lbl.frame = { x = x - gap / 2, y = lbl.frame.y, w = gap, h = lbl.frame.h }
-          lbl.text = e.label
+          lbl.text = (e.state == "ready") and ("✓ " .. e.label) or e.label
           lbl.textColor = { hue = col.hue, saturation = (col.saturation or 0) * 0.5,
                             brightness = 0.82, alpha = 1.0 }
           if e.state == "working" then
@@ -14466,7 +14468,8 @@ local function lockPaint(canvases, board, spin)
 end
 
 -- Everything the overlay needs from the fleet, without reaching into the tick.
-local function lockBoardNow() return core.lockBoard(lastRenderList, MAX_RINGS) end
+-- 2026-11-19: with the seen record, so a session that finished stays as a "ready" ring until Adam jumps to it
+local function lockBoardNow() return core.lockBoard(lastRenderList, MAX_RINGS, FX.seenAt()) end
 
 function FX.lockEngage()
   if lockState or not FX.lockHas() then return end

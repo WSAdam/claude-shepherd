@@ -6591,7 +6591,10 @@ end
 -- 2026-10-13: a finished session still running background agents or jobs (it.bg_active, its card
 -- "Running 1 job") is working here too, as core.instanceTier ranks it -- the lock read "3 working"
 -- over four busy cards.
-function M.lockState(it)
+-- 2026-11-19 (Adam: "the lock screen should show when things are finished not fall off"): a finished
+-- session he hasn't jumped to since it finished is "ready" -- the cards' "Ready for you"
+-- (M.doneUnseen). Only when the caller passes the seen record; without one nothing reads ready.
+function M.lockState(it, seenAt)
   if type(it) ~= "table" then return nil end
   local kind, source = it.needsYou, it.needsYouSource
   if kind == nil then kind, source = M.needsYouKind(it) end
@@ -6603,6 +6606,7 @@ function M.lockState(it)
     return "approval"
   end
   if it.status == "working" or it.bg_active or M.mergeChecking(it) then return "working" end
+  if type(seenAt) == "table" and M.doneUnseen(it, seenAt) then return "ready" end
   return nil
 end
 
@@ -6613,13 +6617,17 @@ end
 -- so a big fleet cannot overflow the screen, while `counts` stays honest about the
 -- whole fleet. Same-state rings sort alphabetically so the row cannot reshuffle
 -- between frames.
-function M.lockBoard(list, maxN)
-  local RANK = { approval = 1, merge = 2, error = 3, working = 4 }
-  local byProject, counts = {}, { working = 0, approval = 0, merge = 0, error = 0, total = 0 }
+-- 2026-11-19: a finished, unseen session draws a "ready" ring (seenAt, M.lockState). Inside one
+-- project a session still working wins, as it leads the project's card (core.instanceTier); across
+-- projects a ready ring sorts ahead of the working ones (ORDER), so the cap never drops it.
+function M.lockBoard(list, maxN, seenAt)
+  local RANK = { approval = 1, merge = 2, error = 3, working = 4, ready = 5 }
+  local ORDER = { approval = 1, merge = 2, error = 3, ready = 4, working = 5 }
+  local byProject, counts = {}, { working = 0, approval = 0, merge = 0, error = 0, ready = 0, total = 0 }
   for _, it in ipairs(list or {}) do
     if type(it) == "table" then
       counts.total = counts.total + 1
-      local st = M.lockState(it)
+      local st = M.lockState(it, seenAt)
       if st and RANK[st] then
         counts[st] = counts[st] + 1
         -- one ring per PROJECT CARD: a repo's worktrees share its stackKey (and so
@@ -6644,7 +6652,7 @@ function M.lockBoard(list, maxN)
   local entries = {}
   for _, e in pairs(byProject) do entries[#entries + 1] = e end
   table.sort(entries, function(a, b)
-    if RANK[a.state] ~= RANK[b.state] then return RANK[a.state] < RANK[b.state] end
+    if ORDER[a.state] ~= ORDER[b.state] then return ORDER[a.state] < ORDER[b.state] end
     local al, bl = tostring(a.label):lower(), tostring(b.label):lower()
     if al ~= bl then return al < bl end
     return tostring(a.key) < tostring(b.key)
@@ -6664,6 +6672,7 @@ function M.lockSummary(counts, ringCount)
   local approval = tonumber(counts.approval) or 0
   local merge = tonumber(counts.merge) or 0
   local errored = tonumber(counts.error) or 0
+  local ready = tonumber(counts.ready) or 0
   if total == 0 then return "No sessions" end
   if (tonumber(ringCount) or 0) == 0 then
     return "All quiet  ·  " .. total .. " session" .. (total == 1 and "" or "s")
@@ -6673,6 +6682,7 @@ function M.lockSummary(counts, ringCount)
   if approval > 0 then parts[#parts + 1] = approval .. (approval == 1 and " needs you" or " need you") end
   if merge > 0 then parts[#parts + 1] = merge .. " ready to merge" end
   if errored > 0 then parts[#parts + 1] = errored .. " errored" end
+  if ready > 0 then parts[#parts + 1] = ready .. " ready for you" end   -- 2026-11-19
   return table.concat(parts, "  ·  ")
 end
 

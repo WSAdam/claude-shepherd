@@ -432,8 +432,12 @@ it. For a real security boundary use the macOS lock, which stops keystroke-drive
 
 While it's up, the lock shows the clock and one ring per project that has something going on. A
 working project's ring spins in its own colour; one that needs you holds a full amber ring; one
-that's **ready to merge** holds a teal ring; an error holds a red ring. The line under the rings
-counts sessions (`2 working  ·  1 needs you  ·  1 ready to merge`) and reads "All quiet" only when
-nothing is running or waiting. It decides "needs you" the same way the cards do, and counts a
+that's **ready to merge** holds a teal ring; an error holds a red ring. A session that finished and
+you haven't jumped to since (its card reads **Ready for you**) holds a steady green ring with a ✓
+before its name, so finished work stays on the lock until you look at it; while another session of
+the same project still works, the project's ring keeps spinning, and ready rings sort ahead of
+working ones so the six-ring row never drops them. The line under the rings counts sessions
+(`2 working  ·  1 needs you  ·  1 ready to merge  ·  1 ready for you`) and reads "All quiet" only
+when nothing is running, waiting or ready. It decides "needs you" the same way the cards do, and counts a
 session whose card reads **Running … job** or **… agents** (its turn ended, background work still
 going) as working, as the cards rank it.
