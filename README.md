@@ -159,8 +159,6 @@ the fleet idle alert; every other automatic behaviour here waits for its switch.
   wait for your Approve or Deny in the panel, with no window switching.
 - [**Always-ask commands**](docs/approvals-and-policies.md#always-ask-commands): `git push`,
   `rm -rf`, history rewrites and publish always wait for your click; no autopilot or rule passes them.
-- [**Talk mode**](docs/approvals-and-policies.md#talk-mode): one click makes a session discussion
-  only; it can read and talk, but its edits and commands that change things are denied.
 - [**Worktree fence**](docs/approvals-and-policies.md#worktree-fence): a session can't edit another
   worktree of its repo or run git that changes one, except its own approved merge into main.
 - [**Policy bundles & autopilot**](docs/approvals-and-policies.md#policies): reusable allow and deny
@@ -296,7 +294,7 @@ Full detail: [docs/approvals-and-policies.md](docs/approvals-and-policies.md#the
 | [Install](docs/install.md) | Install, upgrade, uninstall, what the installer changes, the tab bridge, the Dock launcher |
 | [Fleet](docs/fleet.md) | Statuses, grey cards, project cards, Instances, leases, restart in place and its outcomes, the detail panel and its tabs, search, groups, My List, playbooks, Run selected |
 | [Controls](docs/controls.md) | Clicks and menus, detail-panel buttons, Seance, Hold and ❄ Freeze, pinned links, shared windows, spawning, hotkeys, Stream Deck, awake and lock |
-| [Approvals and policies](docs/approvals-and-policies.md) | The safety model, the gate, always-ask commands, talk mode, the worktree fence, policies, questions, the three Stop guards |
+| [Approvals and policies](docs/approvals-and-policies.md) | The safety model, the gate, always-ask commands, the worktree fence, policies, questions, the three Stop guards |
 | [Merging and batches](docs/merging-and-batches.md) | Worktree tabs, ready to merge, gates, gate blame, the main-green check, the checker, red-first, receipts, batches, brief pre-flight, grant grading, the overlap radar, main moved, the demo, the tab bridge |
 | [Automation](docs/automation.md) | When automation types, dry run, the hands-off hold, queue and packets, queue hold and the Queues view, templates, respawn, notes, the mailbox, cc-send, tickets, resume, rules, routines, the coach, the fleet idle alert, A/B compare |
 | [Usage and cost](docs/usage-and-cost.md) | Context bars, plan usage, cost, commits, where the time went, the audit ledger and its views, past sessions and Resume, kept transcripts |

@@ -62,7 +62,7 @@ auto-memory) only on your click.
   advisory in the same way. **[DECISION D-3]** Two things do hold work back, on purpose, and
   neither touches another process: the **Stop guards** send a session's own turn end back once
   with a reason (D-22), and **grant grading** holds Shepherd's own merge on a batch grant until
-  Adam clicks (D-18). Denying a tool call (the gate, always-ask commands, talk mode, the worktree
+  Adam clicks (D-18). Denying a tool call (the gate, always-ask commands, the worktree
   fence) is the approval hook's job, not a detector's.
 - **A hardened security boundary.** The screen lock is a *soft* deterrent, not the macOS login
   window (that would break keystroke control of GUI sessions). **[DECISION D-4]**

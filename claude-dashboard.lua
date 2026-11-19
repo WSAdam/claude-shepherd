@@ -4520,31 +4520,6 @@ do
   end
 end
 
--- Talk mode (build program unit 6, 2026-09-28): a one-click per-session "discussion only"
--- mode. The flag's presence under cc-talk/<key> = on; cc-approve.sh reads it (CC_TALK_DIR in
--- cc-lib.sh) and denies edits outside ~/.claude/ and the scratchpads, and every Bash command
--- that isn't read-only. Reaped with the key's other files (cc_remove / FX.removeStatus).
-do
-  FX.TALK_DIR = os.getenv("CC_TALK_DIR") or (os.getenv("HOME") .. "/.claude/cc-talk")
-  function FX.talkOn(key) return key ~= nil and FX.readFile(FX.TALK_DIR .. "/" .. key) ~= nil end
-  function FX.setTalk(key, on)
-    if on then hs.fs.mkdir(FX.TALK_DIR); FX.writeFile(FX.TALK_DIR .. "/" .. key, "1")
-    else os.remove(FX.TALK_DIR .. "/" .. key) end
-  end
-  -- The tile menu and the detail panel's button both land here. A remote tile's hook reads
-  -- ITS host's cc-talk/, so a flag written here would be a dead control.
-  function FX.toggleTalk(it)
-    if not it or not it.key or it.remote then return end
-    local on = not FX.talkOn(it.key)
-    FX.setTalk(it.key, on)
-    ledgerFor(it, { type = "talk_toggle", on = on, text = on and "on" or "off" })
-    print("[cc-talk] talk mode for " .. tostring(it.key) .. " -> " .. (on and "ON" or "off"))
-    pcall(function() FX.alert("Claude Shepherd: talk mode " .. (on and "on" or "off") .. " for "
-      .. tostring(it.label or it.name or it.key)) end)
-    refresh()
-  end
-end
-
 -- L2 named policy bundles. The override file = the session's chosen bundle name
 -- (detail-panel Policy dropdown); the resolved file = core.resolvePolicy output
 -- the gate (cc-approve.sh) reads. KEEP IN SYNC: cc-approve.sh reads POLICY_DIR/<key>.
@@ -5179,7 +5154,6 @@ function FX.removeStatus(key)
   os.remove(POLICY_DIR .. "/" .. key)
   os.remove(POLICY_OVERRIDE_DIR .. "/" .. key)
   os.remove((os.getenv("CC_AUTOMODEL_DIR") or (home .. "/.claude/cc-automodel")) .. "/" .. key)
-  os.remove(FX.TALK_DIR .. "/" .. key)   -- talk mode's flag
   -- 2026-10-03 (D2): its hands-off hold -- a key hold goes with it; a process hold only once its claude
   -- process is gone (a /clear ghost's process lives on in the next session). cc_remove too.
   pcall(FX.holdPrune, key)
@@ -16548,12 +16522,6 @@ local function handleBridgeMsg(msg)
       return
     end
   end
-  -- Talk mode (build program unit 6): the detail panel's button. The tile menu calls
-  -- FX.toggleTalk itself; a remote tile was refused just above.
-  if a == "talk" then
-    FX.toggleTalk(item)
-    return
-  end
   -- 2026-10-03 (D2): the detail panel's Hold (the tile menu calls FX.toggleHold itself), and Clear
   -- for the list of sends skipped while it was held. A remote tile was refused just above.
   if a == "hold" then
@@ -16624,10 +16592,6 @@ local function handleBridgeMsg(msg)
             pcall(function() wv:evaluateJavaScript("openAb(" .. jsString(item.cwd or "") .. ")") end)
           end },
         { title = "-" },
-        -- Talk mode (build program unit 6): read and talk, change nothing. A flag file, not
-        -- a keystroke, so it works in a shared window too.
-        { title = "Talk mode (discussion only)", checked = FX.talkOn(item.key),
-          fn = function() FX.toggleTalk(item) end },
         -- 2026-10-03 (D2): hands-off hold -- Shepherd sends this session nothing automatic. A flag
         -- file, not a keystroke, so it works in a shared window too.
         { title = "Hold (no automatic sends)", checked = FX.holdOf(item) == "session",
@@ -17480,9 +17444,6 @@ local HTML = [[
   .bg-run { font-size:10px; margin-left:6px; padding:1px 6px; border-radius:8px;
     color:var(--ok); border:1px solid #2f6b43; background:#1c2a20; }
   .bg-run .spin { display:inline-block; animation:spin 1.4s linear infinite; }
-  /* 2026-09-28: talk mode (build program unit 6) -- the session reads and talks, changes nothing */
-  .talk { font-size:10px; margin-left:6px; padding:1px 6px; border-radius:8px; font-weight:600;
-    letter-spacing:.04em; color:var(--accent-text); border:1px solid var(--accent); background:var(--accent-bg); }
   /* 2026-10-03 (D2): hands-off hold -- Shepherd sends this session nothing automatic */
   .hold { font-size:10px; margin-left:6px; padding:1px 6px; border-radius:8px; font-weight:600;
     letter-spacing:.04em; color:#8fd0f0; border:1px solid #2a7fa8; background:#16303a; }
@@ -19184,7 +19145,6 @@ local HTML = [[
       <input id="deny-note" maxlength="500" placeholder="Why? (goes back with Deny)" onkeydown="onDenyNoteKey(event)" title="Optional. Sent to the session as the reason its tool call was refused, so it can change course instead of just failing. Enter denies with this reason.">
       <button id="b-stop"    onclick="act('stop')">Stop</button>
       <button id="b-auto"    onclick="act('autopilot')">Autopilot</button>
-      <button id="b-talk"    onclick="act('talk')" title="Talk mode: this session can read and talk but not change anything. Edits outside ~/.claude/ and its scratchpad, and shell commands that aren't read-only, are denied. Click again to turn it off.">Talk mode</button>
       <button id="b-hold"    onclick="act('hold')" title="Hold: Shepherd sends this session nothing automatic -- no auto-feed, rules, auto-continue, resume, drain close, Stop guard or notes request, no merge on a batch grant -- until you lift it. Skipped sends are listed below, never replayed; its mail waits. Survives /clear.">Hold</button>
       <span class="sep"></span>
       <button id="b-clear"   onclick="act('clear')">Clear</button>
@@ -24196,9 +24156,6 @@ local HTML = [[
       var ba = document.getElementById("b-auto");
       ba.textContent = it.autopilot ? "Autopilot: ON" : "Autopilot";
       ba.style.color = it.autopilot ? "#8fd4a3" : "#e8e9ee";
-      var bt = document.getElementById("b-talk");
-      bt.textContent = it.talk ? "Talk mode: ON" : "Talk mode";
-      bt.style.color = it.talk ? "#8fd4a3" : "#e8e9ee";
       // Remote (bridge) tiles are headless-only: grey every keystroke-shaped
       // control. Approve/Deny stay live only while the remote gate is waiting
       // (they route over ssh as decision files). Queue add/edit and the route
@@ -24227,7 +24184,7 @@ local HTML = [[
         }
       }
       // b-verify, b-coach: a remote session has no checkout here; they type nothing, so a shared window keeps them
-      ["b-jump","b-stop","b-auto","b-talk","b-hold","b-clear","b-compact","b-improve","b-nudge",
+      ["b-jump","b-stop","b-auto","b-hold","b-clear","b-compact","b-improve","b-nudge",
        "effort","mode","d-model","d-gate","d-policy","nudge","b-verify","b-coach"].forEach(function(id){
         var el = document.getElementById(id); if(!el) return;
         var why = remote ? REMOTE_T : ((shared && SHARED_IDS.indexOf(id) >= 0) ? SHARED_T : "");
@@ -27845,7 +27802,7 @@ local HTML = [[
     // row of its own in the cards theme. One badges row now holds them -- emitted ONLY when at
     // least one badge exists, so a card without any gains no empty row.
     function badgesHtml(it){
-      var b = talkBadge(it) + riskBadge(it) + holdBadge(it) + prBadgeHtml(it) + bgBadge(it) + notesBadge(it);
+      var b = riskBadge(it) + holdBadge(it) + prBadgeHtml(it) + bgBadge(it) + notesBadge(it);
       b += pinChipsHtml(it);   // 2026-09-29: pinned links (cc-pin.sh)
       b += leaseBadge(it);     // 2026-09-29: worktree leases (the worktree's own port)
       b += ticketBadge(it);    // 2026-09-29: cross-repo tickets no session here can take
@@ -27980,11 +27937,6 @@ local HTML = [[
         parts.push("due at " + k(c.due) + " tokens, compaction at " + k(c.at));
       }
       return parts.length ? "📝 Notes " + parts.join(" · ") : "";
-    }
-    // 2026-09-28: talk mode (build program unit 6) -- this session can read and talk, not change.
-    function talkBadge(it){
-      if(!it.talk) return "";
-      return '<span class="talk" title="Talk mode: discussion only. Edits and commands that change things are denied.">'+esc("TALK")+'</span>';
     }
     // 2026-10-03 (D2): hands-off hold -- this session on hold, or the whole fleet frozen. Only a known
     // scope shows; its words are fixed strings, never a field of the tile.
@@ -29255,8 +29207,6 @@ function FX._refreshBody()
     -- back checked for a kitty/terminal session the effect would never route.
     it.auto_model = (not it.remote) and it.anthropic and it.editor ~= "kitty" and it.editor ~= "terminal"
       and FX.autoModelOn(it.key) or false
-    -- Talk mode (build program unit 6): the TALK badge and the detail button read it.
-    it.talk = (not it.remote) and FX.talkOn(it.key) or false
 
     -- Collision + risk indicators (Features B/E), both off by default.
     it.collide = collEnabled and (collFlags[it.key] or false) or nil

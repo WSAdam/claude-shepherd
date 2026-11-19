@@ -1352,230 +1352,6 @@ GT="$(sed -n 's/^GATE_TIMEOUT="\${CC_GATE_TIMEOUT:-\([0-9]*\)}"$/\1/p' "$APP")"
 assert_eq "gate: Claude Code's hook timeout ($HT s) outlasts the wait ($GT s + 1) by 8s or more" "yes" \
   "$([ -n "$HT" ] && [ -n "$GT" ] && [ "$HT" -ge $(( GT + 1 + 8 )) ] && echo yes || echo no)"
 
-# ---- talk mode (build program unit 6, 2026-09-28) ------------------------------------------
-# A session in talk mode (~/.claude/cc-talk/<key>, the panel's toggle) can read and talk but not
-# change anything: the Edit family is denied outside ~/.claude/ and the scratchpads
-# (/private/tmp/claude-*/), and a Bash command that isn't read-only (cc_cmd_readonly in
-# cc-lib.sh) is denied -- gate armed or not. Talk mode only ever denies; what it lets through
-# goes on to the always-ask layer and the gate as before.
-
-# -- the judge (cc_cmd_readonly in cc-lib.sh) --
-roj() { # $1 command -> "readonly" | "changes"
-  ( . "$ROOT/cc-lib.sh"
-    if cc_cmd_readonly "$1"; then printf 'readonly'; else printf 'changes'; fi ) 2>/dev/null
-}
-ro() { assert_eq "talk: read-only: $1" "readonly" "$(roj "$1")"; }
-rw() { assert_eq "talk: not read-only: $1" "changes" "$(roj "$1")"; }
-
-ro 'ls -la'
-ro 'git status && ls'
-ro 'cat README.md | head -20'
-ro 'grep -rn "talk" docs/ | wc -l'
-ro 'rg -n foo --glob "*.lua"'
-ro 'tail -n 50 cc-lib.sh'
-ro 'find . -name "*.lua" -not -path "./.claude/*"'
-ro "sed -n '1,20p' cc-approve.sh"
-ro "sed -n -e '/^## /p' -e '\$=' README.md"
-ro "jq -r '.status' ~/.claude/cc-status/x.json"
-ro 'git log --oneline -5'
-ro "git log --format='%h %s' | head"
-ro 'git diff HEAD~1 -- cc-lib.sh'
-ro 'git show --stat HEAD'
-ro 'git branch --list'
-ro 'git branch -a'
-ro 'git -C ../main status'
-ro 'git config --get user.name'
-ro 'git stash list'
-ro 'git worktree list'
-ro 'ls 2>/dev/null || true'
-ro 'grep foo a.txt 2>&1 | sort | uniq -c'
-ro 'cd docs && ls'
-ro 'echo "rm -rf / > x"'
-ro "$(printf 'cat <<EOF\ntext > not-a-file\nEOF')"
-ro 'LC_ALL=C sort file.txt'
-ro 'find . -type f | xargs grep -l foo'
-ro 'bash -c "git status"'
-ro 'wc -l $(git ls-files)'
-ro 'diff <(ls a) <(ls b)'
-ro 'ls # a comment > x'
-ro 'for f in *.md; do head -3 "$f"; done'
-
-rw 'make build'
-rw 'rm file'
-rw 'mkdir x'
-rw 'echo hi > notes.txt'
-rw 'ls >> log.txt'
-rw 'ls 2> err.log'
-rw 'cat a &> b'
-rw 'ls > $OUT'
-rw 'sort -o out.txt in.txt'
-rw 'uniq in.txt out.txt'
-rw "sed -i '' s/a/b/ f"
-rw 'sed -ni p f'
-rw "sed 's/a/b/' f"
-rw "sed -n 'w out.txt' f"
-rw "sed -n 's/a/b/w out.txt' f"
-rw "sed -n '1e date' f"
-rw 'find . -name x -delete'
-rw 'find . -exec cat {} \;'
-rw 'git commit -m "x"'
-rw 'git branch new-feature'
-rw 'git branch -D old'
-rw 'git checkout main'
-rw 'git stash'
-rw 'git config user.name x'
-rw 'git -c core.pager=less log'
-rw 'git diff --output=patch.txt'
-rw 'git push'
-rw 'ls && touch x'
-rw 'echo $(touch x)'
-rw 'cat `rm x`'
-rw 'bash -c "touch x"'
-rw '$EDITOR notes.md'
-rw 'eval ls'
-rw './ls'
-rw 'npm test'
-rw 'tee out.txt < in.txt'
-rw 'rg --pre ./conv foo'
-rw 'printf x | xargs rm'
-rw 'GIT_EXTERNAL_DIFF=./x git diff'
-rw 'diff <(ls a) >(tee b)'
-rw 'sudo ls'
-
-# -- the hook (cc-approve.sh) --
-TALK="$TMP/talk"; mkdir -p "$TALK"
-TH="$TMP/talkhome"; mkdir -p "$TH/.claude"
-talk_req() { # $1 session, $2 tool, $3 tool_input JSON
-  printf '{"session_id":"%s","cwd":"/x/p","tool_name":"%s","tool_input":%s}' "$1" "$2" "$3"
-}
-talk() { # $1 session, $2 tool, $3 tool_input JSON [, env assignments that override]
-  talk_req "$1" "$2" "$3" \
-    | env HOME="$TH" CC_TALK_DIR="$TALK" CC_GATE_FLAG="$AA_NOFLAG" "${@:4}" bash "$APP" 2>/dev/null
-}
-touch "$TALK/tk1"
-rm -f "$HB"
-out="$(talk tk1 Edit '{"file_path":"/x/p/cc-lib.sh","old_string":"a","new_string":"b"}')"
-assert_eq "talk: an Edit in the project is denied, gate unarmed" "deny" "$(decision "$out")"
-assert_eq "talk: ...with the talk-mode reason" "Talk mode: discussion only" "$(reason "$out")"
-for t in Write MultiEdit; do
-  out="$(talk tk1 "$t" '{"file_path":"/x/p/new.md","content":"x"}')"
-  assert_eq "talk: a $t in the project is denied" "deny" "$(decision "$out")"
-done
-out="$(talk tk1 NotebookEdit '{"notebook_path":"/x/p/n.ipynb","new_source":"x"}')"
-assert_eq "talk: a NotebookEdit in the project is denied" "deny" "$(decision "$out")"
-out="$(talk tk1 Write "{\"file_path\":\"$TH/.claude/projects/p/memory/note.md\",\"content\":\"x\"}")"
-assert_eq "talk: a Write under ~/.claude/ goes on (memory, plans)" "" "$out"
-out="$(talk tk1 Write '{"file_path":"/private/tmp/claude-503/proj/sess/scratchpad/a.md","content":"x"}')"
-assert_eq "talk: a Write in a session scratchpad goes on" "" "$out"
-out="$(talk tk1 Write "{\"file_path\":\"$TH/.claude/../Programming/x.md\",\"content\":\"x\"}")"
-assert_eq "talk: a path that climbs out of ~/.claude/ is denied" "deny" "$(decision "$out")"
-out="$(talk tk1 Write '{"file_path":"/private/tmp/claude-503/../../Users/x.md","content":"x"}')"
-assert_eq "talk: ...and one that climbs out of the scratchpad" "deny" "$(decision "$out")"
-out="$(talk tk1 Write "{\"file_path\":\"$TH/.claudette/x.md\",\"content\":\"x\"}")"
-assert_eq "talk: a sibling of ~/.claude/ is not ~/.claude/" "deny" "$(decision "$out")"
-out="$(talk tk1 Bash '{"command":"git status && ls"}')"
-assert_eq "talk: a read-only command goes on" "" "$out"
-out="$(talk tk1 Bash '{"command":"make build"}')"
-assert_eq "talk: a command that isn't read-only is denied" "deny" "$(decision "$out")"
-assert_eq "talk: ...with the talk-mode reason (Bash)" "Talk mode: discussion only" "$(reason "$out")"
-out="$(talk tk1 Bash '{"command":"echo hi > notes.txt"}')"
-assert_eq "talk: a redirect to a file is denied" "deny" "$(decision "$out")"
-out="$(talk tk1 Read '{"file_path":"/x/p/a.txt"}')"
-assert_eq "talk: reading goes on" "" "$out"
-out="$(talk tk2 Edit '{"file_path":"/x/p/cc-lib.sh","old_string":"a","new_string":"b"}')"
-assert_eq "talk: another session's flag doesn't bind this one" "" "$out"
-
-# deny wins over an always-ask hold; a read-only always-ask command stays held
-out="$(talk tk1 Bash '{"command":"git push"}')"
-assert_eq "talk: an always-ask command is denied, not held (deny wins)" "deny" "$(decision "$out")"
-printf '{ "policies": { "alwaysAsk": { "patterns": ["cat secrets*"] } } }' > "$TMP/talk-aa.json"
-out="$(talk tk1 Bash '{"command":"cat secrets.txt"}' CC_CONFIG_FILE="$TMP/talk-aa.json")"
-assert_eq "talk: a read-only always-ask command stays held (ask, no panel)" "ask" "$(decision "$out")"
-
-# nothing automatic passes it: autoAllow, autopilot (the gate armed)
-out="$(talk tk1 Bash '{"command":"make build"}' CC_GATE_FLAG="$FLAG" CC_CONFIG_FILE="$AAPOL")"
-assert_eq "talk: autoAllow can't pass a denied command" "deny" "$(decision "$out")"
-echo 9999999999 > "$CC_AUTOPILOT_DIR/tk1"
-out="$(talk tk1 Bash '{"command":"make build"}' CC_GATE_FLAG="$FLAG" CC_CONFIG_FILE="$AAPOL")"
-assert_eq "talk: autopilot can't pass it" "deny" "$(decision "$out")"
-out="$(talk tk2 Bash '{"command":"make build"}' CC_GATE_FLAG="$FLAG" CC_CONFIG_FILE="$AAPOL")"
-assert_eq "talk: ...while the same policies pass it for a session not in talk mode" "allow" "$(decision "$out")"
-
-# the ledger: by talk
-echo '{ "ledger": { "enabled": true } }' > "$TMP/talk-ledger.json"
-talk tk1 Bash '{"command":"make build"}' CC_CONFIG_FILE="$TMP/talk-ledger.json" CC_LEDGER_DIR="$TMP/talkledger" >/dev/null
-assert_eq "talk ledger: the denial is recorded by talk" "deny|talk|make build" \
-  "$(cat "$TMP"/talkledger/*.jsonl 2>/dev/null | jq -r 'select(.type=="decision" and .session_id=="tk1") | "\(.outcome)|\(.by)|\(.summary)"')"
-
-# the cheap check: with no session in talk mode, or only another one, nothing here starts a jq
-TALK0="$TMP/talk-empty"; mkdir -p "$TALK0"
-talkspy() { # $1 talk dir, $2 session -> jq calls for a Write in the project, gate unarmed
-  rm -f "$SPY/calls"
-  talk_req "$2" Write '{"file_path":"/x/p/a","content":"x"}' \
-    | PATH="$SPY:$PATH" CC_TALK_DIR="$1" CC_GATE_FLAG="$AA_NOFLAG" CC_CONFIG_FILE="$TMP/none.json" bash "$APP" >/dev/null 2>&1
-  grep -c . "$SPY/calls" 2>/dev/null || echo 0
-}
-assert_eq "talk: an empty cc-talk/ spawns no jq" "0" "$(talkspy "$TALK0" tk3)"
-assert_eq "talk: no cc-talk/ at all spawns no jq" "0" "$(talkspy "$TMP/talk-none" tk3)"
-assert_eq "talk: another session's flag spawns no jq for this one" "0" "$(talkspy "$TALK" tk3)"
-assert_eq "talk: ...and the spy does see a session in talk mode (control)" "yes" \
-  "$([ "$(talkspy "$TALK" tk1)" -gt 0 ] && echo yes || echo no)"
-
-# SessionEnd sweep: cc_remove takes the flag with the rest of the key's files
-touch "$TALK/tk4"
-( CC_TALK_DIR="$TALK"; . "$ROOT/cc-lib.sh"; cc_remove tk4 ) >/dev/null 2>&1
-assert_absent "talk: cc_remove drops the talk-mode flag" "$TALK/tk4"
-
-# ---- talk mode: git options that run a command (2026-10-15) ---------------------------------
-# 2026-10-15: _cc_ro_git passed every `git ls-remote`, and --upload-pack runs the command it names
-# (so do its hidden alias --exec and any unique abbreviation, --u= or --exe=, checked on git 2.51);
-# grep's -O was caught only first in a cluster (-nO<cmd>) and only spelt in full (--op=<cmd> runs).
-rw 'git ls-remote --upload-pack="touch x" origin'
-rw "git ls-remote --upload-pack 'touch x' origin"
-rw "git ls-remote -u 'touch x' origin"
-rw "git ls-remote -qu'touch x' origin"
-rw 'git ls-remote --upload=x origin'
-rw 'git ls-remote --u=x origin'
-rw 'git ls-remote --exec=x origin'
-rw 'git ls-remote --exe x origin'
-rw 'git ls-remote -o v --upload-pack=x origin'
-rw 'git -C ../x ls-remote --upload-pack=x'
-rw "git ls-remote origin && git ls-remote --upload-pack='touch x' origin"
-rw "git grep -nO'touch x' foo"
-rw 'git grep -e foo -iOvim'
-rw 'git grep --op=vim foo'
-rw 'git grep --open=vim foo'
-ro 'git ls-remote origin'
-ro 'git ls-remote --tags --refs -q origin'
-ro 'git ls-remote --exit-code --symref origin main'
-ro 'git ls-remote -o v origin'
-ro 'git grep -eOops'
-ro 'git grep -e -Oops'
-ro 'git grep -n -C3 -e foo -- docs/'
-
-# ---- talk mode: Shepherd's own control files under ~/.claude/ (2026-10-15) ------------------
-# 2026-10-15: cc_talk_path_ok let a talk-mode session edit anything under ~/.claude/, so it could
-# Write cc-config.json, the gate flag, settings.json's hooks, or cc-lib.sh itself and switch its
-# own restrictions off. Shepherd's cc-* namespace and the two settings files are denied; the rest
-# of ~/.claude/ (memory, plans, projects, notes) stays writable. APFS ignores case, so Settings.JSON
-# is settings.json, and ~/.claude//x and ~/.claude/./x name ~/.claude/x.
-for f in cc-config.json cc-talk/tk1 cc-policy/bundle.json cc-gate.enabled settings.json \
-         settings.local.json cc-approve.sh cc-lib.sh cc-status/tk1.json; do
-  out="$(talk tk1 Write "{\"file_path\":\"$TH/.claude/$f\",\"content\":\"x\"}")"
-  assert_eq "talk: a Write to ~/.claude/$f is denied (Shepherd's control file)" "deny" "$(decision "$out")"
-done
-out="$(talk tk1 Edit "{\"file_path\":\"$TH/.claude/cc-config.json\",\"old_string\":\"a\",\"new_string\":\"b\"}")"
-assert_eq "talk: an Edit to ~/.claude/cc-config.json is denied" "deny" "$(decision "$out")"
-assert_eq "talk: ...with the talk-mode reason" "Talk mode: discussion only" "$(reason "$out")"
-for f in CC-Config.json Settings.JSON ./cc-config.json /settings.json cc-talk; do
-  out="$(talk tk1 Write "{\"file_path\":\"$TH/.claude/$f\",\"content\":\"x\"}")"
-  assert_eq "talk: another spelling, ~/.claude/$f, is denied too" "deny" "$(decision "$out")"
-done
-for f in plans/plan.md projects/p/memory/cc-notes.md projects/p/settings.json notes.md; do
-  out="$(talk tk1 Write "{\"file_path\":\"$TH/.claude/$f\",\"content\":\"x\"}")"
-  assert_eq "talk: a Write to ~/.claude/$f still goes on" "" "$out"
-done
-
 # ---- worktree fence (build program unit 7, 2026-09-28) ---------------------------------------
 # With gate.fence on, a session can't change a sibling worktree of its own repo: one with the same
 # git common dir and a different toplevel. The main checkout is a sibling of a linked worktree, but
@@ -1664,6 +1440,45 @@ fallow "cd sub && git commit goes on" "$WA" "cd sub && git commit -m x"
 fallow "a quoted cd in a commit message is only words" "$WA" "git commit -m \"cd $WB && git commit\""
 fallow "a session in main may commit main" "$MAIN" "git commit -m x && git -C $MAIN merge --ff-only wa"
 fallow "another repo is not a sibling (git)" "$WA" "git -C $FR/other commit -m x"
+
+# ---- the fence's read-only git (moved here 2026-11-19) ----------------------------------------
+# These fixtures were talk mode's (cc_cmd_readonly). Talk mode was removed 2026-11-19 (Adam: "prune
+# features I have no use for"), but the fence judges git aimed at a sibling with the same _cc_ro_git,
+# so they run against a sibling here instead: a read-only one goes on, any other is denied. (Talk
+# mode's `git -c core.pager=… log` case doesn't carry over: the fence leaves -c out on purpose.)
+fallow "read-only git: branch --list / -a, config --get, stash list" "$WA" \
+  "git -C $WB branch --list; git -C $WB branch -a; git -C $WB config --get user.name; git -C $WB stash list"
+fallow "read-only git: log with a format, diff of one file" "$WA" "git -C $WB log --format='%h %s' && git -C $WB diff HEAD~1 -- cc-lib.sh"
+fdeny "not read-only: git branch <new>" "$WA" "git -C $WB branch new-feature"
+fdeny "not read-only: git branch -D" "$WA" "git -C $WB branch -D old"
+fdeny "not read-only: git checkout" "$WA" "git -C $WB checkout main"
+fdeny "not read-only: a bare git stash" "$WA" "git -C $WB stash"
+fdeny "not read-only: git config <key> <value>" "$WA" "git -C $WB config user.name x"
+fdeny "not read-only: git diff --output=<file>" "$WA" "git -C $WB diff --output=patch.txt"
+# 2026-10-15: _cc_ro_git passed every `git ls-remote`, and --upload-pack runs the command it names
+# (so do its hidden alias --exec and any unique abbreviation, --u= or --exe=, checked on git 2.51);
+# grep's -O was caught only first in a cluster (-nO<cmd>) and only spelt in full (--op=<cmd> runs).
+fdeny "ls-remote --upload-pack=<cmd>" "$WA" "git -C $WB ls-remote --upload-pack=\"touch x\" origin"
+fdeny "ls-remote --upload-pack <cmd>" "$WA" "git -C $WB ls-remote --upload-pack 'touch x' origin"
+fdeny "ls-remote -u <cmd>" "$WA" "git -C $WB ls-remote -u 'touch x' origin"
+fdeny "ls-remote -qu<cmd>" "$WA" "git -C $WB ls-remote -qu'touch x' origin"
+fdeny "ls-remote --upload=<cmd>" "$WA" "git -C $WB ls-remote --upload=x origin"
+fdeny "ls-remote --u=<cmd>" "$WA" "git -C $WB ls-remote --u=x origin"
+fdeny "ls-remote --exec=<cmd>" "$WA" "git -C $WB ls-remote --exec=x origin"
+fdeny "ls-remote --exe <cmd>" "$WA" "git -C $WB ls-remote --exe x origin"
+fdeny "ls-remote -o v --upload-pack=<cmd>" "$WA" "git -C $WB ls-remote -o v --upload-pack=x origin"
+fdeny "a plain ls-remote then one with --upload-pack" "$WA" "git -C $WB ls-remote origin && git -C $WB ls-remote --upload-pack='touch x' origin"
+fdeny "grep -nO<cmd>" "$WA" "git -C $WB grep -nO'touch x' foo"
+fdeny "grep -iOvim" "$WA" "git -C $WB grep -e foo -iOvim"
+fdeny "grep --op=<cmd>" "$WA" "git -C $WB grep --op=vim foo"
+fdeny "grep --open=<cmd>" "$WA" "git -C $WB grep --open=vim foo"
+fallow "a plain ls-remote is read-only" "$WA" "git -C $WB ls-remote origin"
+fallow "ls-remote --tags --refs -q" "$WA" "git -C $WB ls-remote --tags --refs -q origin"
+fallow "ls-remote --exit-code --symref" "$WA" "git -C $WB ls-remote --exit-code --symref origin main"
+fallow "ls-remote -o v" "$WA" "git -C $WB ls-remote -o v origin"
+fallow "grep -eOops searches for Oops" "$WA" "git -C $WB grep -eOops"
+fallow "grep -e -Oops searches for -Oops" "$WA" "git -C $WB grep -e -Oops"
+fallow "grep -n -C3 -e foo -- docs/" "$WA" "git -C $WB grep -n -C3 -e foo -- docs/"
 
 # fence off: everything goes on
 assert_eq "fence off: an Edit into a sibling goes on" "" "$(fence f1 "$WA" Edit "$(edit_in "$WB/x.txt")" CC_CONFIG_FILE="$FOFF")"

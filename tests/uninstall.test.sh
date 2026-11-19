@@ -110,7 +110,8 @@ assert_eq "...and says where they are" "yes" "$(printf '%s' "$purge_out" | grep 
 assert_eq "--purge removes Shepherd's state" "gone" "$([ -e "$C/cc-status" ] && echo there || echo gone)"
 # 2026-09-28: the saved usage totals (cc-usage-state.json) are Shepherd's state too
 assert_eq "--purge removes the saved usage totals" "gone" "$([ -e "$C/cc-usage-state.json" ] && echo there || echo gone)"
-# 2026-09-28: talk mode's per-session flags (cc-talk/) are Shepherd's state too
+# 2026-09-28: talk mode's per-session flags (cc-talk/) are Shepherd's state too (2026-11-19: a
+# leftover of the removed talk mode on an old install, still purged)
 assert_eq "--purge removes the talk-mode flags" "gone" "$([ -e "$C/cc-talk" ] && echo there || echo gone)"
 # 2026-09-28: the handoff notes (cc-notes/) are Shepherd's state too
 assert_eq "--purge removes the handoff notes" "gone" "$([ -e "$C/cc-notes" ] && echo there || echo gone)"

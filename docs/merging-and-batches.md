@@ -421,7 +421,7 @@ forms, with nothing else in the command. Its merge request has to be approved fo
 that repo, and the allow ends when the request is marked merged or blocked. It doesn't depend on
 the fence or the gate (an armed gate doesn't ask you a second time), and the audit ledger records
 it as `outcome: "allow"`, `by: "merge"`. A folder written with a variable, `~` or quotes can't be
-checked and is left to Claude Code. Talk mode still denies the merge.
+checked and is left to Claude Code.
 
 ### A unit's own tab closes itself
 

@@ -22,13 +22,10 @@
 # answers "ask" so Claude Code's own prompt shows, never nothing. An Approve is never
 # remembered.
 #
-# Talk mode (2026-09-28) comes before all of it: for a session in talk mode (CC_TALK_DIR/<key>)
-# an Edit-family call outside ~/.claude/ and the scratchpads, or a Bash command that isn't
-# read-only (cc_cmd_readonly in cc-lib.sh), is denied, whatever the gate or a policy says.
-#
-# Worktree fence (2026-09-28) comes next, with gate.fence on: an Edit-family file in a sibling
-# worktree of the session's repo, or mutating git / a redirection aimed at one, is denied (the
-# session's own approved ff-only merge into main excepted), whatever the gate or a policy says.
+# Worktree fence (2026-09-28) comes before all of it, with gate.fence on: an Edit-family file in
+# a sibling worktree of the session's repo, or mutating git / a redirection aimed at one, is
+# denied (the session's own approved ff-only merge into main excepted), whatever the gate or a
+# policy says.
 #
 # Only the decision JSON is ever written to stdout; logs go to stderr.
 
@@ -160,39 +157,10 @@ ledger_decision() {
      + (if $why == "" then {} else {reason:$why} end)')"
 }
 
-# ---- Talk mode (build program unit 6, 2026-09-28) -------------------------
-# Before everything else, gate armed or not: a session in talk mode (the panel's toggle, the
-# flag file CC_TALK_DIR/<key>) can read and talk but not change anything. An Edit-family call
-# outside ~/.claude/ and the scratchpads or to Shepherd's control files there (cc_talk_path_ok,
-# 2026-10-15: cc-*, settings.json), or a Bash command that isn't
-# read-only (cc_cmd_readonly), is denied. Talk mode only ever denies: what it lets through goes
-# on to the always-ask layer and the gate below, so an always-ask command it lets through is
-# still held, and one it refuses is denied rather than held (deny wins). The first look is pure
-# bash, like always-ask's: with no session in talk mode, or only another one, it starts no jq.
-if cc_talk_candidate "$INPUT"; then
-  if ! cc_have_jq; then   # the request can't be read, so nothing talk mode judges goes through
-    printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Talk mode: discussion only"}}'
-    exit 0
-  fi
-  load_identity
-  load_summary
-  TALK_DENY=""
-  case "$TOOL" in
-    Edit|Write|MultiEdit|NotebookEdit) cc_talk_path_ok "$SUMMARY" || TALK_DENY="an edit outside ~/.claude/ and the scratchpads, or to Shepherd's control files" ;;
-    Bash) cc_cmd_readonly "$SUMMARY" || TALK_DENY="a command that isn't read-only" ;;
-  esac
-  if [ -n "$TALK_DENY" ]; then
-    echo "[cc-approve] 💬 talk mode denied $TALK_DENY: $TOOL ($KEY)" >&2
-    ledger_decision deny talk
-    emit_deny "Talk mode: discussion only"
-    exit 0
-  fi
-fi
-
 # ---- Worktree fence (build program unit 7, 2026-09-28) --------------------------------------
 # With gate.fence on, gate armed or not: a session can't change a sibling worktree of its own repo
 # (cc-lib.sh's fence section) -- an Edit-family file in one, mutating git aimed at one, a
-# redirection into one. Like talk mode it only ever denies, and it comes before the always-ask
+# redirection into one. It only ever denies, and it comes before the always-ask
 # layer, so a command that is both (git -C <sibling> push) is denied rather than held. The one
 # exception is the session's own approved merge, git -C <main> merge --ff-only <its branch>. The
 # first look is pure bash: an own edit, a plain command or own git starts no jq and no git.
@@ -229,7 +197,7 @@ fi
 # After Adam clicks Merge, the session fast-forwards main with `git merge --ff-only <its branch>`.
 # Auto mode's classifier refused that as "Merge Without Review", since nothing vouched for it, so
 # this hook answers allow for exactly the session's own approved merge (cc_approved_merge reads the
-# request on disk). After talk mode and the fence, which may deny it; before the gate, so an armed
+# request on disk). After the fence, which may deny it; before the gate, so an armed
 # gate doesn't ask Adam a second time. The first look is pure bash: no "merge --ff-only", no jq.
 case "$INPUT" in
   *'merge --ff-only'*)

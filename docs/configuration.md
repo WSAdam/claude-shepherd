@@ -181,7 +181,7 @@ Everything lives under `~/.claude/`:
 | `cc-tickets/` | [Cross-repo tickets](automation.md#cross-repo-tickets), one file each |
 | `cc-queue/` | Each project's [task queue](automation.md#task-queue) and its [packets](automation.md#task-packets) |
 | `cc-pins/` | [Pinned links](controls.md#pinned-links), one file per worktree |
-| `cc-talk/` | One flag file per session in [talk mode](approvals-and-policies.md#talk-mode) |
+| `cc-talk/` | Left by talk mode, removed 2026-11-19: nothing reads it; `--purge` deletes it |
 | `cc-resume/` | [Resumes waiting for a usage limit's reset](automation.md#resume-at-the-limit-reset): the hook's arm, Shepherd's plan, a Cancel |
 | `cc-notes/` | [Handoff notes](automation.md#handoff-notes), and [auto-compact](automation.md#auto-compact-with-notes)'s due-ats and each session's own notes; `pending/` also holds an [agent profile](providers-and-integrations.md#agent-profiles)'s policy bundle until the session it spawned takes it |
 | `cc-bridge/` | The tab bridge's per-window tab lists and command folders |

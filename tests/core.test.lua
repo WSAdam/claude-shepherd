@@ -8504,7 +8504,8 @@ do
   -- 2026-10-14: 61 -> 62 for crossings, Adam approving what one project sends another ("crossings", flagged new).
   -- 2026-10-27: 62 -> 63 for the Compare tab, a weekly GitHub leaderboard ("compare", flagged new).
   -- 2026-11-19: 63 -> 62, REQUIREMENT CHANGE: the decisions inbox ("decisions", flagged new) was removed.
-  eq("FEATURES: the 62 new features are flagged", newCount, 62)
+  -- 2026-11-19: 62 -> 61, REQUIREMENT CHANGE: talk mode ("talk", flagged new) was removed.
+  eq("FEATURES: the 61 new features are flagged", newCount, 61)
   check("FEATURES: lists the Compare tab", keys.compare == true)
   check("FEATURES: lists crossings", keys.crossings == true)
   check("FEATURES: lists queue hold and the Queues view", keys.queuehold == true)
@@ -8545,7 +8546,7 @@ do
   check("FEATURES: lists the merge checker", keys.checker == true)
   check("FEATURES: lists handoff notes", keys.handoffs == true)
   check("FEATURES: lists the worktree fence", keys.fence ~= nil)
-  check("FEATURES: lists talk mode", keys.talk == true)
+  check("FEATURES: no talk mode (removed 2026-11-19, REQUIREMENT CHANGE)", keys.talk == nil)
   check("FEATURES: lists how each turn ended", keys.turns == true)
   check("FEATURES: lists always-ask commands", keys.alwaysask == true)
   check("FEATURES: lists answering questions from Shepherd", keys.answers == true)

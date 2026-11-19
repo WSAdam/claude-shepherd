@@ -37,8 +37,6 @@ How a session's requests reach you, what can answer them without you, and what n
   on your behalf), the hook answers **allow** for that unit's own `git merge --ff-only <its branch>`
   into main, gate armed or not, so Claude Code's auto mode doesn't refuse it. It allows nothing else
   ([details](merging-and-batches.md#your-merge-click-carries-the-merge)).
-- **Talk mode only ever refuses.** A session you put in [talk mode](#talk-mode) has its edits and
-  its commands that change things denied, gate armed or not, and nothing automatic can approve them.
 - **A session stays in its own worktree.** With the [worktree fence](#worktree-fence) on, a session
   can't edit files in another worktree of its repo or run git that changes one, gate armed or not.
 - **Questions are yours.** A question a session asks with AskUserQuestion is answered only by you,
@@ -159,51 +157,6 @@ a bundle only ever adds to the list, and `disableGlobal` doesn't drop the fleet'
 The hook runs for every tool call, so the check is cheap for the calls that can't match: one that
 isn't Bash, or a Bash command with none of the held words, is passed on without starting `jq`.
 
-## Talk mode
-
-Talk mode puts one session in **discussion only**: it can read, search and talk, but not change
-anything. Turn it on or off from the tile's right-click menu (**Talk mode (discussion only)**,
-checked while on) or the detail panel's **Talk mode** button. A **TALK** badge marks the tile. It is
-a flag file, `~/.claude/cc-talk/<session key>`, so it works in a window shared with other sessions,
-and it goes away when the session ends. A remote (SSH bridge) tile can't use it.
-
-While it is on, whether or not the gate is armed:
-
-- **Edits are denied** (Edit, Write, MultiEdit, NotebookEdit) unless the file is under `~/.claude/`
-  (memory, plans, projects, notes) or in a session scratchpad (`/private/tmp/claude-*/`). A path
-  that climbs out with `..` is denied. So are the files under `~/.claude/` that set a session's
-  restrictions: Shepherd's whole `cc-*` namespace (`cc-config.json`, `cc-talk/`, `cc-policy/`,
-  `cc-gate.enabled`, the hook scripts and their state) and `settings.json` /
-  `settings.local.json`, in any case (`Settings.JSON`) or spelling (`~/.claude/./x`, `~/.claude//x`).
-- **Shell commands that aren't read-only are denied.** Every command in the line has to be a reader:
-  `ls`, `cat`, `head`, `tail`, `wc`, `grep`, `rg`, `find` (without `-exec` or `-delete`), `sed -n`
-  (without `-i` or a `w` / `e` command), `jq`, `sort` and `uniq` (not writing a file), `diff`, `stat`,
-  `echo`, `cd`, `ps` and friends; `git status`, `log`, `diff`, `show`, `blame`, `grep`, `rev-parse`,
-  `ls-files` and friends, and the listing forms of `git branch`, `tag`, `stash list`, `worktree list`,
-  `remote` and `config --get`; `gh pr view` / `list` / `diff` / `checks` and the like. The same
-  parser as the [always-ask commands](#always-ask-commands) reads the line, so `cd x && ls`,
-  `find … | xargs grep …`, `bash -c "…"` and `$(…)` are judged by what runs in them.
-- **Not read-only:** a redirection to a file (`> notes.txt`, `2> err.log`, `&> out`; `/dev/null` and
-  `2>&1` are fine), anything unknown (`make`, `npm test`, `./script.sh`, `$EDITOR`, `eval`, `sudo`),
-  `git -c …` and `--output=<file>`, a git option that names a program to run (`git ls-remote
-  --upload-pack=…`, its alias `--exec`, `-u`; `git grep -O…` / `--open-files-in-pager`, in any
-  abbreviation or short-option cluster git accepts), and a variable that makes a reader run
-  something (`GIT_EXTERNAL_DIFF=…`, `PAGER=…`).
-- The denial reads **"Talk mode: discussion only"**, and the audit ledger records it as
-  `outcome: "deny"`, `by: "talk"`. Turning talk mode on or off is a `talk_toggle` event.
-
-Talk mode only ever refuses. What it lets through goes on to the
-[always-ask](#always-ask-commands) check and the gate as usual, so a read-only command you listed
-as always-ask is still held for your click. A command that is both, like `git push`, is denied, not
-held. No gate policy, Autopilot, bundle or permission mode can approve what talk mode denies,
-because the hook answers first.
-
-It guards against changing things by accident; it isn't a sandbox. MCP tools and other tools
-outside the Edit family and Bash aren't checked, and a path under `~/.claude/` counts as
-`~/.claude/` even when it is a symlink to somewhere else.
-The hook reads talk mode in pure bash first: with no session in talk mode, or only another one, it
-starts no `jq`.
-
 ## Worktree fence
 
 Parallel units each work in their own worktree. The worktree fence keeps a session there: it can't
@@ -225,8 +178,11 @@ While it is on, whether or not the gate is armed:
   `--work-tree`, `GIT_DIR=` or `GIT_WORK_TREE=`, or run after `cd <sibling>` (or `pushd`) in the
   same command line, also inside `(…)`, `sh -c "…"` and `$(…)`. A redirection into a sibling
   (`> <sibling>/log.txt`) in such a command is denied too.
-- **Read-only git goes on**: `status`, `log`, `diff`, `show`, `rev-parse`, `merge-base`,
-  `worktree list` and the rest of [talk mode's read-only git](#talk-mode).
+- **Read-only git goes on**: `status`, `log`, `diff`, `show`, `blame`, `grep`, `rev-parse`,
+  `merge-base`, `ls-files` and friends, and the listing forms of `branch`, `tag`, `stash list`,
+  `worktree list`, `remote` and `config --get`. Not read-only: `git -c …`, `--output=<file>`, and a
+  git option that names a program to run (`ls-remote --upload-pack=…`, its alias `--exec`, `-u`;
+  `grep -O…` / `--open-files-in-pager`, in any abbreviation or short-option cluster git accepts).
 - **The one exception** is the session's own merge after you approve it: `git -C <main> merge
   --ff-only <its branch>` (or `cd <main> && git merge --ff-only <its branch>`) goes on while its
   [merge request](merging-and-batches.md#ready-to-merge) is approved, for that branch only and with
@@ -235,7 +191,7 @@ While it is on, whether or not the gate is armed:
 - The denial reads **"Worktree fence: `<path>` belongs to another worktree of this repo"**, and the
   audit ledger records it as `outcome: "deny"`, `by: "fence"`.
 
-Like talk mode, the fence only ever refuses, before the [always-ask](#always-ask-commands) check and
+The fence only ever refuses, before the [always-ask](#always-ask-commands) check and
 the gate. A command that is both, like `git -C <sibling> push`, is denied, not held, and no gate
 policy, Autopilot, bundle or permission mode can approve it.
 

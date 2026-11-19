@@ -25,7 +25,7 @@ entries):
 - **Steering without keystrokes:** the session mailbox, `cc-send.sh`, cross-repo tickets,
   AskUserQuestion answered on the card, the Stop guards, the hands-off hold and
   ❄ Freeze.
-- **Safety:** the opt-in approval gate and policy bundles, always-ask commands, talk mode, the
+- **Safety:** the opt-in approval gate and policy bundles, always-ask commands, the
   worktree fence, one worktree per agent.
 - **Merging:** ready-to-merge requests, Shepherd-run test gates, the red-first proof, gate blame,
   the merge checker, batches driven by a session with grant grading, the overlap radar, worktree
@@ -78,7 +78,7 @@ Single user, no server, no accounts. Records store env-var names, never secrets.
   | --- | --- |
   | SessionStart | `cc-status.sh` (also prints Shepherd's session context: handoff note, compaction notes, lease, mail, tickets, decisions, DECISIONS.md) |
   | UserPromptSubmit | `cc-status.sh` (stamps `turn_id`) |
-  | PreToolUse, any tool | `cc-status.sh`, `cc-approve.sh` (gate, always-ask, talk mode, fence, policies; 130s) |
+  | PreToolUse, any tool | `cc-status.sh`, `cc-approve.sh` (gate, always-ask, fence, policies; 130s) |
   | PreToolUse, AskUserQuestion | `cc-ask.sh` (holds the question for the card; 3630s) |
   | PreToolUse, EnterWorktree | `cc-worktree-guard.sh` (denies a worktree another live session is in) |
   | PostToolUse | `cc-status.sh` |
@@ -372,7 +372,7 @@ each unit a worktree that Shepherd merged on a green gate. The
 - Automation: readiness before typing, the automation door with dry run and the ⚡ Trace,
   auto-continue back-off, resume at the limit reset (`cc-resume.sh`), handoff notes, auto-compact with
   notes, task packets, the coach.
-- Safety: always-ask commands, talk mode, the worktree fence, `cc-worktree-guard.sh`.
+- Safety: always-ask commands, the worktree fence, `cc-worktree-guard.sh`.
 - Merging: merge hardening (markers, clean main, stash count), the merge checker, the red-first proof,
   the repo-declared gate, REQ ids and merge receipts, the batch relay (`cc-fleet.sh wait`), the overlap
   radar with `blockedBy`, the coverage index, worktree leases.

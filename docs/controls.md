@@ -52,9 +52,6 @@ In order (a remote SSH-bridge tile offers only Relabel and Set group):
   corpus, when a card reads wrong ([Development](development.md#capturing-a-scenario)).
 - **⚖ A/B fork-to-compare…**: run the same task as 2+ variants in isolated git worktrees of this
   project, then compare them and keep the winner ([Automation](automation.md#ab-compare)).
-- **Talk mode (discussion only)**: checked while on. The session can read and talk but not change
-  anything: edits and commands that change things are denied, and the tile wears a **TALK** badge
-  ([Approvals and policies](approvals-and-policies.md#talk-mode)). Click again to turn it off.
 - **Hold (no automatic sends)**: checked while on. Shepherd sends the session nothing automatic, and
   the tile wears a **HOLD** badge. Skipped sends are listed in its detail panel and never replayed,
   and its mail waits until you lift the hold ([Automation](automation.md#hands-off-hold)).
@@ -93,8 +90,6 @@ In order (a remote SSH-bridge tile offers only Relabel and Set group):
   **Auto-Continue** does this for you ([Automation](automation.md#auto-respawn-and-auto-continue)).
 - **Autopilot**: time-box a session to auto-approve all its gated prompts (needs the gate and
   `policies.autopilot.enabled`).
-- **Talk mode**: the same toggle as the context menu's; it reads **Talk mode: ON** while it's on
-  ([Approvals and policies](approvals-and-policies.md#talk-mode)).
 - **Hold**: the same toggle as the context menu's **Hold**; it reads **Hold: ON** while it's on. Above
   the buttons, the panel says the session is on hold (or the fleet is frozen) and lists what Shepherd
   skipped meanwhile. Once the hold is lifted the list stays until **Clear**

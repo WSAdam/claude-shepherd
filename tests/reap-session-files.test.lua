@@ -30,8 +30,6 @@ do local p = io.popen("mktemp -d 2>/dev/null"); T = p and p:read("*l"); if p the
 if not T or T == "" then check("mktemp a fixture dir", false); finish() end
 
 local STATUS, MERGE, ASK = T .. "/status", T .. "/cc-merge", T .. "/cc-ask"
--- 2026-09-28: talk mode's per-session flag (build program unit 6) is one of the family too
-local TALK = T .. "/cc-talk"
 -- 2026-09-29: the session mailbox (build program unit 11a) is a per-session DIRECTORY of messages
 local INBOX = T .. "/cc-inbox"
 -- 2026-09-29: resume at the limit reset (build program unit 13): the hook's arm, Shepherd's plan, a cancel
@@ -58,7 +56,7 @@ local HOLD = T .. "/cc-hold"
 local function pidOf(cmd) local p = io.popen(cmd); local s = p and p:read("*l"); if p then p:close() end; return tostring(s or "") end
 local LIVE_PID = pidOf("sleep 300 >/dev/null 2>&1 & echo $!")   -- a live stand-in for a claude process
 local DEAD_PID = pidOf("sh -c 'echo $$'")                        -- one that has exited
-os.execute(('mkdir -p "%s" "%s" "%s" "%s" "%s/repo" "%s/k90" "%s" "%s" "%s" "%s" "%s"'):format(STATUS, MERGE, ASK, TALK, T, INBOX, RESUME, NOTES, PINS, LEASE, GUARD))
+os.execute(('mkdir -p "%s" "%s" "%s" "%s/repo" "%s/k90" "%s" "%s" "%s" "%s" "%s"'):format(STATUS, MERGE, ASK, T, INBOX, RESUME, NOTES, PINS, LEASE, GUARD))
 os.execute(('mkdir -p "%s"'):format(HOLD))
 local function write(path, s) local f = io.open(path, "w"); if f then f:write(s); f:close() end end
 local function exists(p) local h = io.open(p, "r"); if h then h:close(); return true end; return false end
@@ -88,7 +86,6 @@ local function plant()
   write(ASK .. "/" .. KEY .. ".answer", '{"answers":{}}')
   write(ASK .. "/" .. KEY .. ".answer.claim.4242", '{"answers":{}}')
   write(ASK .. "/" .. KEY .. ".answer.tmp.5150", '{"answers"')
-  write(TALK .. "/" .. KEY, "1")
   os.execute(('mkdir -p "%s/%s"'):format(INBOX, KEY))
   write(INBOX .. "/" .. KEY .. "/1790000000-000001-ab12.msg", '{"nonce":"ab12","text":"[shepherd] hi"}')
   write(INBOX .. "/" .. KEY .. "/1790000000-000002-cd34.msg.claim.4242", '{"nonce":"cd34","text":"[shepherd] taken"}')
@@ -140,7 +137,6 @@ local TARGETS = {
   { "the answer to a held question",   ASK .. "/" .. KEY .. ".answer" },
   { "a claimed answer",                ASK .. "/" .. KEY .. ".answer.claim.4242" },
   { "a torn answer",                   ASK .. "/" .. KEY .. ".answer.tmp.5150" },
-  { "the talk-mode flag",              TALK .. "/" .. KEY },
   { "a waiting mailbox message",       INBOX .. "/" .. KEY .. "/1790000000-000001-ab12.msg" },
   { "a claimed mailbox message",       INBOX .. "/" .. KEY .. "/1790000000-000002-cd34.msg.claim.4242" },
   { "a torn mailbox message",          INBOX .. "/" .. KEY .. "/1790000000-000003-ef56.msg.tmp.5150" },
@@ -173,7 +169,7 @@ local KEPT = {
 local OTHER = {
   STATUS .. "/k90.json", MERGE .. "/k90.decision.parked.4242", ASK .. "/k90.answer.tmp.5150",
   MERGE .. "/k90.checker.json",
-  TALK .. "/k90", INBOX .. "/k90/1790000000-000001-ab12.msg",
+  INBOX .. "/k90/1790000000-000001-ab12.msg",
   RESUME .. "/k90.json", RESUME .. "/k90.plan.json",
   NOTES .. "/k90.due-at", NOTES .. "/k90.notes-asked",
   GUARD .. "/k90.question",
@@ -192,11 +188,11 @@ local REAP_SH = T .. "/reap.sh"
 write(REAP_SH, ([[
   export CC_STATUS_DIR=%q CC_MERGE_DIR=%q CC_ASK_DIR=%q
   export CC_GATE_TOOLS_DIR=%q CC_APPROVED_DIR=%q CC_AUTOPILOT_DIR=%q
-  export CC_POLICY_DIR=%q CC_POLICY_OVERRIDE_DIR=%q CC_AUTOMODEL_DIR=%q CC_TALK_DIR=%q CC_INBOX_DIR=%q
+  export CC_POLICY_DIR=%q CC_POLICY_OVERRIDE_DIR=%q CC_AUTOMODEL_DIR=%q CC_INBOX_DIR=%q
   export CC_RESUME_DIR=%q CC_NOTES_DIR=%q CC_PINS_DIR=%q CC_LEASE_DIR=%q CC_GUARD_DIR=%q CC_HOLD_DIR=%q
   . %q; cc_remove %s
 ]]):format(STATUS, MERGE, ASK, T .. "/gt", T .. "/ap", T .. "/au",
-           T .. "/po", T .. "/pov", T .. "/am", TALK, INBOX, RESUME, NOTES, PINS, LEASE, GUARD, HOLD, ROOT .. "cc-lib.sh", KEY))
+           T .. "/po", T .. "/pov", T .. "/am", INBOX, RESUME, NOTES, PINS, LEASE, GUARD, HOLD, ROOT .. "cc-lib.sh", KEY))
 os.execute(("bash %q >/dev/null 2>&1"):format(REAP_SH))
 for _, t in ipairs(TARGETS) do
   check("cc_remove drops " .. t[1], not exists(t[2]))
@@ -271,7 +267,7 @@ local ENV = { CC_STATUS_DIR = STATUS, CC_MERGE_DIR = MERGE, CC_ASK_DIR = ASK,
               CC_GATE_TOOLS_DIR = T .. "/gt", CC_APPROVED_DIR = T .. "/ap",
               CC_AUTOPILOT_DIR = T .. "/au", CC_POLICY_DIR = T .. "/po",
               CC_POLICY_OVERRIDE_DIR = T .. "/pov", CC_AUTOMODEL_DIR = T .. "/am",
-              CC_TALK_DIR = TALK, CC_INBOX_DIR = INBOX, CC_RESUME_DIR = RESUME, CC_NOTES_DIR = NOTES,
+              CC_INBOX_DIR = INBOX, CC_RESUME_DIR = RESUME, CC_NOTES_DIR = NOTES,
               CC_PINS_DIR = PINS, CC_LEASE_DIR = LEASE, CC_GUARD_DIR = GUARD,
               CC_HOLD_DIR = HOLD,
               CC_WORKLIST_FILE = T .. "/worklist.json", CC_LABELS_FILE = T .. "/labels.json",
