@@ -30,7 +30,7 @@ entries):
   the merge checker, batches driven by a session with grant grading, the overlap radar, worktree
   leases, the main-moved notice.
 - **Learning and looking back:** the coach (CLAUDE.md and memory edits, across repos too), the
-  audit ledger, History (every transcript, kept copies, Resume), Seance, the Time view, usage and
+  audit ledger, History (every transcript, kept copies, Resume), the Time view, usage and
   cost, commit stats, My List (TODO.md import, playbooks, Run selected).
 
 It is not offline. What reaches the network:
@@ -40,7 +40,7 @@ It is not offline. What reaches the network:
 - `gh` for PR status;
 - ntfy pushes (escalation, the fleet idle alert, main red, a compatibility failure, a usage-limit
   resume), when a topic is set;
-- headless `claude -p` runs: Seance, the coach, the merge checker (`FX.runHeadless`, hooks off,
+- headless `claude -p` runs: the coach, the merge checker (`FX.runHeadless`, hooks off,
   `CC_SHEPHERD_INTERNAL=1`, a dollar cap each);
 - the SSH status bridge and the leaderboard "Improve" claim, when configured.
 
@@ -57,7 +57,7 @@ Single user, no server, no accounts. Records store env-var names, never secrets.
   [tests/support/fx_recorder.lua](tests/support/fx_recorder.lua). The main chunk sits at Lua's
   200-local cap: new state and functions hang on `FX` or go inside a `do … end` (CLAUDE.md).
 - **The glue is tested.** About 50 Lua suites load the real dashboard, or an `FX` block cut from it,
-  under a stubbed `hs`: `smoke`, `readiness`, `shared-window`, `fleet`, `merge-request`, `seance`,
+  under a stubbed `hs`: `smoke`, `readiness`, `shared-window`, `fleet`, `merge-request`,
   `fleet-idle`, `maingreen`, `worklist-runner`, `past-sessions-wiring`, `keeper-copy` and more.
   `tests/ui.test.lua` pins wiring at the source level.
 - **Panel HTML/CSS/JS** lives in one Lua long string, `local HTML = [[ … ]]` (about lines
@@ -113,7 +113,7 @@ Single user, no server, no accounts. Records store env-var names, never secrets.
   `STATE` is the full list (what `--purge` removes);
   [docs/configuration.md](docs/configuration.md#files-shepherd-keeps) says what each holds. Newer ones: `cc-guard/`, `cc-lesson/`, `cc-run/`,
   `cc-main-green.json`, `cc-coach/`, `cc-merge/<key>.notyet` and `cc-merge/main-moved.seen`,
-  `cc-scratch/` (Seance, red-first and gate-blame worktrees), and `cc-keep/` (kept transcripts,
+  `cc-scratch/` (red-first and gate-blame worktrees), and `cc-keep/` (kept transcripts,
   which `--purge` leaves in place).
 
 ## Invariants worth knowing
@@ -239,7 +239,7 @@ disk, `FX.alert`, interrupted turns, FSEvents). These are the others.
 
 - **Required:** `jq`, `lua` and `node` (`bootstrap.sh` installs them, `install.sh` checks),
   Hammerspoon (its `hs` CLI for reloads and probes), `git`.
-- **Needed by a feature:** the `claude` CLI for Seance, the coach and the merge checker; `gh` for PR
+- **Needed by a feature:** the `claude` CLI for the coach and the merge checker; `gh` for PR
   status; VS Code's `code` CLI to install the tab bridge (without it, Close on shared-window tabs
   stays refused); `ffmpeg` + `whisper-cli` for Stream Deck voice.
 - **Optional accelerators:** `rg`/`fd` for fleet search and the spawn modal's folder scan, resolved by
@@ -386,7 +386,7 @@ green. See [the CHANGELOG section](CHANGELOG.md#2026-10-04--mining-round-2):
 - Stop guards: question, fakeDone, unfinished (`cc_stop_guard`; on in `defaults/`).
 - The coach: a lessons ledger, evidence runs and `cc-lesson.sh`, edit outcomes and Sharpen, a review
   of the repo's auto-memory, lessons across repos into the global CLAUDE.md.
-- Steering: Seance, the fleet idle alert, playbooks and Run selected
+- Steering: the fleet idle alert, playbooks and Run selected
   in My List (`cc-run.sh`), queue hold and the 📑 Queues view.
 - Merging: brief pre-flight, gate blame, the main-moved notice, the main-green check (a routine with
   `"action": "gate"`), grant grading (a risky merge on a batch grant waits for Adam's click).

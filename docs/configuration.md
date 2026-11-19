@@ -58,7 +58,7 @@ File-only switches include, among others: `rules.enabled`, `schedules.enabled` a
 `subagents.*`, `status.resumeSlack`, `autoContinue.backoff.*`, `fleet.enabled`, `commits.*`,
 `usage.limitAlerts.*`, `ask.waitSeconds`, `ask.awayIdleSeconds`, `tabless.autoEndMinutes`, `escalation.hung`, `search.*`,
 `worklist.*`, `decisions.*`, `notifications.days`, `templates.sourceDir`,
-`context.autoCompactFraction`, `stopGuards.*`, `seance.*`, `alerts.onScreen` and
+`context.autoCompactFraction`, `stopGuards.*`, `alerts.onScreen` and
 `alerts.voiceEvents`, and the `keystrokes`, `tabBridge` and `stacks` sections.
 Policy bundles and attachments are edited in the 🛡 editor.
 
@@ -86,7 +86,6 @@ The panel re-reads the file within about a second (except `hotkeys`, which need 
 | `stacks`, `keystrokes`, `search`, `hotkeys`, `voice` | Project cards, the shared-window guard, search, shortcuts, Stream Deck voice | [Fleet](fleet.md), [Controls](controls.md) |
 | `lease` | Each worktree's own port (`portFrom`–`portTo`) and database folder (`dbDir`) | [Fleet](fleet.md#worktree-leases) |
 | `appearance`, `alerts`, `worklist` | Look, on-screen alerts, the fleet idle alert and spoken alerts, My List archive | [Make it yours](customizing.md), [Automation](automation.md#fleet-idle-alert), [Fleet](fleet.md#my-list) |
-| `seance` | Asking a session a question: its budget cap and timeout | [Controls](controls.md#ask-a-session-seance) |
 
 ### Newer blocks and their defaults
 
@@ -119,7 +118,6 @@ install's [defaults](../defaults/cc-config.json) differ.
 | `worklist.reviewCount` | `30` (`0` turns the count rule off) | | [My List review heads-up](fleet.md#my-list) |
 | `worklist.reviewHours` | `24` (`0` turns the age rule off) | | [My List review heads-up](fleet.md#my-list) |
 | `alerts.voice` / `voiceEvents` | `false` / `[]` (voice speaks the fleet idle alert; listing `"needsYou"` also speaks a card that starts needing you) | | [Fleet idle alert](automation.md#fleet-idle-alert) |
-| `seance.maxBudgetUsd` / `timeoutSeconds` | `20` (the cap; each run's budget is sized from its context, at most `50`) / `300` | | [Ask a session](controls.md#ask-a-session-seance) |
 | `merge.repoGate` | `false` | | [A repo can declare its own gate](merging-and-batches.md#a-repo-can-declare-its-own-gate) |
 | `merge.grantWaitsFor` | every category | every category | [Grant grading](merging-and-batches.md#grant-grading-a-risky-merge-waits-for-your-click) |
 | `merge.gates[].redFirstCommand` | none | | [The red-first proof](merging-and-batches.md#the-red-first-proof-do-the-new-tests-fail-without-the-fix) |
@@ -167,7 +165,7 @@ Everything lives under `~/.claude/`:
 | `cc-status/` | One status file per session, written by the hooks; `.panel-alive` is the panel heartbeat |
 | `cc-status-mirror/` | Remote sessions' status files, pulled by the [SSH status bridge](providers-and-integrations.md#ssh-status-bridge) |
 | `cc-merge/`, `cc-fleet/` | Merge requests and batches, with their answers, the checker's verdicts, a batch's events and the commit each **Not yet** answered (`<key>.notyet`), and the merges already announced to their [sibling worktrees](merging-and-batches.md#main-moved-sibling-worktrees-hear-about-a-merge) (`main-moved.seen`) |
-| `cc-scratch/` | The [red-first proof](merging-and-batches.md#the-red-first-proof-do-the-new-tests-fail-without-the-fix)'s and [gate blame](merging-and-batches.md#gate-blame-which-failures-were-already-on-main)'s scratch worktrees, removed after each run; the background scans' temporary output; and `seance/`, the folder [Seance](controls.md#ask-a-session-seance) runs in when a dead session's own folder is gone (kept) |
+| `cc-scratch/` | The [red-first proof](merging-and-batches.md#the-red-first-proof-do-the-new-tests-fail-without-the-fix)'s and [gate blame](merging-and-batches.md#gate-blame-which-failures-were-already-on-main)'s scratch worktrees, removed after each run; the background scans' temporary output; and `seance/`, a leftover of Seance (removed 2026-11-19) on an old install |
 | `cc-reqs.json` | [Requirement ids](merging-and-batches.md#requirement-ids-and-the-merge-receipt): each repo's `REQ-NNN` list (Shepherd is its only writer) |
 | `cc-compare.json` | The [Compare tab](fleet.md#compare-tab): the GitHub users you compare with, and what its daily checks found (created when you first open the tab) |
 | `cc-ask/` | Answers to held questions (the question itself is in the session's status file) |

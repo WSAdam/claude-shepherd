@@ -4,8 +4,7 @@
 
 Token use, plan limits, cost estimates, commit counts, and the audit ledger with the views built on
 it. All of it is read locally, apart from the plan-window bars (one metadata call), and none of it
-**spends model tokens** except History's **🔮 Ask** (a [Seance](controls.md#ask-a-session-seance)
-question, with its own budget) and **↻ Resume**, which reopens a session.
+**spends model tokens** except History's **↻ Resume**, which reopens a session.
 
 ## Token usage
 
@@ -252,8 +251,7 @@ because a prompt is an instruction and the ledger has no CI ground truth.
 The ledger's **🗂 History** tab lists every session the ledger has seen, with its turns, tool calls,
 events and last activity, and every [past session](#past-sessions) Claude Code still has a transcript
 for. Filter by name, folder, first prompt or title, sort **Recent / Oldest / Most active**, and
-narrow to **this workspace** or **pinned only**; ★-pin the projects you care about. **🔮 Ask** on a
-row asks that session a question, however long ago it ended ([Ask a session](controls.md#ask-a-session-seance)).
+narrow to **this workspace** or **pinned only**; ★-pin the projects you care about.
 Multi-select rows and **Delete selected** purges those sessions' recorded history through the same
 confirmed purge the Purge button uses. It never deletes Claude Code's own transcripts.
 
@@ -265,7 +263,7 @@ the ledger was off or never saw it:
 
 - **What a row shows:** its AI title (or its first prompt), the first prompt, the transcript's size
   and when it last changed. A unit's brief from another session counts as its first prompt. Title-only
-  stubs and Shepherd's own headless runs (`claude -p`: the coach, the checker, Seance) aren't listed.
+  stubs and Shepherd's own headless runs (`claude -p`: the coach, the checker) aren't listed.
 - **How it reads them:** in the background, at most 60 transcripts a pass, newest first, and never on
   the panel's tick. It reads each transcript's first 32 KB and last 16 KB; after that only the tail of
   a transcript that changed.
@@ -277,8 +275,7 @@ the ledger was off or never saw it:
   Terminal per `spawn.editor`. It runs only once Shepherd has verified the session is dead:
   - no card has it;
   - no `~/.claude/sessions` entry names it under a process that is still running;
-  - no process's command line holds its id (`claude -r`, `--resume`, VS Code's `--resume=<id>`, a
-    Seance fork).
+  - no process's command line holds its id (`claude -r`, `--resume`, VS Code's `--resume=<id>`).
 
   It checks again right before the tab opens. A session that ran in a folder that's gone (a removed worktree) can't
   be resumed, and neither can one in a worktree another live session works in. A terminal or kitty
@@ -303,8 +300,7 @@ its transcripts in `~/.claude/cc-keep/<project>/<session>.jsonl` (a private fold
 - **How:** an APFS clone (`cp -c`, a plain copy elsewhere), one at a time in the background, every
   5 minutes and right after you star a project. It never runs on the panel's tick.
 - **Reading them:** once Claude Code has deleted the original, the History row says **📦 kept copy
-  only** (**📦 kept** while both exist), fleet search finds the copy (**📦 kept** on the hit), and
-  [🔮 Ask](controls.md#ask-a-session-seance) asks it.
+  only** (**📦 kept** while both exist), and fleet search finds the copy (**📦 kept** on the hit).
 - **Removing them:** nothing deletes a copy on its own. Unstarring a project stops new copies and
   shows **Remove kept copies** at the top of the History tab; Shepherd asks before it deletes them.
   `uninstall.sh --purge` leaves the folder too.

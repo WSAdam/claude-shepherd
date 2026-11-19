@@ -3,7 +3,7 @@
 -- the only record of what a session did. Shepherd now keeps a copy of every transcript of the
 -- projects Adam starred in 🗂 History: once the session has ended, with an APFS clone (`cp -c`) into
 -- ~/.claude/cc-keep/<project>/<session>.jsonl (mode 700), and again whenever the original grows.
--- Readers (History, fleet search, Seance) fall back to the copy when the original is gone, and
+-- Readers (History, fleet search) fall back to the copy when the original is gone, and
 -- Diagnostics shows cleanupPeriodDays with an offer to raise it that writes only that key.
 -- Pure decisions through core; the copy script and the settings.json writer run for real (sh, cp,
 -- jq) against temp files -- never the real ~/.claude.

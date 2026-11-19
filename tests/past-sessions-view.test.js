@@ -2,7 +2,7 @@
 // round 2 unit F2). Runs the REAL shipped functions sliced out of claude-dashboard.lua.
 //
 // A History row now carries what its transcript says (r.past: first prompt, AI title, size), and a
-// session the ledger never saw is a row of its own. Each row offers 🔮 Ask (Seance) and ↻ Resume:
+// session the ledger never saw is a row of its own. Each row offers ↻ Resume (🔮 Ask went with Seance, 2026-11-19):
 // Resume only where Lua said it can (r.canResume -- an ended session with a transcript or a kept
 // copy), never on a live one (● live) or one whose transcript is gone (transcript gone, and no Ask
 // either: there's nothing to ask). Resume sends past-resume with the row's session id and project
@@ -63,7 +63,8 @@ eq("...offers Resume", count(html, 'class="h-resume"'), 1);
 check("...whose handler reads the row's data- attributes (never the id inside it)",
       html.indexOf('onclick="historyResume(event, this)"') >= 0 && html.indexOf("historyResume(event, this, '") < 0
       && html.indexOf('data-sid="' + SID + '"') >= 0 && html.indexOf('data-pk="' + PK + '"') >= 0);
-eq("...and Ask (Seance)", count(html, 'class="h-ask"'), 1);
+// 2026-11-19: REQUIREMENT CHANGE -- Seance was removed, and the row's 🔮 Ask with it
+eq("...and no Ask (Seance is gone)", count(html, "h-ask"), 0);
 
 html = lib.historyRow({ session_id: SID, projectKey: PK, name: "repo-ea", lastTs: 5, prompts: 3, toolRequests: 4, events: 9,
   canResume: true, past: { prompt: "fix it", title: "Fixing", sizeHuman: "2.0 KB" } });
@@ -78,11 +79,9 @@ eq("a live session has no Resume", count(html, "h-resume"), 0);
 check("...it says live", html.indexOf('class="h-live"') >= 0);
 html = lib.historyRow({ session_id: SID, projectKey: PK, name: "old", lastTs: 5, noTranscript: true });
 eq("a session whose transcript is gone has no Resume", count(html, "h-resume"), 0);
-eq("...and no Ask (nothing left to ask)", count(html, "h-ask"), 0);
 check("...it says so", html.indexOf('class="h-gone"') >= 0 && html.indexOf("transcript gone") >= 0);
 html = lib.historyRow({ session_id: SID, projectKey: PK, name: "plain", lastTs: 5 });
 eq("a ledger row before the scan lands: no Resume yet", count(html, "h-resume"), 0);
-check("...but Ask as before", count(html, "h-ask") === 1);
 html = lib.historyRow({ session_id: SID, projectKey: PK, lastTs: 5, canResume: true, kept: true, keptOnly: true, past: { prompt: "kept" } });
 check("a kept-only row resumes (its copy goes back first) and says so",
       count(html, "h-resume") === 1 && html.indexOf("kept copy only") >= 0 && /h-resume[^>]*title="[^"]*kept copy/.test(html));

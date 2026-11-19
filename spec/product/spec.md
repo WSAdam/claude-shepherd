@@ -29,7 +29,7 @@ losing your place.**
 The design constant: Shepherd **supervises; it never does a unit's work**. Claude Code is still
 the harness and the sessions still write the code; Shepherd is the supervisor's console. Its own
 hands are few and bounded: it starts read-only headless `claude -p` runs (the merge checker, the
-coach, Seance), runs a project's test gate itself, opens a fresh session for a batch unit or a
+coach), runs a project's test gate itself, opens a fresh session for a batch unit or a
 My List item (a My List item's brief is typed in and never sent: you press Return), and writes
 instruction files (a repo's `CLAUDE.md`, a marked block in `~/.claude/CLAUDE.md`, a repo's
 auto-memory) only on your click.
@@ -49,7 +49,7 @@ auto-memory) only on your click.
   ready, merges on a batch grant or ticks an item off, never a session's word (D-5).
 - Local-first observability (status, plan/TODO, usage, subagents) **derived from data Claude
   already writes** and Shepherd's own hook events, spending no model tokens. The few features that
-  do spend tokens (merge checker, coach, Seance) are named and capped (§6).
+  do spend tokens (merge checker, coach) are named and capped (§6).
 
 **Non-goals**
 - **Orchestrating non-Claude agent CLIs** (aider, gemini-cli). They have no hook system, so
@@ -371,8 +371,7 @@ files — **no model tokens**:
 **What does spend model tokens** is named and capped, each a headless read-only `claude -p` run
 with its own `--max-budget-usd`: the **merge checker** (`verify.maxBudgetUsd`, $1 a run), the
 **coach** (`coach.maxBudgetUsd`, $1 a run; its evidence runs also stop at `coach.evidence.dailyUsd`,
-$3 a day across repos; its across-repos run at most once a day) and **Seance** (a budget sized from
-the session's context, at most `seance.maxBudgetUsd`, 20 by default).
+$3 a day across repos; its across-repos run at most once a day).
 
 ## 7. Automation & governance posture
 
@@ -493,12 +492,8 @@ of the repo's Claude Code auto-memory (delete, rewrite or keep a note, or promot
 
 **[DECISION D-25]**
 
-**Seance** (2026-10-02). Any session, live or long finished, can be asked a question from its
-detail panel, a Find-in-fleet hit or a 🗂 History row. A read-only headless fork of its own
-conversation answers (`claude -p --resume <transcript> --fork-session --no-session-persistence`,
-the checker's read-only tools, hooks off, no MCP), in the session's model with a budget sized from
-its context (§6). Nothing is saved, the session never sees the question, and its transcript is
-only read. It runs in its own lane, never behind a repo's checker or coach. **[DECISION D-26]**
+**Seance** (2026-10-02) asked any session a question through a read-only headless fork of its
+conversation. Removed 2026-11-19: Adam pruned the features he had no use for. **[DECISION D-26, retired]**
 
 **Crossings** (2026-10-14, Adam's call: "projects should not be able to utilize having shepherd to
 talk to each other, that needs to be an approved translation between the two rather than something
@@ -530,10 +525,10 @@ days/size; rows can be redacted/exported/purged. The ledger never records Claude
 
 **Past sessions and kept transcripts** (2026-10-03/04). 🗂 History also lists every transcript
 Claude Code still has in `~/.claude/projects` and every kept copy (AI title or first prompt, size,
-date), read by a background scan, never the tick; each row offers 🔮 Ask (Seance) and ↻ Resume
+date), read by a background scan, never the tick; each row offers ↻ Resume
 (D-14). The **transcript keeper** copies every transcript of a project ★-pinned in History into
 `~/.claude/cc-keep/<project>/<session>.jsonl` once its session ends (an APFS clone on its own
-5-minute timer), and again when it grows. History, fleet search and Seance read the copy once
+5-minute timer), and again when it grows. History and fleet search read the copy once
 Claude Code has deleted the original. Nothing deletes a copy on its own: unstarring offers
 **Remove kept copies**, confirmed first, and `uninstall.sh --purge` leaves the folder. Diagnostics
 shows Claude Code's `cleanupPeriodDays` (30 when unset) and offers **Keep transcripts 365 days**,
@@ -590,7 +585,7 @@ cc-main-green.json              the main-green check's verdicts, per repo
 cc-coach/                       per repo: <repo>.json (the run), .log.json, .lessons.json,
                                 .applied.json, .memory-backup/; across repos: global.json,
                                 global.claude-backup/; evidence-spend.json (today's evidence runs)
-cc-scratch/                     scratch worktrees and runs (Seance's in cc-scratch/seance)
+cc-scratch/                     scratch worktrees and runs
 cc-keep/<project>/<session>.jsonl  kept transcripts of ★ projects, plus pins.json; --purge leaves it
 ```
 
@@ -607,9 +602,9 @@ cc-keep/<project>/<session>.jsonl  kept transcripts of ★ projects, plus pins.j
 - **Detail panel** with a tab strip — Activity, Transcript, Rewind, Decisions, Usage, Changes
   (git status + diff), **User Stories** (gated on `spec/product/user-stories.md`), On purpose and
   Requirements (gated on a git repo), Agents, Queue — expensive tabs load on open; the ⋯ menu hides
-  tabs and remembers your last-open tab per project. It also carries the **Seance** box (🔮 Ask).
+  tabs and remembers your last-open tab per project.
 - **🗂 History:** the ledger's sessions plus every past transcript and kept copy (📦 kept /
-  📦 kept copy only), ★ to keep a project's transcripts, 🔮 Ask and ↻ Resume on each row.
+  📦 kept copy only), ★ to keep a project's transcripts, ↻ Resume on each row.
 - **Coach overlay** (from a card's 🧭 chip or a session's 🧭 Coach): the waiting suggestions (Apply,
   Skip with *Why skip?*, Bring back), memory rows (Delete it / Rewrite it, Undo), **Applied edits**
   (each one's verdict, **Sharpen**, Undo) and **Across repos**.
@@ -658,7 +653,7 @@ idle/auto-spawn routing targets.
    The $ figure is a labeled estimate; the plan-window % reflects the Anthropic account only.
 5. **Remote Control widens the trust boundary** (on by default) — anyone on your claude.ai can
    type into a local shell; documented and toggle-able.
-6. **Some features spend model tokens** — the merge checker, the coach and Seance run headless
+6. **Some features spend model tokens** — the merge checker and the coach run headless
    `claude -p`. Each run carries its own `--max-budget-usd` (§6), the coach's scheduled and evidence
    runs stay off until `coach.enabled`, and the evidence runs share a daily cap across repos.
 7. **Stop guards read prose** — a guard can misread a turn's last message. Each blocks at most once

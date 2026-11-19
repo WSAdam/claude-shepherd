@@ -3,8 +3,8 @@
 -- Claude Code still has a transcript for (~/.claude/projects/<project>/<session>.jsonl), and every one
 -- the transcript keeper kept a copy of after Claude Code deleted the original (~/.claude/cc-keep). A
 -- background scan reads each transcript's head (its first prompt, where it ran, which surface ran it)
--- and tail (its newest AI title), a capped batch at a time, never on the tick. A row offers Seance
--- and Resume. Resume reopens only a session verified dead: no card, no ~/.claude/sessions entry
+-- and tail (its newest AI title), a capped batch at a time, never on the tick. A row offers
+-- Resume. Resume reopens only a session verified dead: no card, no ~/.claude/sessions entry
 -- naming it under a live process, no process using its id (a VS Code resume runs
 -- `claude --resume=<id>`). VS Code reopens it with the extension's ?session= link (core.restartTabUri
 -- via FX.openClaudeTab, the restart path's rule); a terminal or kitty session with `claude -r <id>`.
@@ -217,7 +217,7 @@ do
   eq("a row per session that has a user line", #rows, 4)
   check("...one that opened with an image is a row with no prompt", by.s6 and by.s6.prompt == nil)
   check("...not a title-only stub", by.s2 == nil)
-  check("...not a headless run (Shepherd's coach, checker or Seance)", by.s5 == nil)
+  check("...not a headless run (Shepherd's coach or checker)", by.s5 == nil)
   check("a row carries its prompt, title, folder and size", by.s1 and by.s1.prompt == "fix it" and by.s1.title == "Fixing it"
         and by.s1.cwd == "/r/A" and by.s1.size == 2048 and by.s1.mtime == 100 and by.s1.projectKey == "-r-A")
   check("...and a readable size", by.s1 and by.s1.sizeHuman == core.fmtBytes(2048))

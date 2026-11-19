@@ -3,7 +3,7 @@
 -- panel sends them (keep-pins) and Shepherd keeps them in ~/.claude/cc-keep/pins.json. On its own
 -- timer (never the tick) FX.stepKeeper looks at the starred projects' transcripts and copies each
 -- ended one that has no copy, or whose original grew, with ONE async hs.task at a time (`cp -c`,
--- an APFS clone) into ~/.claude/cc-keep/<project>/<session>.jsonl. Seance, fleet search and History
+-- an APFS clone) into ~/.claude/cc-keep/<project>/<session>.jsonl. Fleet search and History
 -- read the kept copy once Claude Code has deleted the original; nothing deletes a copy but Adam's
 -- confirmed Remove; Diagnostics' offer writes cleanupPeriodDays and nothing else.
 -- This drives the real functions on real files in a temp HOME: tasks are recorders that the test
@@ -280,18 +280,7 @@ clock = NOW
 os.remove(orig("-r-A", 1))
 check("FX.keepReadPath: the kept copy once the original is gone", fx.keepReadPath(orig("-r-A", 1)) == kept("-r-A", 1))
 check("...the original while it exists", fx.keepReadPath(orig("-r-A", 3)) == orig("-r-A", 3))
--- Seance from a History row (its session id and project key)
-post({ a = "seance-ask", text = json.encode({ sessionId = S[1], projectKey = "-r-A", question = "What did you change?" }) })
-local asked
-for _, t in ipairs(TASKS) do
-  local all = table.concat(t.args, " ")
-  if all:find("--fork-session", 1, true) and all:find(S[1], 1, true) then asked = all end
-end
-check("Seance asks a deleted session from its kept copy", asked ~= nil and asked:find(q(kept("-r-A", 1)), 1, true) ~= nil)
--- ...and from a fleet-search hit in the kept copy
-local nTasks = #TASKS
-post({ a = "seance-ask", text = json.encode({ sessionId = S[1], file = kept("-r-A", 1), question = "Again?" }) })
-check("...and from a fleet-search hit in it (a file in cc-keep is allowed)", #TASKS > nTasks)
+-- (2026-11-19: Seance asking a deleted session from its kept copy went with Seance -- REQUIREMENT CHANGE)
 
 -- fleet search: the kept copy's hit when its original is gone, the original's otherwise (never twice)
 post({ a = "fleet-search", text = json.encode({ q = "needle-kept-one" }) })

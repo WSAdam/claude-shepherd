@@ -5081,32 +5081,39 @@ do
         src:find('FX.GUARD_DIR = os.getenv("CC_GUARD_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-guard")', 1, true) ~= nil)
 end
 
--- ---- Seance: ask any session a question, read-only (2026-10-02, mining round 2 unit D1) ----
--- tests/seance.test.lua drives FX.seanceAsk and the headless fork under stubs, seance-view.test.js
--- the shipped box; here, that the panel offers the box in all three places and Lua takes it.
+-- ---- Seance is gone (2026-11-19) ----
+-- Adam, 2026-11-19: "prune features I have no use for". REQUIREMENT CHANGE: the 2026-10-02 pins here
+-- asserted the "Ask this session…" box (detail panel, fleet-search hit, History row) and its headless
+-- fork. Gone with it: FX.seanceAsk and its records, the seance-ask / seance-state messages, the box's
+-- renderer, core's Seance block and the headless run's resume / transcript / model / turns options
+-- only Seance passed. Kept: the headless runner the checker and the coach use (core.headlessCmd,
+-- FX.runHeadless), History, fleet search and their kept-copy reads.
 do
-  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
-  local src = f and f:read("*a") or ""
-  if f then f:close() end
-  check("seance: the detail panel has the Ask box, built once per session",
-        src:find('<div id="d-seance"></div>', 1, true) ~= nil and src:find("renderSeanceDetail(it);", 1, true) ~= nil
-        and src:find('if(wrap.getAttribute("data-for") === sid) return;', 1, true) ~= nil)
-  check("seance: a fleet-search hit on a transcript offers Ask",
-        src:find('<button class="fs-ask" onclick="seanceToggle(event, this)"', 1, true) ~= nil)
-  check("seance: so does a History row", src:find('<button class="h-ask" onclick="seanceToggle(event, this)"', 1, true) ~= nil)
-  check("seance: the question goes to FX.seanceAsk, its answer comes back through window.ccSeance",
-        src:find('if a == "seance-ask" then FX.seanceAsk(tostring(payload.text or "")); return end', 1, true) ~= nil
-        and src:find('wv:evaluateJavaScript("window.ccSeance(" .. hs.json.encode(v) .. ")")', 1, true) ~= nil
-        and src:find("window.ccSeance = function(r){", 1, true) ~= nil)
-  check("seance: a box opened later asks for the session's last answer",
-        src:find('if a == "seance-state" then FX.seanceSend(tostring(payload.v or "")); return end', 1, true) ~= nil)
-  check("seance: its own lane, never a repo's (the checker and the coach share those)",
-        src:find('lane = "seance|" .. sid', 1, true) ~= nil)
-  local body = src:match("function FX%.seanceAsk%(text%)(.-)\nend\n") or ""
-  check("seance: FX.seanceAsk types nothing into any tab", body ~= "" and not body:find("keyStroke", 1, true)
-        and not body:find("dispatchSerialized", 1, true) and not body:find("pasteboard", 1, true))
-  check("seance: ...and writes no transcript", body ~= "" and not body:find('io.open(tp, "w', 1, true)
-        and not body:find("writeFile", 1, true))
+  local function slurp(name)
+    local f = io.open(ROOT .. name, "r")
+    local s = f and f:read("*a") or ""
+    if f then f:close() end
+    return s
+  end
+  local src = slurp("claude-dashboard.lua")
+  local okCore, core2 = pcall(dofile, ROOT .. "cc-core.lua")
+  check("no seance: no Ask box in the detail panel", not src:find('id="d-seance"', 1, true) and not src:find("renderSeanceDetail", 1, true))
+  check("no seance: no Ask on a fleet-search hit or a History row", not src:find("seanceToggle", 1, true)
+        and not src:find('class="fs-ask"', 1, true) and not src:find('class="h-ask"', 1, true))
+  check("no seance: the bridge takes no question", not src:find('a == "seance-ask"', 1, true) and not src:find('a == "seance-state"', 1, true))
+  check("no seance: no headless fork, no records", not src:find("FX.seanceAsk", 1, true) and not src:find("FX._seance", 1, true)
+        and not src:find("window.ccSeance", 1, true))
+  check("no seance: core keeps none of it", okCore and core2.SEANCE == nil and core2.seancePlan == nil and core2.seanceView == nil
+        and core2.parseSeanceOutput == nil and core2.seanceTranscriptOk == nil)
+  local keys = {}
+  for _, f in ipairs(okCore and core2.FEATURES or {}) do keys[f.key] = true end
+  check("no seance: no Seance in the feature list", okCore and not keys.seance)
+  -- what stays
+  local cmd = okCore and core2.headlessCmd("c", { dir = "/d", promptFile = "/p", outFile = "/o", errFile = "/e" }) or ""
+  check("kept: the checker's and the coach's headless run, in sonnet, never resuming a session",
+        cmd:find(" -p --model sonnet --output-format json --no-session-persistence --settings ", 1, true) ~= nil
+        and not cmd:find("--resume", 1, true) and not cmd:find("--fork-session", 1, true))
+  check("kept: FX.runHeadless", src:find("\nfunction FX.runHeadless(spec)", 1, true) ~= nil)
 end
 
 -- ---- Lessons filed with cc-lesson.sh reach the coach every tick (2026-10-03) ----
@@ -5379,8 +5386,7 @@ do
   check("keeper: the panel sends its ★ set once when it loads, outside any function, when anything is starred",
         src:find("\n    try { if(Object.keys(historyPins()).length) syncKeepPins(); } catch(e){}\n", 1, true) ~= nil)
   check("keeper: and on every ★ change", (src:match("function setHistoryPin%(pk, on%).-\n    }\n") or ""):find("syncKeepPins();", 1, true) ~= nil)
-  check("keeper: Seance reads the kept copy once the original is gone",
-        src:find("if type(tp) == \"string\" then tp = FX.keepReadPath(tp) or tp end", 1, true) ~= nil)
+  -- 2026-11-19: "Seance reads the kept copy" went with Seance (REQUIREMENT CHANGE)
   check("keeper: fleet search reads the keep folder and drops a copy whose original exists",
         src:find("paths[#paths + 1] = FX.KEEP_DIR", 1, true) ~= nil
         and src:find("core.keeperSearchHits(res.hits, FX.PROJECTS_DIR, FX.KEEP_DIR, FX.keepIsFile)", 1, true) ~= nil)

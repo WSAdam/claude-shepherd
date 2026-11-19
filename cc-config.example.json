@@ -173,12 +173,6 @@
     "evidence": { "minItems": 10, "cooldownHours": 24, "dailyUsd": 3 }
   },
 
-  "seance": {
-    "_comment": "Seance: ask any session a read-only question through a headless fork of its conversation. Each run's budget is sized from the session's context and capped here (at most 50); timeoutSeconds stops a run that hangs.",
-    "maxBudgetUsd": 20,
-    "timeoutSeconds": 300
-  },
-
   "merge": {
     "_comment": "Ready to merge (ON by default). A worktree tab that finishes a unit runs ~/.claude/cc-merge.sh request in the background; its card says 'ready to merge <branch> -> main' and the detail panel shows the review (commits, files, full diff, the session's summary and test claim). Shepherd checks the worktree with its own git first. Merge tells the waiting session to rebase, test, fast-forward main and clean up -- one merge per repo at a time, in the order you click; Not yet sends your note back. No keystrokes. false = requests are ignored.",
     "enabled": true,
