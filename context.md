@@ -22,8 +22,8 @@ entries):
 - **Feeding work:** task queues with auto-feed and routing, routines (cron spawns, digests, the
   main-green check), event rules, auto-continue with back-off, resume at a usage-limit reset,
   auto-respawn with handoff notes, auto-compact with notes, task packets.
-- **Steering without keystrokes:** the session mailbox, `cc-send.sh`, cross-repo tickets, the
-  decisions inbox, AskUserQuestion answered on the card, the Stop guards, the hands-off hold and
+- **Steering without keystrokes:** the session mailbox, `cc-send.sh`, cross-repo tickets,
+  AskUserQuestion answered on the card, the Stop guards, the hands-off hold and
   ❄ Freeze.
 - **Safety:** the opt-in approval gate and policy bundles, always-ask commands, talk mode, the
   worktree fence, one worktree per agent.
@@ -97,7 +97,7 @@ Single user, no server, no accounts. Records store env-var names, never secrets.
   `stop_hook_active`, in Shepherd's own internal runs, or when the panel heartbeat is stale. The
   guards are off in code and on in `defaults/`.
 - **Scripts sessions run themselves:** `cc-merge.sh` (ready to merge), `cc-fleet.sh` (batches),
-  `cc-pin.sh`, `cc-decide.sh`, `cc-lesson.sh`, `cc-run.sh`, `cc-send.sh`, `cc-ticket.sh`; plus
+  `cc-pin.sh`, `cc-lesson.sh`, `cc-run.sh`, `cc-send.sh`, `cc-ticket.sh`; plus
   `cc-commits.sh` (commit stats) and `cc-scrub.js` (transcript scrubber). Shared bash helpers are
   in `cc-lib.sh`.
 - **[SHIPPED](SHIPPED)** is the one list of shipped files: `install.sh`, `uninstall.sh`, the
@@ -367,8 +367,8 @@ each unit a worktree that Shepherd merged on a green gate. The
 
 - Cards: turn labels, the working-on line, Running N jobs, pinned links (`cc-pin.sh`), the
   scheduled-tasks lock check, API errors and usage limits read as errors.
-- Reaching a session: the session mailbox, `cc-send.sh`, tickets (`cc-ticket.sh`), the decisions
-  inbox (`cc-decide.sh`, 📥 Inbox), Restart fleet in place.
+- Reaching a session: the session mailbox, `cc-send.sh`, tickets (`cc-ticket.sh`), Restart
+  fleet in place. (The decisions inbox, `cc-decide.sh` and ☰ → 📥 Inbox, was removed 2026-11-19.)
 - Automation: readiness before typing, the automation door with dry run and the ⚡ Trace,
   auto-continue back-off, resume at the limit reset (`cc-resume.sh`), handoff notes, auto-compact with
   notes, task packets, the coach.

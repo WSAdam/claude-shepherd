@@ -121,8 +121,8 @@ whole fleet, while you take over.
   session's detail panel with its time and ×N for repeats. Lifting the hold replays nothing. The
   list stays readable afterwards until you press **Clear**. Sends with no session, such as a
   routine's spawn, are only in the trace.
-- **Mail waits.** A [mailbox](#session-mailbox) message is never held. Messages from other sessions,
-  ticket news and your answers to `cc-decide.sh` questions are still written. They wait: nothing is
+- **Mail waits.** A [mailbox](#session-mailbox) message is never held. Messages from other sessions
+  and ticket news are still written. They wait: nothing is
   typed, and the session's turn end and start hand nothing over. The card says
   "1 message waiting (on hold)". Once you lift the hold, mail goes out as usual: typed into an idle
   session where typing is safe, or handed over at its next turn end or start.

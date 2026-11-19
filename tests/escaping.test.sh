@@ -49,13 +49,7 @@ assert_eq "a lease's tooltip (its database path) is esc()'d" "yes" "$(has "title
 # task packets (2026-09-29): a moved packet's line names cited paths, which anyone can type; it
 # rides meta (esc()'d). (The Queue tab's + Packet form, whose result was set as text, was pruned 2026-11-17.)
 assert_eq "a moved packet's line rides the esc()'d meta"   "yes" "$(has 'if(it.packetMoved){ meta = (meta ? meta + " · " : "") + "📦 " + it.packetMoved; }')"
-# the decisions inbox (2026-09-29): a question, its default and its options were written by a
-# session (cc-decide.sh), and the row names its session (a relabel) -- inboxRowsHtml's `r.`
-assert_eq "an Inbox question is esc()'d"            "yes" "$(has 'esc(r.question)')"
-assert_eq "an Inbox row's session name is esc()'d"  "yes" "$(has 'esc(r.session)')"
-assert_eq "an Inbox row's project is esc()'d"       "yes" "$(has 'esc(r.project)')"
-assert_eq "an Inbox question's default is esc()'d"  "yes" "$(has 'esc(r["default"])')"
-assert_eq "an Inbox question's options are esc()'d" "yes" "$(has "inboxAct(event)\">' + esc(o) + '</button>'")"
+# (2026-11-19: the decisions inbox's esc() pins went with the Inbox and its inboxRowsHtml.)
 # the Compare tab (2026-10-27; it replaced the Requirements tab, whose rq.* checks went with it): a
 # login is typed by hand, a repo name and an error come back from GitHub -- compareHtml escapes each
 # (tests/compare-view.test.js runs the real renderer)

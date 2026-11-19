@@ -82,7 +82,8 @@ eq("...remembered like any lane pick", w.stored["cc-wlLane"], "verify");
 check("...and doesn't jump to a session", w.sent.filter((m) => m.a === "focus-group" || m.a === "focus").length === 0);
 
 // 2. everything else keeps the jump
-w = world({ k1: { needsYou: "fyi", needsYouSource: "decide", wlReview: REVIEW.wlReview } });
+// 2026-11-19: the sample heads-up was the decisions Inbox's ("decide"), gone; any other heads-up source still jumps
+w = world({ k1: { needsYou: "fyi", needsYouSource: "error", wlReview: REVIEW.wlReview } });
 w.api.tileActivate("k1", "repo:/cs/.git");
 check("another heads-up still jumps (focus-group)", w.sent.length === 1 && w.sent[0].a === "focus-group" && w.api.state().mode === false);
 w = world({ k1: { needsYou: "no", status: "working", wlReview: REVIEW.wlReview } });

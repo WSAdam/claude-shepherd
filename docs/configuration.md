@@ -54,7 +54,7 @@ form-managed block is dropped on Save. Its tabs:
 File-only switches include, among others: `rules.enabled`, `schedules.enabled` and
 `schedules.maxConcurrent`, `hotkeys`, `voice`, `automodel.*`, `pricing.*`, `merge.*`, `verify.*`,
 `gate.fence`, `resume.enabled`, `restart.waveMinutes` and `restart.keepHours`, `lease.*`,
-`coach.*`, `decide.waitSeconds`, `radar.*`, `schedLock.*`, `timeLost.*`, `score.weights`,
+`coach.*`, `radar.*`, `schedLock.*`, `timeLost.*`, `score.weights`,
 `subagents.*`, `status.resumeSlack`, `autoContinue.backoff.*`, `fleet.enabled`, `commits.*`,
 `usage.limitAlerts.*`, `ask.waitSeconds`, `ask.awayIdleSeconds`, `tabless.autoEndMinutes`, `escalation.hung`, `search.*`,
 `worklist.*`, `decisions.*`, `notifications.days`, `templates.sourceDir`,
@@ -71,7 +71,7 @@ The panel re-reads the file within about a second (except `hotkeys`, which need 
 
 | Section | What it controls | Reference |
 |---------|------------------|-----------|
-| `gate`, `policies`, `ask`, `decide`, `stopGuards` | Gated tools, the worktree fence, auto-allow/deny, always-ask commands, bundles, Autopilot, held questions, the decisions inbox, the three Stop guards (questions asked in prose, "done" checked against the diff, the finished-unit merge reminder) | [Approvals and policies](approvals-and-policies.md) |
+| `gate`, `policies`, `ask`, `stopGuards` | Gated tools, the worktree fence, auto-allow/deny, always-ask commands, bundles, Autopilot, held questions, the three Stop guards (questions asked in prose, "done" checked against the diff, the finished-unit merge reminder) | [Approvals and policies](approvals-and-policies.md) |
 | `merge`, `verify`, `fleet`, `radar`, `tabBridge` | Ready to merge, merge gates, the merge checker, batches, the overlap radar, the tab bridge | [Merging and batches](merging-and-batches.md) |
 | `queue`, `templates`, `automodel`, `coach` | Task queue, routing, templates, model auto-routing, the coach | [Automation](automation.md) |
 | `respawn`, `autoContinue`, `resume`, `drain`, `prune`, `cleanup`, `tabless` | Recovery, resuming at a usage limit's reset, and cleanup | [Automation](automation.md), [Controls](controls.md#sessions-with-no-tab) |
@@ -110,7 +110,6 @@ install's [defaults](../defaults/cc-config.json) differ.
 | `lease.portFrom` / `portTo` / `dbDir` | `4100` / `4199` / `~/.claude/cc-lease/db` | | [Worktree leases](fleet.md#worktree-leases) |
 | `gate.fence` | `false` | `true` | [Worktree fence](approvals-and-policies.md#worktree-fence) |
 | `policies.alwaysAsk.patterns` | `[]` (the built-ins always apply) | | [Always-ask commands](approvals-and-policies.md#always-ask-commands) |
-| `decide.waitSeconds` | `1800` (at most 7200) | | [Decisions inbox](approvals-and-policies.md#decisions-inbox) |
 | `ask.waitSeconds` | `120` (at most 3600) | | [Answer questions from Shepherd](approvals-and-policies.md#answer-questions-from-shepherd) |
 | `ask.awayIdleSeconds` | `120` (30 to 3600) | | [Answer questions from Shepherd](approvals-and-policies.md#answer-questions-from-shepherd) |
 | `stopGuards.question` | `false` | `true` | [Questions asked in prose come back](approvals-and-policies.md#questions-asked-in-prose-come-back) |
@@ -174,9 +173,9 @@ Everything lives under `~/.claude/`:
 | `cc-reqs.json` | [Requirement ids](merging-and-batches.md#requirement-ids-and-the-merge-receipt): each repo's `REQ-NNN` list (Shepherd is its only writer) |
 | `cc-compare.json` | The [Compare tab](fleet.md#compare-tab): the GitHub users you compare with, and what its daily checks found (created when you first open the tab) |
 | `cc-ask/` | Answers to held questions (the question itself is in the session's status file) |
+| `cc-decide/`, `cc-decide.sh` | Left by the decisions inbox, removed 2026-11-19: nothing reads them; `--purge` deletes them |
 | `cc-guard/` | The Stop guards' once-markers: a turn [sent back for asking in prose](approvals-and-policies.md#questions-asked-in-prose-come-back) is marked here, so it is sent back once, and so is the commit a [finished unit was reminded](approvals-and-policies.md#finished-units-get-a-merge-reminder) about, or [sent back for its diff](approvals-and-policies.md#done-is-checked-against-the-diff) |
 | `cc-hold/` | [Hands-off holds](automation.md#hands-off-hold): `<pid>` for a session held by its claude process, `key-<key>` for one without, `.fleet` for the fleet freeze |
-| `cc-decide/` | The [decisions inbox](approvals-and-policies.md#decisions-inbox): open `cc-decide.sh` questions and their answers |
 | `cc-inbox/` | The [session mailbox](automation.md#session-mailbox): messages waiting for each session |
 | `cc-send/` | [cc-send](automation.md#send-a-prompt-from-a-shell) requests waiting for Shepherd, and its answers |
 | `cc-tickets/` | [Cross-repo tickets](automation.md#cross-repo-tickets), one file each |
@@ -224,7 +223,6 @@ For the hook scripts (and the test suite):
 | `CC_GATE_TIMEOUT` | `120` | Seconds the gate waits before stepping aside |
 | `CC_PANEL_MAX_AGE` | `5` | How old the panel heartbeat may be before the gate and the question hook treat the panel as gone |
 | `CC_ASK_WAIT` | from `ask.waitSeconds` (120) | Seconds a held question waits before going back to the tab (1–3600) |
-| `CC_DECIDE_WAIT` | from `decide.waitSeconds` (1800) | Seconds a `cc-decide.sh --blocking` question waits before it prints the default |
 | `CC_STATUS_DIR` | `~/.claude/cc-status` | Where the status files go ([Development](development.md#test-it-without-claude)) |
 | `CC_STATUS_DEBUG` | unset | Any value appends raw hook input to `cc-status/.debug.log` (so does a `cc-status/.debug-hooks` file) |
 

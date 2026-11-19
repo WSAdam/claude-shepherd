@@ -119,7 +119,7 @@ mailbox message, a notes request, a Stop guard), and it reads `cc-hold/` first s
 gets none of them. Each writer owns its own files: the hooks (`cc-status/`, a Stop guard's
 `cc-guard/<key>.<guard>`); the scripts sessions run (`cc-merge.sh` → `cc-merge/`, including the
 `<key>.notyet` a Not yet leaves; `cc-fleet.sh` → a batch's proposal; `cc-lesson.sh` → `cc-lesson/`;
-`cc-run.sh` → reports in `cc-run/`; `cc-decide.sh`, `cc-ticket.sh`, `cc-send.sh`, `cc-pin.sh`);
+`cc-run.sh` → reports in `cc-run/`; `cc-ticket.sh`, `cc-send.sh`, `cc-pin.sh`);
 and the panel (decision and answer files, a batch's own state, `cc-hold/`, `cc-main-green.json`,
 `cc-keep/`, checklist runs). **[DECISION D-6, revised]**
 
@@ -619,7 +619,7 @@ cc-keep/<project>/<session>.jsonl  kept transcripts of ★ projects, plus pins.j
 - **Grid of tiles** (status, time-in-state, latest prompt, wants/why, context bar, badges such as
   HOLD / FROZEN, ⚠ main is red and the coach's 🧭 chip), with **grey cards** in their own row under
   the grid. Header: New, ☕ keep-awake, 🔒 lock, **❄ Freeze**, the ☰ views menu, ⚙ settings, theme.
-- **☰ views menu:** 📥 Inbox, 🎫 Tickets, **📑 Queues**, 🔍 Filter sessions, 🔎 Find in fleet,
+- **☰ views menu:** 🎫 Tickets, **📑 Queues**, 🔍 Filter sessions, 🔎 Find in fleet,
   📊 Fleet insights, 📜 Audit ledger (with 🗂 History), ⏰ Routines, 📝 Templates, ✦ Agents,
   🔌 MCPs & Skills, 🛡 Policy bundles, ⚙️ Automation rules, ⚡ Automation trace, **♻️ Restart
   fleet**, 💰 Cost & tokens, 🩺 Diagnostics, ✨ Features list, 📋 Shift report, 🔔 Notifications.

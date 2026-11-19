@@ -80,8 +80,6 @@ Every feature below has a reference page one click away. The panel lists the sam
   a session's question shows up on its card as buttons, and your click goes straight to the session.
 - [**Questions asked in prose come back**](docs/approvals-and-policies.md#questions-asked-in-prose-come-back):
   a turn that ends "Want me to push?" in prose is sent back once to ask it on the card instead.
-- [**Decisions inbox**](docs/approvals-and-policies.md#decisions-inbox): a question with a sensible
-  default doesn't stop the session (`cc-decide.sh`); answer it later in ☰ → Inbox.
 - [**Spawn new sessions**](docs/controls.md#spawn-new-sessions): start a session in any project with
   an editor, permission mode, provider and first task, or from a saved preset.
 - [**Restart the fleet in place**](docs/fleet.md#restart-the-fleet-in-place): reopen every session
@@ -298,7 +296,7 @@ Full detail: [docs/approvals-and-policies.md](docs/approvals-and-policies.md#the
 | [Install](docs/install.md) | Install, upgrade, uninstall, what the installer changes, the tab bridge, the Dock launcher |
 | [Fleet](docs/fleet.md) | Statuses, grey cards, project cards, Instances, leases, restart in place and its outcomes, the detail panel and its tabs, search, groups, My List, playbooks, Run selected |
 | [Controls](docs/controls.md) | Clicks and menus, detail-panel buttons, Seance, Hold and ❄ Freeze, pinned links, shared windows, spawning, hotkeys, Stream Deck, awake and lock |
-| [Approvals and policies](docs/approvals-and-policies.md) | The safety model, the gate, always-ask commands, talk mode, the worktree fence, policies, questions, the Inbox, the three Stop guards |
+| [Approvals and policies](docs/approvals-and-policies.md) | The safety model, the gate, always-ask commands, talk mode, the worktree fence, policies, questions, the three Stop guards |
 | [Merging and batches](docs/merging-and-batches.md) | Worktree tabs, ready to merge, gates, gate blame, the main-green check, the checker, red-first, receipts, batches, brief pre-flight, grant grading, the overlap radar, main moved, the demo, the tab bridge |
 | [Automation](docs/automation.md) | When automation types, dry run, the hands-off hold, queue and packets, queue hold and the Queues view, templates, respawn, notes, the mailbox, cc-send, tickets, resume, rules, routines, the coach, the fleet idle alert, A/B compare |
 | [Usage and cost](docs/usage-and-cost.md) | Context bars, plan usage, cost, commits, where the time went, the audit ledger and its views, past sessions and Resume, kept transcripts |

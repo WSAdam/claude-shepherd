@@ -120,11 +120,9 @@ parallel.
   `cc-merge.sh request`) and let its exit 6 tell you. If you must ask outright,
   `~/.claude/cc-fleet.sh alive` answers it (exit 0 up, 6 down, with the heartbeat's age).
 - **Questions with a sensible default don't stop the session.** When you'd ask me something you
-  already have a sensible default for, run `~/.claude/cc-decide.sh ask --question "…" --default
-  "…" [--options "a|b|c"]` and carry on with what it prints: the question lands in Shepherd's
-  Inbox, and if my answer differs it reaches you later (at a turn end, or your next start). Add
-  `--blocking`, run in the background, only when going ahead on the default would be costly to
-  undo. A decision with no safe default is still asked with AskUserQuestion.
+  already have a sensible default for, go ahead on the default and name it in your final message,
+  so I can redirect you. A decision with no safe default, or one that would be costly to undo, is
+  asked with AskUserQuestion.
 - **Work for another repo goes in a ticket.** When you need something done in ANOTHER repo (a fix,
   a release, an answer only its sessions can give), file it with `~/.claude/cc-ticket.sh file
   --repo <its root or name> --title "…" --body "…"` instead of asking me to relay it. I approve every

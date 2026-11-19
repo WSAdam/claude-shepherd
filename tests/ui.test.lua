@@ -4098,7 +4098,7 @@ do
   -- 2026-10-03: the list gained "finish" (A2's compaction part) after the lease
   -- 2026-10-14: ...and "crossings" (Shepherd's notes on held crossings) after the tickets
   check("tickets: SessionStart has a tickets part",
-        ls:find('CC_CONTEXT_PARTS="notes lease finish decisions tickets crossings onpurpose handoff mailbox"', 1, true) ~= nil)
+        ls:find('CC_CONTEXT_PARTS="notes lease finish tickets crossings onpurpose handoff mailbox"', 1, true) ~= nil)   -- 2026-11-19: decisions part gone with the Inbox
 end
 
 -- ---- Crossings are stepped every tick, and only Adam's click publishes (2026-10-14) ----
@@ -4139,7 +4139,7 @@ do
   if lib then lib:close() end
   check("crossings: cc-lib.sh defaults CC_CROSS_DIR to the same folder",
         ls:find('CC_CROSS_DIR="${CC_CROSS_DIR:-${HOME}/.claude/cc-cross}"', 1, true) ~= nil)
-  check("crossings: a held session's start takes no crossing notes either", ls:find('CC_HOLD_MAIL_PARTS="mailbox decisions tickets crossings"', 1, true) ~= nil)
+  check("crossings: a held session's start takes no crossing notes either", ls:find('CC_HOLD_MAIL_PARTS="mailbox tickets crossings"', 1, true) ~= nil)   -- 2026-11-19: decisions part gone with the Inbox
   check("crossings: cc_remove prunes them, never by key", (ls:match("\ncc_remove%(%) {(.-)\n}\n") or ""):find("cc_cross_prune\n", 1, true) ~= nil)
   local tkf = io.open(ROOT .. "cc-ticket.sh", "r")
   local ts = tkf and tkf:read("*a") or ""
@@ -4702,33 +4702,52 @@ do
         (src:match("\nfunction FX%.fleetOpenTab%(b, slug, req%)(.-)\nend\n") or ""):find("FX.fleetPacketGate(b, slug)", 1, true) ~= nil)
 end
 
--- ---- the decisions inbox (2026-09-29, build program unit 28) ----
--- ☰ → Inbox, a fleet-wide view (id inbox -- the detail panel's gate-decision "Decisions" tab is a
--- different thing and keeps its id): every open cc-decide.sh question and every held
--- AskUserQuestion, answerable in place. The tick reads the questions before the needs-you stamp
--- (an open one is a heads-up there, a blocking one needs Adam) and pushes the rows to the panel.
--- tests/decide.test.lua drives the wiring, tests/inbox-view.test.js the shipped renderer.
+-- ---- The decisions Inbox is gone (2026-11-19) ----
+-- Adam, 2026-11-19: "inbox feature can get clipped no need for the notification at the top or that tab".
+-- REQUIREMENT CHANGE: the 2026-09-29 pins here asserted the Inbox existed. Gone with it: ☰ → Inbox and
+-- the count on ☰, cc-decide.sh and ~/.claude/cc-decide, the answers it handed over at a session's start,
+-- and the card heads-up for an open question. Kept: the session mailbox (cc-inbox/, a different thing),
+-- held AskUserQuestions on their cards, and the .ib-* row styles Tickets, Queues and Coach share.
 do
-  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
-  local src = f and f:read("*a") or ""
-  if f then f:close() end
-  check("inbox: ☰ has an Inbox item with its own badge",
-        src:find([[<button class="tm-item" onclick="menuPick('inbox')"><span class="tm-ic">📥</span> Inbox<span id="tm-inbox-badge"></span></button>]], 1, true) ~= nil)
-  check("inbox: its view is id inbox", src:find('<div id="inbox">', 1, true) ~= nil)
-  check("inbox: menuPick opens it", src:find('else if(which === "inbox") openInbox();', 1, true) ~= nil)
-  check("inbox: the detail panel's Decisions tab keeps its own id",
-        src:find('<div id="inbox">', 1, true) ~= nil and src:find('id="decisions"', 1, true) == nil)
-  check("inbox: an answer goes to FX.answerDecision, never typed",
-        src:find('if a == "decide-answer" then FX.answerDecision(tostring(payload.v or ""), tostring(payload.text or "")); return end', 1, true) ~= nil)
-  check("inbox: a row's markup goes through esc()",
-        src:find("esc(r.question)", 1, true) ~= nil and src:find("esc(r.session)", 1, true) ~= nil)
-  local tickBody = src:match("\nfunction FX%._refreshBody%(%)(.-)\nend\n") or ""
-  local at, stamp = tickBody:find("pcall(FX.stepDecisions, list)", 1, true), tickBody:find("FX.annotateNeedsYou(list)", 1, true)
-  check("inbox: the tick reads the questions, isolated in a pcall, before the needs-you stamp",
-        at ~= nil and stamp ~= nil and at < stamp)
-  check("inbox: the tick pushes the rows to a visible panel", tickBody:find("pcall(FX.pushInbox)", 1, true) ~= nil)
-  check("inbox: a blocking question's session is probed for liveness",
-        src:find("(type(it.decisions) == \"table\" and (tonumber(it.decisions.blocking) or 0) > 0)", 1, true) ~= nil)
+  local function slurp(name)
+    local f = io.open(ROOT .. name, "r")
+    local s = f and f:read("*a") or ""
+    if f then f:close() end
+    return s
+  end
+  local src, lib, shipped = slurp("claude-dashboard.lua"), slurp("cc-lib.sh"), slurp("SHIPPED")
+  local okCore, core = pcall(dofile, ROOT .. "cc-core.lua")
+  check("no inbox: ☰ has no Inbox item", not src:find("menuPick('inbox')", 1, true) and not src:find('which === "inbox"', 1, true))
+  check("no inbox: no count badge on ☰ or in the menu", not src:find("inbox-badge", 1, true))
+  check("no inbox: no Inbox overlay", not src:find('<div id="inbox">', 1, true) and not src:find("#inbox{", 1, true))
+  check("no inbox: the bridge answers no decision and opens no Inbox",
+        not src:find('a == "decide-answer"', 1, true) and not src:find('a == "inbox-open"', 1, true))
+  check("no inbox: the tick reads no cc-decide folder and pushes no rows",
+        not src:find("FX.stepDecisions", 1, true) and not src:find("FX.pushInbox", 1, true) and not src:find("FX.DECIDE_DIR", 1, true))
+  check("no inbox: no card is probed for a blocking question", not src:find("it.decisions.blocking", 1, true))
+  check("no inbox: the panel JS has no Inbox renderer", not src:find("function ccInbox(", 1, true) and not src:find("inboxRowsHtml", 1, true))
+  check("no inbox: core keeps none of it",
+        okCore and core.inboxRows == nil and core.parseDecision == nil and core.decisionTiles == nil and core.DECIDE == nil)
+  local keys = {}
+  for _, f in ipairs(okCore and core.FEATURES or {}) do keys[f.key] = true end
+  check("no inbox: no Decisions inbox in the feature list", okCore and not keys.decisions)
+  check("no inbox: cc-decide.sh isn't shipped, or in the checkout",
+        not shipped:find("cc-decide.sh", 1, true) and io.open(ROOT .. "cc-decide.sh", "r") == nil)
+  check("no inbox: the hooks keep no cc-decide folder",
+        not lib:find("CC_DECIDE_DIR", 1, true) and not lib:find("cc_decide_", 1, true) and not lib:find("_cc_ctx_decisions", 1, true))
+  check("no inbox: a session's start hands over no decisions part",
+        lib:find('CC_CONTEXT_PARTS="notes lease finish tickets crossings onpurpose handoff mailbox"', 1, true) ~= nil
+        and lib:find('CC_HOLD_MAIL_PARTS="mailbox tickets crossings"', 1, true) ~= nil)
+  check("no inbox: the methodology no longer sends sessions to cc-decide.sh", not slurp("methodology/CLAUDE.md"):find("cc-decide", 1, true))
+  -- what stays
+  check("kept: the session mailbox", src:find("function FX.mailboxSend(", 1, true) ~= nil and lib:find('CC_INBOX_DIR="${CC_INBOX_DIR:-${HOME}/.claude/cc-inbox}"', 1, true) ~= nil)
+  -- 2026-11-19: FX.allItems lived in the Inbox's block and went with it in the first cut; crossings,
+  -- tickets, the coach and the Queues view call it, and their suites went red
+  check("kept: FX.allItems, which crossings, tickets, the coach and Queues use", src:find("\nfunction FX.allItems()", 1, true) ~= nil)
+  check("kept: the row styles Tickets, Queues and Coach share", src:find(".ib-row{", 1, true) ~= nil and src:find(".ib-btn{", 1, true) ~= nil
+        or src:find(".ib-opt, .ib-btn{", 1, true) ~= nil)
+  check("kept: a held AskUserQuestion still needs Adam on its card",
+        okCore and core.needsYouKind({ key = "k", askHeld = true }, 100) == "needs")
 end
 
 -- ---- requirement ids and the merge receipt (2026-09-29, build program unit 22) ----

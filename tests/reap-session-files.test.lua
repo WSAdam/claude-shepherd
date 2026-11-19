@@ -46,9 +46,7 @@ local PINS = T .. "/cc-pins"
 -- them; both removers drop only what nothing can use (a file naming no checkout, a torn write)
 local LEASE = T .. "/cc-lease"
 local LIVE_LEASES = LEASE .. "/" .. (T .. "/repo"):gsub("[^A-Za-z0-9]", "-") .. ".json"
--- 2026-09-29: the decisions inbox (build program unit 28): a session's open cc-decide.sh questions
--- are named <key>.<epoch>-<pid>.json; an ANSWERED one outlives the session for its next start
-local DECIDE = T .. "/cc-decide"
+-- 2026-11-19: the decisions inbox's cc-decide/ (2026-09-29) went with the Inbox; neither remover touches it.
 -- 2026-10-02: the Stop guards (mining round 2, A1): a guard that blocks a stop leaves a once-marker
 -- <key>.<guard> (question now; A2/A3 add theirs), so every "<key>." file there is the session's
 local GUARD = T .. "/cc-guard"
@@ -60,7 +58,7 @@ local HOLD = T .. "/cc-hold"
 local function pidOf(cmd) local p = io.popen(cmd); local s = p and p:read("*l"); if p then p:close() end; return tostring(s or "") end
 local LIVE_PID = pidOf("sleep 300 >/dev/null 2>&1 & echo $!")   -- a live stand-in for a claude process
 local DEAD_PID = pidOf("sh -c 'echo $$'")                        -- one that has exited
-os.execute(('mkdir -p "%s" "%s" "%s" "%s" "%s/repo" "%s/k90" "%s" "%s" "%s" "%s" "%s" "%s"'):format(STATUS, MERGE, ASK, TALK, T, INBOX, RESUME, NOTES, PINS, LEASE, DECIDE, GUARD))
+os.execute(('mkdir -p "%s" "%s" "%s" "%s" "%s/repo" "%s/k90" "%s" "%s" "%s" "%s" "%s"'):format(STATUS, MERGE, ASK, TALK, T, INBOX, RESUME, NOTES, PINS, LEASE, GUARD))
 os.execute(('mkdir -p "%s"'):format(HOLD))
 local function write(path, s) local f = io.open(path, "w"); if f then f:write(s); f:close() end end
 local function exists(p) local h = io.open(p, "r"); if h then h:close(); return true end; return false end
@@ -113,12 +111,6 @@ local function plant()
   write(LEASE .. "/nowhere.json", '{"v":1,"leases":{}}')
   write(LEASE .. "/-r-main.json.tmp.4242", '{"v":')
   os.execute('touch -t 202601010000 "' .. LEASE .. '/-r-main.json.tmp.4242"')
-  write(DECIDE .. "/" .. KEY .. ".1790000000-11.json", '{"id":"k9.1790000000-11","key":"k9","nonce":"ab12"}')
-  write(DECIDE .. "/" .. KEY .. ".1790000000-11.json.tmp.4242", '{"id":')
-  write(DECIDE .. "/" .. KEY .. ".1790000000-11.answer.claim.4242", '{"nonce":"ab12","answer":"x"}')
-  write(DECIDE .. "/" .. KEY .. ".1790000000-11.answer.tmp.5150", '{"nonce":')
-  write(DECIDE .. "/" .. KEY .. ".1790000001-12.json", '{"id":"k9.1790000001-12","key":"k9","nonce":"cd34"}')
-  write(DECIDE .. "/" .. KEY .. ".1790000001-12.answer", '{"nonce":"cd34","answer":"y"}')
   write(GUARD .. "/" .. KEY .. ".question", "1790000000.4242\n")
   write(GUARD .. "/" .. KEY .. ".fakeDone", "1790000000.4242\n")
   write(HOLD .. "/key-" .. KEY, '{"at":1790000000}')
@@ -165,20 +157,14 @@ local TARGETS = {
   { "a torn write of those pins",      PINS .. "/gone.json.tmp.4242" },
   { "a lease file that names no checkout", LEASE .. "/nowhere.json" },
   { "a torn write of a lease file",    LEASE .. "/-r-main.json.tmp.4242" },
-  { "an open decision",                DECIDE .. "/" .. KEY .. ".1790000000-11.json" },
-  { "a torn write of it",              DECIDE .. "/" .. KEY .. ".1790000000-11.json.tmp.4242" },
-  { "a claimed answer to it",          DECIDE .. "/" .. KEY .. ".1790000000-11.answer.claim.4242" },
-  { "a torn answer to it",             DECIDE .. "/" .. KEY .. ".1790000000-11.answer.tmp.5150" },
   { "the question guard's once-marker", GUARD .. "/" .. KEY .. ".question" },
   { "any other Stop guard's once-marker", GUARD .. "/" .. KEY .. ".fakeDone" },
   { "the session's key hold",          HOLD .. "/key-" .. KEY },
   { "a torn write of it",              HOLD .. "/key-" .. KEY .. ".tmp.5150" },
   { "the hold of a claude process that is gone", HOLD .. "/" .. DEAD_PID },
 }
--- An answered decision waits for the session's next start (a resume): both removers keep it.
+-- What both removers keep. (2026-11-19: an answered decision kept for the next start went with the Inbox.)
 local KEPT = {
-  { "an answered decision (its next start takes it)", DECIDE .. "/" .. KEY .. ".1790000001-12.json" },
-  { "...and its answer",                              DECIDE .. "/" .. KEY .. ".1790000001-12.answer" },
   { "the hold of a live claude process (a /clear keeps it)", HOLD .. "/" .. LIVE_PID },
   { "the fleet freeze",                               HOLD .. "/.fleet" },
 }
@@ -190,7 +176,6 @@ local OTHER = {
   TALK .. "/k90", INBOX .. "/k90/1790000000-000001-ab12.msg",
   RESUME .. "/k90.json", RESUME .. "/k90.plan.json",
   NOTES .. "/k90.due-at", NOTES .. "/k90.notes-asked",
-  DECIDE .. "/k90.1790000000-11.json", DECIDE .. "/k9.1.1790000000-11.json",
   GUARD .. "/k90.question",
   HOLD .. "/key-k90",
 }
@@ -208,10 +193,10 @@ write(REAP_SH, ([[
   export CC_STATUS_DIR=%q CC_MERGE_DIR=%q CC_ASK_DIR=%q
   export CC_GATE_TOOLS_DIR=%q CC_APPROVED_DIR=%q CC_AUTOPILOT_DIR=%q
   export CC_POLICY_DIR=%q CC_POLICY_OVERRIDE_DIR=%q CC_AUTOMODEL_DIR=%q CC_TALK_DIR=%q CC_INBOX_DIR=%q
-  export CC_RESUME_DIR=%q CC_NOTES_DIR=%q CC_PINS_DIR=%q CC_LEASE_DIR=%q CC_DECIDE_DIR=%q CC_GUARD_DIR=%q CC_HOLD_DIR=%q
+  export CC_RESUME_DIR=%q CC_NOTES_DIR=%q CC_PINS_DIR=%q CC_LEASE_DIR=%q CC_GUARD_DIR=%q CC_HOLD_DIR=%q
   . %q; cc_remove %s
 ]]):format(STATUS, MERGE, ASK, T .. "/gt", T .. "/ap", T .. "/au",
-           T .. "/po", T .. "/pov", T .. "/am", TALK, INBOX, RESUME, NOTES, PINS, LEASE, DECIDE, GUARD, HOLD, ROOT .. "cc-lib.sh", KEY))
+           T .. "/po", T .. "/pov", T .. "/am", TALK, INBOX, RESUME, NOTES, PINS, LEASE, GUARD, HOLD, ROOT .. "cc-lib.sh", KEY))
 os.execute(("bash %q >/dev/null 2>&1"):format(REAP_SH))
 for _, t in ipairs(TARGETS) do
   check("cc_remove drops " .. t[1], not exists(t[2]))
@@ -287,7 +272,7 @@ local ENV = { CC_STATUS_DIR = STATUS, CC_MERGE_DIR = MERGE, CC_ASK_DIR = ASK,
               CC_AUTOPILOT_DIR = T .. "/au", CC_POLICY_DIR = T .. "/po",
               CC_POLICY_OVERRIDE_DIR = T .. "/pov", CC_AUTOMODEL_DIR = T .. "/am",
               CC_TALK_DIR = TALK, CC_INBOX_DIR = INBOX, CC_RESUME_DIR = RESUME, CC_NOTES_DIR = NOTES,
-              CC_PINS_DIR = PINS, CC_LEASE_DIR = LEASE, CC_DECIDE_DIR = DECIDE, CC_GUARD_DIR = GUARD,
+              CC_PINS_DIR = PINS, CC_LEASE_DIR = LEASE, CC_GUARD_DIR = GUARD,
               CC_HOLD_DIR = HOLD,
               CC_WORKLIST_FILE = T .. "/worklist.json", CC_LABELS_FILE = T .. "/labels.json",
               HOME = T }

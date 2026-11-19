@@ -32,10 +32,6 @@ export CC_PINS_DIR="${CC_PINS_DIR:-$CC_TEST_ISOLATION/cc-pins}"
 # 2026-09-29: SessionStart reads the worktree leases in ~/.claude/cc-lease, and a SessionEnd
 # (cc_remove) prunes them; a suite's fake session must never read or prune the real ones.
 export CC_LEASE_DIR="${CC_LEASE_DIR:-$CC_TEST_ISOLATION/cc-lease}"
-# 2026-09-29: SessionStart hands over (and removes) Adam's late answers in ~/.claude/cc-decide, and
-# a SessionEnd (cc_remove) drops a session's open questions there; a suite's fake session must never
-# take or drop a real one.
-export CC_DECIDE_DIR="${CC_DECIDE_DIR:-$CC_TEST_ISOLATION/cc-decide}"
 # 2026-10-03: cc-lesson.sh files a lesson in ~/.claude/cc-lesson; a suite's fake session must never
 # file one where the real Shepherd would read it.
 export CC_LESSON_DIR="${CC_LESSON_DIR:-$CC_TEST_ISOLATION/cc-lesson}"

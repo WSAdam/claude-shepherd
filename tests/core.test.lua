@@ -8503,7 +8503,8 @@ do
   -- 2026-10-04: 60 -> 61 for past sessions in History, with Resume ("pastsessions", flagged new).
   -- 2026-10-14: 61 -> 62 for crossings, Adam approving what one project sends another ("crossings", flagged new).
   -- 2026-10-27: 62 -> 63 for the Compare tab, a weekly GitHub leaderboard ("compare", flagged new).
-  eq("FEATURES: the 63 new features are flagged", newCount, 63)
+  -- 2026-11-19: 63 -> 62, REQUIREMENT CHANGE: the decisions inbox ("decisions", flagged new) was removed.
+  eq("FEATURES: the 62 new features are flagged", newCount, 62)
   check("FEATURES: lists the Compare tab", keys.compare == true)
   check("FEATURES: lists crossings", keys.crossings == true)
   check("FEATURES: lists queue hold and the Queues view", keys.queuehold == true)
@@ -8529,7 +8530,7 @@ do
   check("FEATURES: lists cross-repo tickets", keys.tickets == true)
   check("FEATURES: lists On purpose", keys.onpurpose == true)
   check("FEATURES: lists task packets", keys.packets == true)
-  check("FEATURES: lists the decisions inbox", keys.decisions == true)
+  check("FEATURES: no decisions inbox (removed 2026-11-19, REQUIREMENT CHANGE)", keys.decisions == nil)
   check("FEATURES: lists cc-send", keys.send == true)
   check("FEATURES: lists the coverage index", keys.coverage == true)
   check("FEATURES: lists worktree leases", keys.leases == true)
@@ -16185,8 +16186,7 @@ do
   eq("card: nor one running background work", (core.needsYouKind({ key = "s1", status = "done", bg_active = true, wlReview = rv }, now)), nil)
   eq("card: nor a batch driver", (core.needsYouKind({ key = "s1", status = "done", fleet = { phase = "approved" }, wlReview = rv }, now)), nil)
   eq("card: a real approval still wins", (core.needsYouKind({ key = "s1", status = "approval", wlReview = rv }, now)), "needs")
-  local _, src6 = core.needsYouKind({ key = "s1", status = "done", decisions = { open = 1 }, wlReview = rv }, now)
-  eq("card: an open decision's heads-up still wins", src6, "decide")
+  -- 2026-11-19: "an open decision's heads-up still wins" went with the decisions Inbox (REQUIREMENT CHANGE)
   eq("card: a working session still outranks it", core.instanceTier({ key = "s1", status = "working", wlReview = rv }, {}, now), core.TIER_RUNNING)
   local _, _, whyFresh = core.needsYouKind({ key = "s1", status = "done", wlReview = { key = "shop", n = 30, oldestTs = now - 60 } }, now)
   check("card: under an hour reads <1h  (" .. tostring(whyFresh) .. ")", type(whyFresh) == "string" and whyFresh:find("<1h", 1, true) ~= nil)
@@ -17122,6 +17122,15 @@ do
   eq("compare repo link: a scheme posing as a name opens nothing", core.compareRepoUrl(st, "javascript:alert(1)//x"), nil)
   eq("compare repo link: no name, or no state, opens nothing", core.compareRepoUrl(st, nil), nil)
   eq("compare repo link: ...no state", core.compareRepoUrl(nil, "WSAdam/pilot"), nil)
+end
+
+-- ---- The decisions Inbox is gone: a card never needs Adam for a cc-decide.sh question (2026-11-19) ----
+-- Adam, 2026-11-19: "inbox feature can get clipped". A leftover it.decisions stamp is ignored.
+do
+  local kind = core.needsYouKind({ key = "s1", status = "done", decisions = { open = 1, blocking = 1 } }, 100)
+  eq("no inbox: a card with an open or blocking question stamp is neither needs nor a heads-up", kind, nil)
+  local _, src = core.needsYouKind({ key = "s1", status = "done", procAlive = false, decisions = { blocking = 1 } }, 100)
+  check("no inbox: ...and no source names it", src ~= "decide")
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
