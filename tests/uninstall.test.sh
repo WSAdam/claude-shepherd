@@ -37,6 +37,7 @@ printf '#!/bin/bash\n' > "$C/cc-pin.sh"   # 2026-11-19: retired with pinned link
 mkdir -p "$C/cc-lease/db"; printf '{"v":1,"main":"/r","leases":{}}' > "$C/cc-lease/-r.json"
 mkdir -p "$C/cc-bridge"; printf '0.5.0' > "$C/cc-bridge/.installed"
 mkdir -p "$C/cc-send"; printf '{"nonce":"ab"}' > "$C/cc-send/shell.1790000000-1.answer"
+printf '#!/bin/bash\n' > "$C/cc-send.sh"   # 2026-11-19: retired with cc-send, no longer in SHIPPED
 printf '{"v":1,"repos":{}}' > "$C/cc-reqs.json"
 printf '{"v":1,"users":[]}' > "$C/cc-compare.json"
 mkdir -p "$C/cc-tickets"; printf '{"v":1,"id":"t1790000000-1"}' > "$C/cc-tickets/t1790000000-1.json"
@@ -73,9 +74,8 @@ assert_json "the user's own Stop hook is kept" "$C/settings.json" '.hooks.Stop[0
 assert_json "...as the only Stop group" "$C/settings.json" '.hooks.Stop | length' "1"
 assert_json "an event left with no hooks is dropped" "$C/settings.json" '.hooks | has("PreToolUse")' "false"
 assert_json "the user's other settings are kept" "$C/settings.json" '.model' "opus"
-# 2026-09-29: cc-send.sh (a prompt for a live session, from any shell) is shipped too.
-# 2026-09-29: cc-ticket.sh (cross-repo tickets) is shipped too.
-for f in cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-merge.sh cc-fleet.sh cc-ask.sh cc-commits.sh cc-worktree-guard.sh cc-resume.sh cc-send.sh cc-ticket.sh cc-core.lua; do
+# 2026-09-29: cc-ticket.sh (cross-repo tickets) is shipped too. (2026-11-19: cc-send.sh isn't any more.)
+for f in cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-merge.sh cc-fleet.sh cc-ask.sh cc-commits.sh cc-worktree-guard.sh cc-resume.sh cc-ticket.sh cc-core.lua; do
   assert_eq "removes $f from the claude dir" "gone" "$([ -e "$C/$f" ] && echo there || echo gone)"
 done
 assert_eq "a user's own cc-*.sh is kept" "there" "$([ -e "$C/cc-mine.sh" ] && echo there || echo gone)"
@@ -133,8 +133,10 @@ assert_eq "--purge removes the pinned links" "gone" "$([ -e "$C/cc-pins" ] && ec
 assert_eq "--purge removes a retired cc-pin.sh" "gone" "$([ -e "$C/cc-pin.sh" ] && echo there || echo gone)"
 # 2026-09-29: the worktree leases (cc-lease/, with the default database folder inside it) too
 assert_eq "--purge removes the worktree leases" "gone" "$([ -e "$C/cc-lease" ] && echo there || echo gone)"
-# 2026-09-29: cc-send's requests and answers (cc-send/) too
+# 2026-09-29: cc-send's requests and answers (cc-send/) too (2026-11-19: a leftover of the removed
+# cc-send on an old install, still purged)
 assert_eq "--purge removes cc-send's requests" "gone" "$([ -e "$C/cc-send" ] && echo there || echo gone)"
+assert_eq "--purge removes a retired cc-send.sh" "gone" "$([ -e "$C/cc-send.sh" ] && echo there || echo gone)"
 # 2026-09-29: the requirement ids Shepherd minted (cc-reqs.json) too
 assert_eq "--purge removes the minted requirement ids" "gone" "$([ -e "$C/cc-reqs.json" ] && echo there || echo gone)"
 # 2026-10-27: the Compare tab's list and what its GitHub checks found (cc-compare.json) too

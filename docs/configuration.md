@@ -173,7 +173,7 @@ Everything lives under `~/.claude/`:
 | `cc-guard/` | The Stop guards' once-markers: a turn [sent back for asking in prose](approvals-and-policies.md#questions-asked-in-prose-come-back) is marked here, so it is sent back once, and so is the commit a [finished unit was reminded](approvals-and-policies.md#finished-units-get-a-merge-reminder) about, or [sent back for its diff](approvals-and-policies.md#done-is-checked-against-the-diff) |
 | `cc-hold/` | Left by the hands-off hold and ❄ Freeze, removed 2026-11-19: nothing reads it; `--purge` deletes it |
 | `cc-inbox/` | The [session mailbox](automation.md#session-mailbox): messages waiting for each session |
-| `cc-send/` | [cc-send](automation.md#send-a-prompt-from-a-shell) requests waiting for Shepherd, and its answers |
+| `cc-send/`, `cc-send.sh` | Left by cc-send, removed 2026-11-19: nothing reads them; `--purge` deletes them |
 | `cc-tickets/` | [Cross-repo tickets](automation.md#cross-repo-tickets), one file each |
 | `cc-queue/` | Each project's [task queue](automation.md#task-queue) and its [packets](automation.md#task-packets) |
 | `cc-pins/`, `cc-pin.sh` | Left by pinned links, removed 2026-11-19: nothing reads them; `--purge` deletes them |

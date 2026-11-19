@@ -335,27 +335,6 @@ CC_RESUME_DIR="${CC_RESUME_DIR:-${HOME}/.claude/cc-resume}"
 # The Stop guards (mining round 2, 2026-10-02): a guard that blocks a stop leaves a once-marker,
 # <key>.<guard>, holding what it blocked (a turn's id). Default MUST match the dashboard's FX.GUARD_DIR.
 CC_GUARD_DIR="${CC_GUARD_DIR:-${HOME}/.claude/cc-guard}"
-# cc-send (build program unit 30, 2026-09-29): a request cc-send.sh leaves for Shepherd, named
-# <caller key or "shell">.<epoch>-<n>.json, and Shepherd's <...>.answer. Default MUST match the
-# dashboard's FX.SEND_DIR.
-CC_SEND_DIR="${CC_SEND_DIR:-${HOME}/.claude/cc-send}"
-CC_SEND_KEEP_SECONDS=600   # core.SEND.keepSeconds: older files are a killed CLI's leftovers
-# Drop the requests session $1 made (and their answers, temps, claims), plus any file past
-# CC_SEND_KEEP_SECONDS by the epoch in its name. KEEP IN SYNC with FX.removeStatus and
-# FX.stepSend's prune (core.sendFileOf reads the same names).
-cc_send_prune() {
-  [ -d "$CC_SEND_DIR" ] || return 0
-  local f b now; now="$(date +%s)"
-  for f in "$CC_SEND_DIR"/*; do
-    [ -f "$f" ] || continue
-    b="${f##*/}"
-    [[ "$b" =~ ^(.+)\.([0-9]+)-[0-9]+\. ]] || continue
-    if { [ -n "$1" ] && [ "${BASH_REMATCH[1]}" = "$1" ]; } || [ $((now - BASH_REMATCH[2])) -gt "$CC_SEND_KEEP_SECONDS" ]; then
-      rm -f "$f"
-    fi
-  done
-  return 0
-}
 # Cross-repo tickets (build program unit 29, 2026-09-29): cc-ticket.sh files work for ANOTHER repo's
 # sessions, one file per ticket, <id>.json (id t<epoch>-<n>), changed only through cc_ticket_update.
 # Default MUST match cc-ticket.sh's (it sources this file) and the dashboard's FX.TICKETS_DIR.
@@ -620,8 +599,6 @@ cc_cross_prune() {
 $files
 EOF
   find "$CC_CROSS_DIR" -maxdepth 1 -type f -name '*.notice' -mtime +30 -exec rm -f {} + 2>/dev/null
-  # Shepherd's answers to a waiting cc-send (2026-10-14, unit 2) nobody took in an hour
-  find "$CC_CROSS_DIR" -maxdepth 1 -type f -name '*.answer' -mmin +60 -exec rm -f {} + 2>/dev/null
   cc_have_jq || return 0
   files="$(find "$CC_CROSS_DIR" -maxdepth 1 -type f -name '*.json' ! -name '*.req.json' -mtime +7 2>/dev/null)"
   while IFS= read -r f; do
@@ -674,8 +651,6 @@ cc_lease_prune() {
 # cc-resume/<key>.json, .plan.json and .cancel (2026-09-29): a resume waiting for a usage limit's
 # reset -- its waiter sees the arm gone and stops.
 # cc-lease/ (2026-09-29) is keyed by main checkout: cc_lease_prune drops only what nothing can use.
-# cc-send/ (2026-09-29) is keyed by request, each named for the session that made it: cc_send_prune
-# drops that session's, and any past CC_SEND_KEEP_SECONDS.
 # cc-tickets/ (2026-09-29) is keyed by ticket: cc_ticket_release frees the ones this session held
 # (the ones it filed stay for its next start), cc_ticket_prune drops old and stale files.
 # cc-skill-labels.json (2026-09-29) is Adam's hand labels on skill runs, not a session's state:
@@ -708,9 +683,7 @@ cc_remove() {
     rm -f "$inbox"/* "$inbox"/.[!.]* 2>/dev/null
     rmdir "$inbox" 2>/dev/null
     # the Stop guards' once-markers (2026-10-02): "<key>." never matches another key's ("k9." vs "k90.")
-    rm -f "$CC_GUARD_DIR/$1".* 2>/dev/null
-    # cc-send (2026-09-29): the requests this session made go with it, undelivered; stale ones too
-    cc_send_prune "$1" ;;
+    rm -f "$CC_GUARD_DIR/$1".* 2>/dev/null ;;
   esac
   # Worktree leases are per main checkout: only the files nothing can use (2026-09-29).
   cc_lease_prune

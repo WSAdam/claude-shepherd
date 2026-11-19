@@ -118,7 +118,7 @@ decision, a batch's grant) is a file bound to its request's nonce read from disk
 mailbox message, a notes request, a Stop guard). Each writer owns its own files: the hooks (`cc-status/`, a Stop guard's
 `cc-guard/<key>.<guard>`); the scripts sessions run (`cc-merge.sh` → `cc-merge/`, including the
 `<key>.notyet` a Not yet leaves; `cc-fleet.sh` → a batch's proposal; `cc-lesson.sh` → `cc-lesson/`;
-`cc-run.sh` → reports in `cc-run/`; `cc-ticket.sh`, `cc-send.sh`);
+`cc-run.sh` → reports in `cc-run/`; `cc-ticket.sh`);
 and the panel (decision and answer files, a batch's own state, `cc-main-green.json`,
 `cc-keep/`, checklist runs). **[DECISION D-6, revised]**
 
@@ -164,8 +164,8 @@ Shepherd leaves a session a `[shepherd]`-marked message in `~/.claude/cc-inbox/<
 hook hands the oldest over by blocking the turn's stop with it (never while `stop_hook_active`),
 a resumed or compacted session is shown what still waits, and an idle session is typed a one-line
 nudge only in kitty or a VS Code window of its own. In a shared window nothing is typed and the
-card says **1 message waiting**. Each message is claimed by rename, so it arrives once. `cc-send.sh`,
-tickets, late decision answers, the main moved notice and the driver's uncollected-answer mail all
+card says **1 message waiting**. Each message is claimed by rename, so it arrives once. Tickets,
+late decision answers, the main moved notice and the driver's uncollected-answer mail all
 travel this way.
 
 Each session **self-reports its editor** (`cc-status.sh` reads the env it inherits from `claude`),
@@ -509,12 +509,8 @@ ticket carries no text and stays immediate, but only a session it was offered to
 crossings shipped (2026-10-15) went through as they were. Limit: every session runs as the same Unix
 user, so one that writes another project's files directly (`cc-inbox`, a ticket file, a transcript)
 isn't stopped; every channel Shepherd provides is, and sessions are told not to route around a
-hold. cc-send between projects gets the same approval: a send from a Claude session to a session of
-another project waits on the sender's card, and with `--wait` its reply waits on the replying
-session's card before the sender sees it. Shepherd follows the reply itself, so the sender is never
-told where the other side's transcript is, and who sent a request is read from the CLI's process
-ancestry, never its environment. Same-project sends and Adam's own shell stay instant. Fleet batches
-from another repo's folder, cc-lesson and Claude Code's own SendMessage were left as they are.
+hold. (cc-send between projects got the same approval until cc-send was removed, 2026-11-19.) Fleet
+batches from another repo's folder, cc-lesson and Claude Code's own SendMessage were left as they are.
 **[DECISION D-27]**
 
 **Audit:** an append-only JSONL **ledger** (`~/.claude/cc-ledger/`; off in code, on in a fresh

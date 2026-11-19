@@ -4033,23 +4033,40 @@ do
         src:find('FX.INBOX_DIR = os.getenv("CC_INBOX_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-inbox")', 1, true) ~= nil)
 end
 
--- ---- cc-send requests are stepped every tick (2026-09-29) ----
--- Build program unit 30. tests/send.test.lua drives FX.stepSend itself; this pins that the tick runs
--- it, isolated in a pcall, AFTER the needs-you stamp it reads (a session waiting on Adam is never
--- picked), and that the delivery goes through the mailbox, never straight to a window.
+-- ---- cc-send is gone (2026-11-19) ----
+-- Adam, 2026-11-19: "prune features I have no use for". REQUIREMENT CHANGE: the 2026-09-29 pins here
+-- asserted the tick stepped cc-send requests. Gone with it: cc-send.sh (out of SHIPPED), ~/.claude/cc-send/
+-- (FX.SEND_DIR, FX.stepSend and its handlers, cc_send_prune), core's request and target parts
+-- (SEND, sendTarget, sendText, sendMarker...), and the crossings only cc-send made ("send" and
+-- "send-reply": FX.sendHold, crossPublishSend / Reply, crossFollow, sendFollowStep). Kept: the
+-- "deliver to a live session" helper (FX.deliverTo) and the live-session picker (FX.sendViews,
+-- core.sendCandidates / sendBlocked / sendRank), which tickets use, and the crossings of tickets.
 do
-  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
-  local src = f and f:read("*a") or ""
-  if f then f:close() end
-  local tick = src:match("function FX%._refreshBody%(%)(.-)\nend\n") or ""
-  local stamp, step = tick:find("FX.annotateNeedsYou(list)", 1, true), tick:find("pcall(FX.stepSend, list)", 1, true)
-  check("send: the tick steps cc-send requests, isolated in a pcall", step ~= nil)
-  check("send: ...after the needs-you stamp", stamp ~= nil and step ~= nil and step > stamp)
+  local function slurp(name)
+    local f = io.open(ROOT .. name, "r")
+    local s = f and f:read("*a") or ""
+    if f then f:close() end
+    return s
+  end
+  local src, lib, shipped = slurp("claude-dashboard.lua"), slurp("cc-lib.sh"), slurp("SHIPPED")
+  local okCore, core2 = pcall(dofile, ROOT .. "cc-core.lua")
+  check("no send: cc-send.sh isn't shipped, or in the checkout", not shipped:find("cc-send.sh", 1, true) and io.open(ROOT .. "cc-send.sh", "r") == nil)
+  check("no send: the tick steps no request", not src:find("FX.stepSend", 1, true) and not src:find("FX.SEND_DIR", 1, true)
+        and not src:find("FX.sendHandle", 1, true))
+  check("no send: the hooks keep no cc-send folder", not lib:find("CC_SEND_DIR", 1, true) and not lib:find("cc_send_prune", 1, true))
+  check("no send: no crossing of a send or its reply", not src:find("FX.sendHold", 1, true) and not src:find("FX.crossPublishSend", 1, true)
+        and not src:find("FX.crossFollow", 1, true) and not src:find('rec.kind == "send', 1, true))
+  check("no send: core keeps none of the request side", okCore and core2.SEND == nil and core2.sendTarget == nil and core2.sendText == nil
+        and core2.sendMarker == nil and core2.parseSendRequest == nil and core2.sendFollowStep == nil and core2.crossSendRecord == nil)
+  local keys = {}
+  for _, f in ipairs(okCore and core2.FEATURES or {}) do keys[f.key] = true end
+  check("no send: no cc-send in the feature list", okCore and not keys.send)
+  -- what stays (tickets use it)
   local deliver = src:match("function FX%.deliverTo%(it, text, meta%)(.-)\nend\n") or ""
-  check("send: a delivery goes through the mailbox (marked, ledgered, through the automation door)",
+  check("kept: a delivery goes through the mailbox (marked, ledgered, through the automation door)",
         deliver:find("FX.mailboxSend(it.key, text, meta)", 1, true) ~= nil and not deliver:find("pasteIntoWindow", 1, true))
-  check("send: FX.SEND_DIR reads CC_SEND_DIR, as cc-lib.sh does",
-        src:find('FX.SEND_DIR = os.getenv("CC_SEND_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-send")', 1, true) ~= nil)
+  check("kept: the live-session picker tickets use", src:find("\nfunction FX.sendViews(list)", 1, true) ~= nil
+        and okCore and type(core2.sendCandidates) == "function" and type(core2.sendBlocked) == "function")
 end
 
 -- ---- Cross-repo tickets are stepped every tick (2026-09-29) ----
@@ -4141,29 +4158,10 @@ do
   check("crossings: cc-ticket.sh never writes a ticket file itself (Shepherd publishes)",
         not ts:find('> "$CC_TICKETS_DIR', 1, true) and not ts:find('mv "$TMP" "$CC_TICKETS_DIR', 1, true))
   check("crossings: ...it leaves requests for Adam (cc_cross_request)", ts:find("cc_cross_request", 1, true) ~= nil)
-  -- unit 2 (cc-send): a send is held BEFORE anything is delivered, its answer names no path of the other
-  -- side, and only Adam's approval (FX.crossPublishSend) delivers it -- to the project he approved
-  local sh = src:match("function FX%.sendHandle%(owner, id, raw, views, reg, now%)(.-)\nend\n") or ""
-  local holdAt, deliverAt = sh:find("core.sendCrosses(", 1, true), sh:find("FX.deliverTo(it, core.sendText(", 1, true)
-  check("crossings: cc-send holds a send to another project before anything is delivered",
-        holdAt ~= nil and deliverAt ~= nil and holdAt < deliverAt)
-  check("crossings: ...the sender is the CLI's ancestry, picked before the target",
-        sh:find("local sender = FX.sendSender(req, views, reg)", 1, true) ~= nil
-        and sh:find("local sender = FX.sendSender(req, views, reg)", 1, true) < (sh:find("core.sendTarget(", 1, true) or 0))
-  local heldAnswer = sh:match("held = true, cid = rec%.cid(.-)%)") or "?"
-  check("crossings: ...and the held answer names no transcript, offset or mailbox",
-        sh:find("held = true, cid = rec.cid", 1, true) ~= nil and not heldAnswer:find("transcript", 1, true)
-        and not heldAnswer:find("offset", 1, true) and not heldAnswer:find("mailbox", 1, true))
-  local pub =src:match("function FX%.crossPublishSend%(rec, now%)(.-)\nend\n") or ""
-  check("crossings: an approved send goes only to a session of the project Adam approved",
-        pub:find("core.crossSendRetarget(", 1, true) ~= nil and pub:find("core.crossSendRetarget(", 1, true) < (pub:find("FX.deliverTo(", 1, true) or 0))
-  check("crossings: ...and its answer to the waiting CLI names no transcript path either",
-        not ((pub:match('FX%.crossAnswer%(rec%.cid, "answer",(.-)%)') or ""):find("transcript", 1, true)))
-  check("crossings: who sent it is read with one ps of every process", src:find('hs.execute("ps -A -o pid=,ppid=,comm= 2>/dev/null")', 1, true) ~= nil)
-  check("crossings: the reply is followed by Shepherd, walking lines with find (never a *-pattern over a torn read)",
-        (src:match("function FX%.crossFollow%(rec, now, tileOf%)(.-)\nend\n") or ""):find('chunk:find("\\n", pos, true)', 1, true) ~= nil)
-  check("crossings: the tick follows the replies and marks a send nobody can take",
-        step2:find("FX.crossFollow", 1, true) ~= nil and step2:find("rec._deliverable, rec._why = false", 1, true) ~= nil)
+  -- 2026-11-19: REQUIREMENT CHANGE -- unit 2's cc-send crossings (a send held before delivery, its
+  -- reply followed and held) went with cc-send; the tickets' crossings above are unchanged
+  check("crossings: the tick follows no send's reply any more", not step2:find("FX.crossFollow", 1, true)
+        and not step2:find("rec._deliverable", 1, true))
   check("crossings: the generic Approve/Deny lock on a card red only for its crossing",
         src:find('var crossOnly = !remote && it.needsYouSource === "cross"', 1, true) ~= nil
         and src:find("lockCtl(bap, crossOnly ? CROSS_LOCK_T", 1, true) ~= nil

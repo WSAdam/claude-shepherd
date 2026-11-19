@@ -8509,7 +8509,8 @@ do
   -- 2026-11-19: 60 -> 59, REQUIREMENT CHANGE: restarting the fleet in place ("restart", flagged new) was removed.
   -- 2026-11-19: 59 -> 58, REQUIREMENT CHANGE: Seance ("seance", flagged new) was removed.
   -- 2026-11-19: 58 -> 57, REQUIREMENT CHANGE: pinned links ("pins", flagged new) were removed.
-  eq("FEATURES: the 57 new features are flagged", newCount, 57)
+  -- 2026-11-19: 57 -> 56, REQUIREMENT CHANGE: cc-send ("send", flagged new) was removed.
+  eq("FEATURES: the 56 new features are flagged", newCount, 56)
   check("FEATURES: lists the Compare tab", keys.compare == true)
   check("FEATURES: lists crossings", keys.crossings == true)
   check("FEATURES: lists queue hold and the Queues view", keys.queuehold == true)
@@ -8536,7 +8537,7 @@ do
   check("FEATURES: lists On purpose", keys.onpurpose == true)
   check("FEATURES: lists task packets", keys.packets == true)
   check("FEATURES: no decisions inbox (removed 2026-11-19, REQUIREMENT CHANGE)", keys.decisions == nil)
-  check("FEATURES: lists cc-send", keys.send == true)
+  check("FEATURES: no cc-send (removed 2026-11-19, REQUIREMENT CHANGE)", keys.send == nil)
   check("FEATURES: lists the coverage index", keys.coverage == true)
   check("FEATURES: lists worktree leases", keys.leases == true)
   check("FEATURES: lists where the time went", keys.timelost == true)

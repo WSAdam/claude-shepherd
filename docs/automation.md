@@ -329,8 +329,8 @@ defaults), sessions compact earlier, and write their own notes first.
 
 Shepherd can leave a session a message instead of typing it into its window, so automation can
 reach a session that is mid-turn, or one in a VS Code window it shares with other Claude tabs. The
-entry point is `FX.mailboxSend(key, text, meta)`; [cc-send](#send-a-prompt-from-a-shell) is built
-on it, and is the way to try it from a terminal.
+entry point is `FX.mailboxSend(key, text, meta)`; [cross-repo tickets](#cross-repo-tickets) are
+built on it.
 
 - **Where it waits.** `~/.claude/cc-inbox/<session>/`, one file per message, named
   `<time>-<order>-<nonce>.msg` and written whole. Its first line is marked `[shepherd]`. A slash
@@ -360,60 +360,6 @@ on it, and is the way to try it from a terminal.
   forgotten or pruned. 🩺 Diagnostics counts the messages waiting, per session. The ledger records
   `mailbox_sent` and `mailbox_delivered` (`via`: `stop`, `start` or `typed`).
 
-## Send a prompt from a shell
-
-`~/.claude/cc-send.sh` hands a live session a prompt from any shell -- a script, a cron job, a
-terminal or another Claude session -- through the [session mailbox](#session-mailbox), and with
-`--wait` prints its reply.
-
-```bash
-~/.claude/cc-send.sh claude-instance-manager "Run make test and tell me the count." --wait
-reply="$(~/.claude/cc-send.sh ~/Programming/wgsUltra "Summarise what you changed today." --wait)"
-```
-
-- **The target.** A session: its key (the session id, its status file's name in
-  `~/.claude/cc-status/`) or its name -- the one Claude Code gives it, which other sessions message
-  it by, or its card's name. A project: its repo's root, a worktree's root, a folder inside one
-  (`.` works), or its name. A project gets its best live session: an idle one before a busy one
-  (then the most recently active), never one waiting on you (a question, a permission prompt, a
-  merge, a batch proposal or an error on its card), never one that has ended or lost its tab, and
-  never the session running the command (known by `CLAUDE_CODE_SESSION_ID`, or by its process
-  after a `/clear`). A name that fits two sessions or two projects is refused with the choices
-  listed: give a key or the repo root. A named session that can't take it is refused, saying why.
-- **How it arrives.** Through the mailbox, as `[shepherd] Message from <sender> via cc-send #<id>`
-  and then the prompt. A busy session gets it when its current turn ends and carries on with it; an
-  idle session in a kitty window or a VS Code window of its own gets it typed once it's ready; an
-  idle session in a VS Code window shared with other Claude tabs keeps it in its mailbox until its
-  next turn end or start. cc-send says which, on stderr. Slash commands are refused, and a prompt
-  is at most 3,500 bytes.
-- **`--wait`.** Follows the session's transcript from the moment the prompt was sent until the turn
-  that takes it ends, then prints that turn's last assistant text on stdout. Progress and errors go
-  to stderr, so `$(…)` captures just the reply. `--timeout <seconds>` (default 1800) bounds the
-  wait. A prompt handed over at a session's start is answered in that session's next turn.
-- **Between projects, you approve it.** A send from a Claude session to a session of **another**
-  project is a [crossing](#crossings): it waits on the sending session's card until you approve it
-  (edited if you like), and nothing reaches the other session before you do. Without `--wait`
-  cc-send says it's held and exits 0. With `--wait` it waits for your decision, then for the reply
-  -- Shepherd follows the other session's transcript itself and holds the reply on *that* session's
-  card for you too -- and prints only the reply you passed on. If its wait runs out, the reply
-  reaches the sender's mailbox once you pass it. Who sent it is read from cc-send's own process
-  ancestry, not its environment, so unsetting or borrowing a session id doesn't make it local. A
-  send held for a project with no live session reads as a heads-up on the card, and Approve waits
-  until one is there. Sends within one project, and from your own terminal, go at once as above.
-- **Exit codes.** 0 sent, or held for your approval (with `--wait`: answered) · 2 refused (the
-  arguments, an empty prompt, a slash command, too long, no such folder) · 3 no session to send it
-  to (none, ambiguous, waiting on you, ended, or yourself) · 4 `--wait` ran out · 5 no reply to
-  print (the turn was interrupted or died on an API error, or there is no transcript to follow) ·
-  6 Shepherd isn't running, or didn't take the request within 30 seconds (it is then withdrawn, so
-  it can't arrive later) · 7 you kept it, or its reply, back (your note on stderr).
-- **Under the hood.** cc-send leaves a request in `~/.claude/cc-send/`; each tick Shepherd claims
-  it, picks the session (`core.sendTarget`), hands it the prompt (`FX.deliverTo`) and answers with
-  where it went and where to read the reply. A request goes with the session that made it, and
-  anything left over is pruned after 10 minutes. The ledger records `send_delivered` (the session,
-  the request id, the sender and the route) and `send_refused`, besides the mailbox's own
-  `mailbox_sent`. With [dry run](#dry-run-and-the-automation-trace) on for the mailbox, nothing is
-  delivered and cc-send says so.
-
 ## Cross-repo tickets
 
 A session that needs something done in **another** repo -- a fix, a release, an answer only that
@@ -430,8 +376,7 @@ id=$(~/.claude/cc-ticket.sh file --repo ~/Programming/parser --title "Bump to 2.
 
 - **Filing.** `--repo` is a repo's root (or any folder in it, or one of its worktrees) or its name,
   looked up among the sessions Shepherd knows; a name two repos share is refused with both roots
-  listed. A ticket is for another repo: a session's own repo is refused (hand one of your own
-  sessions a prompt with [cc-send](#send-a-prompt-from-a-shell)). The title is one line of at most
+  listed. A ticket is for another repo: a session's own repo is refused. The title is one line of at most
   200 bytes, the body at most 2,500 bytes. `file` prints only the ticket's id on stdout. The
   ticket isn't filed until you approve it: until then only its filer sees it (`show`, `list`,
   `wait`, and `close` withdraws it).
@@ -477,7 +422,7 @@ id=$(~/.claude/cc-ticket.sh file --repo ~/Programming/parser --title "Bump to 2.
   you approve its filing. Every writer changes it the same way: the CLI, SessionStart, both removers
   and Shepherd each claim the file by renaming it, write the changed ticket whole into place, then
   drop the claim. When two writers race, one rename wins and the others wait their turn. Delivery is
-  cc-send's `FX.deliverTo`. A session that ends puts back the tickets it held, and keeps the ones it
+  `FX.deliverTo`, through the session mailbox. A session that ends puts back the tickets it held, and keeps the ones it
   filed for its next start. Closed tickets are pruned after a week, and any ticket after 30 days.
   The ledger records `crossing_requested` (the CLI), `ticket_filed` and `ticket_closed` (Shepherd,
   when it publishes them), `ticket_taken`, `ticket_offered`, `ticket_reclaimed`, `ticket_news` and

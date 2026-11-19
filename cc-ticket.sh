@@ -332,7 +332,7 @@ file)
   esac
   MINE="$(my_project)"
   [ "$TO" != "$MINE" ] && [ "$TO" != "$(cc_repo_root "$PWD")" ] \
-    || refuse "$TO is this session's own repo -- a ticket is work for ANOTHER repo's sessions (hand one of your own a prompt with cc-send.sh)"
+    || refuse "$TO is this session's own repo -- a ticket is work for ANOTHER repo's sessions"
 
   ID="t$(now)-$$$RANDOM"
   FIELDS="$(jq -nc --arg id "$ID" --arg title "$TITLE" --arg body "$BODY" --arg mine "$MINE" --arg to "$TO" \

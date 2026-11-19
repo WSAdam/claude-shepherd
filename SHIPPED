@@ -11,7 +11,6 @@ cc-merge.sh           claude
 cc-fleet.sh           claude
 cc-lesson.sh          claude
 cc-run.sh             claude
-cc-send.sh            claude
 cc-ticket.sh          claude
 cc-ask.sh             claude hook
 cc-commits.sh         claude

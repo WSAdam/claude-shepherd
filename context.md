@@ -22,7 +22,7 @@ entries):
 - **Feeding work:** task queues with auto-feed and routing, routines (cron spawns, digests, the
   main-green check), event rules, auto-continue with back-off, resume at a usage-limit reset,
   auto-respawn with handoff notes, auto-compact with notes, task packets.
-- **Steering without keystrokes:** the session mailbox, `cc-send.sh`, cross-repo tickets,
+- **Steering without keystrokes:** the session mailbox, cross-repo tickets,
   AskUserQuestion answered on the card, the Stop guards.
 - **Safety:** the opt-in approval gate and policy bundles, always-ask commands, the
   worktree fence, one worktree per agent.
@@ -96,7 +96,7 @@ Single user, no server, no accounts. Records store env-var names, never secrets.
   `stop_hook_active`, in Shepherd's own internal runs, or when the panel heartbeat is stale. The
   guards are off in code and on in `defaults/`.
 - **Scripts sessions run themselves:** `cc-merge.sh` (ready to merge), `cc-fleet.sh` (batches),
-  `cc-lesson.sh`, `cc-run.sh`, `cc-send.sh`, `cc-ticket.sh`; plus
+  `cc-lesson.sh`, `cc-run.sh`, `cc-ticket.sh`; plus
   `cc-commits.sh` (commit stats) and `cc-scrub.js` (transcript scrubber). Shared bash helpers are
   in `cc-lib.sh`.
 - **[SHIPPED](SHIPPED)** is the one list of shipped files: `install.sh`, `uninstall.sh`, the
@@ -314,13 +314,9 @@ git history of `todos.md` and `docs/feature-mining/*`.
   Adam's Approve (`FX.crossDecide`) is the only publisher, and a Deny tells the session his note.
   Only the filer, the holder and the ticket's repo can take or show a ticket. Code:
   `core.cross*` (the Crossings block after the tickets block), `FX.stepCrossings` / `FX.crossDecide`
-  in the dashboard, `cc_cross_*` and `cc_session_project` in cc-lib.sh. cc-send between projects is
-  held the same way (`FX.sendHold`): the sender is the CLI's process ancestry (`FX.sendSender`,
-  `core.ancestorSession`), Adam's Approve delivers (`FX.crossPublishSend`), Shepherd follows the
-  reply (`FX.crossFollow`, `core.sendFollowStep` -- the Lua twin of cc-send.sh's jq reducer) and
-  holds it on the replier's card, and the waiting CLI reads `cc-cross/<cid>.answer` /
-  `.reply.answer` (exit 7 on a Deny). Fleet, cc-lesson and Claude Code's SendMessage were left as
-  they are.
+  in the dashboard, `cc_cross_*` and `cc_session_project` in cc-lib.sh. cc-send between projects was
+  held the same way until cc-send was removed (2026-11-19). Fleet, cc-lesson and Claude Code's
+  SendMessage were left as they are.
 - **Fixes after the 2026-10-13 push**: a permission prompt in a shared window reads Needs you, the
   bulk bar counts only what it can do there, and CI runs green on Linux again.
 
@@ -364,8 +360,8 @@ each unit a worktree that Shepherd merged on a green gate. The
 
 - Cards: turn labels, the working-on line, Running N jobs, pinned links (`cc-pin.sh`; removed 2026-11-19), the
   scheduled-tasks lock check, API errors and usage limits read as errors.
-- Reaching a session: the session mailbox, `cc-send.sh`, tickets (`cc-ticket.sh`). (Restart fleet
-  in place and the decisions inbox, `cc-decide.sh` and ☰ → 📥 Inbox, were removed 2026-11-19.)
+- Reaching a session: the session mailbox, tickets (`cc-ticket.sh`). (Restart fleet in place,
+  `cc-send.sh` and the decisions inbox, `cc-decide.sh` and ☰ → 📥 Inbox, were removed 2026-11-19.)
 - Automation: readiness before typing, the automation door with dry run and the ⚡ Trace,
   auto-continue back-off, resume at the limit reset (`cc-resume.sh`), handoff notes, auto-compact with
   notes, task packets, the coach.

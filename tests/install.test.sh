@@ -84,9 +84,8 @@ assert_json "...async, with asyncRewake" "$CDIR/settings.json" \
 assert_json "...and every error still reaches cc-status.sh first" "$CDIR/settings.json" \
   '.hooks.StopFailure[0].hooks[0].command | endswith("cc-status.sh\" stopfailure")' "true"
 exists "copies cc-resume.sh -> claude dir" "$CDIR/cc-resume.sh"
-# 2026-09-29: cc-send.sh -- a prompt for a live session, from any shell (a command, not a hook)
-exists "copies cc-send.sh -> claude dir" "$CDIR/cc-send.sh"
-assert_eq "...and wires it to no hook" "0" "$(grep -c 'cc-send.sh' "$CDIR/settings.json")"
+# 2026-11-19: REQUIREMENT CHANGE -- cc-send.sh was removed: it is no longer copied, or wired
+assert_eq "cc-send.sh isn't copied any more" "gone" "$([ -e "$CDIR/cc-send.sh" ] && echo there || echo gone)"
 # 2026-09-29: cc-ticket.sh -- cross-repo tickets (a command, not a hook)
 exists "copies cc-ticket.sh -> claude dir" "$CDIR/cc-ticket.sh"
 assert_eq "...and wires it to no hook" "0" "$(grep -c 'cc-ticket.sh' "$CDIR/settings.json")"
