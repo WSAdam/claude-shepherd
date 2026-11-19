@@ -28,6 +28,8 @@ local function finish() print("-- overlap.test.lua: " .. run .. " run, " .. fail
 local function join(t) return table.concat(t or {}, ",") end
 
 -- ---- blockedBy, covers and packet in a batch file (2026-09-29) ----
+-- 2026-11-19, REQUIREMENT CHANGE: task packets were removed. A unit that names a packet still parses,
+-- and the field is ignored: not kept, not shown, not in the unit's message, and never refused.
 -- A proposal as cc-fleet.sh writes it; `units` overrides the three default units.
 local function bj(units, over)
   local t = { v = 1, id = "b1757", nonce = "n1", driver = { session_id = "drv", pid = "4242", name = "repo-drv" },
@@ -51,7 +53,7 @@ do
   if not b then finish() end
   eq("batch: a unit keeps its blockers", join(b.units[2].blockedBy), "alpha")
   eq("batch: ...and what it covers", join(b.units[2].covers), "BUG-3,REQ-001")
-  eq("batch: ...and its packet", b.units[2].packet, "p1")
+  eq("batch: ...but not its packet (ignored since 2026-11-19)", b.units[2].packet, nil)
   eq("batch: a unit with no blockers has an empty list", #b.units[1].blockedBy, 0)
   check("batch: ...and no covers or packet", b.units[1].covers == nil and b.units[1].packet == nil)
 
@@ -76,7 +78,8 @@ do
   local badCovers = unit("alpha"); badCovers.covers = "BUG-3"
   check("batch: refuses covers that aren't a list", core.parseBatch(bj({ badCovers })) == nil)
   local badPacket = unit("alpha"); badPacket.packet = "p1; rm -rf /"
-  check("batch: refuses a packet id with shell characters in it", core.parseBatch(bj({ badPacket })) == nil)
+  local bp = core.parseBatch(bj({ badPacket }))
+  check("batch: a unit's packet field is ignored, whatever it holds (2026-11-19)", bp ~= nil and bp.units[1].packet == nil)
 
   eq("order: no problem in a chain", core.batchOrderProblem(b.units), nil)
   local why = core.batchOrderProblem({ unit("alpha"), unit("beta", { "zeta" }) })
@@ -151,14 +154,14 @@ do
   local v = core.batchView(b, grant, st({}))
   eq("view: a unit shows its blockers", join(v.units[2].blockedBy), "alpha")
   eq("view: ...and that it waits", v.units[2].note, "waits for alpha")
-  eq("view: ...what it covers and its packet", join(v.units[2].covers) .. " " .. tostring(v.units[2].packet), "BUG-3,REQ-001 p1")
+  eq("view: ...what it covers, and no packet", join(v.units[2].covers) .. " " .. tostring(v.units[2].packet), "BUG-3,REQ-001 nil")
   v = core.batchView(b, grant, blockedAlpha)
   eq("view: a unit behind a blocked one says so", v.units[3].note, "blocked by a blocked unit (alpha)")
   eq("view: ...and is in the blocked bucket", v.units[3].outcome, "blocked")
 
   local msg = core.fleetUnitMessage(b, b.units[2])
   check("unit message: says what it comes after", msg:find("feat/alpha", 1, true) ~= nil)
-  check("unit message: ...what it covers and its packet", msg:find("BUG-3, REQ-001", 1, true) and msg:find("p1", 1, true))
+  check("unit message: ...what it covers, and no packet", msg:find("BUG-3, REQ-001", 1, true) and not msg:find("packet", 1, true))
   local msg1 = core.fleetUnitMessage(b, b.units[1])
   check("unit message: a unit with nothing of the kind says nothing about it",
         not msg1:find("comes after", 1, true) and not msg1:find("covers", 1, true))

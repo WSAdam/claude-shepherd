@@ -44,9 +44,7 @@ assert_eq "the project's merge order is esc()'d"            "yes" "$(has 'esc(p.
 # which is a file on disk all the same
 assert_eq "a lease's port is esc()'d"                     "yes" "$(has 'esc(String(ls.port))')"
 assert_eq "a lease's tooltip (its database path) is esc()'d" "yes" "$(has "title=\"'+esc(leaseTitle(ls))+'\"")"
-# task packets (2026-09-29): a moved packet's line names cited paths, which anyone can type; it
-# rides meta (esc()'d). (The Queue tab's + Packet form, whose result was set as text, was pruned 2026-11-17.)
-assert_eq "a moved packet's line rides the esc()'d meta"   "yes" "$(has 'if(it.packetMoved){ meta = (meta ? meta + " · " : "") + "📦 " + it.packetMoved; }')"
+# (2026-11-19: the moved task packet's meta pin went with task packets.)
 # (2026-11-19: the decisions inbox's esc() pins went with the Inbox and its inboxRowsHtml.)
 # the Compare tab (2026-10-27; it replaced the Requirements tab, whose rq.* checks went with it): a
 # login is typed by hand, a repo name and an error come back from GitHub -- compareHtml escapes each

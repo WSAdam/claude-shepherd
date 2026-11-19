@@ -21,7 +21,7 @@ entries):
 
 - **Feeding work:** task queues with auto-feed and routing, routines (cron spawns, digests, the
   main-green check), event rules, auto-continue with back-off,
-  auto-respawn with handoff notes, auto-compact with notes, task packets.
+  auto-respawn with handoff notes, auto-compact with notes.
 - **Steering without keystrokes:** the session mailbox, cross-repo tickets,
   AskUserQuestion answered on the card, the Stop guards.
 - **Safety:** the opt-in approval gate and policy bundles, always-ask commands, the
@@ -360,7 +360,7 @@ each unit a worktree that Shepherd merged on a green gate. The
   `cc-send.sh` and the decisions inbox, `cc-decide.sh` and ☰ → 📥 Inbox, were removed 2026-11-19.)
 - Automation: readiness before typing, the automation door with dry run and the ⚡ Trace,
   auto-continue back-off, handoff notes, auto-compact with
-  notes, task packets, the coach.
+  notes, the coach.
 - Safety: always-ask commands, the worktree fence, `cc-worktree-guard.sh`.
 - Merging: merge hardening (markers, clean main, stash count), the merge checker, the red-first proof,
   the repo-declared gate, REQ ids and merge receipts, the batch relay (`cc-fleet.sh wait`), the overlap

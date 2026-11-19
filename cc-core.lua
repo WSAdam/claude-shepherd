@@ -4718,20 +4718,18 @@ local function batchSlugOk(s)
      and not s:find("..", 1, true) and not s:match("%.$") and not s:match("%.lock$")
 end
 
--- ---- blockedBy, covers and packet (2026-09-29, build program unit 24) ----
--- Three OPTIONAL unit fields, threaded through cc-fleet.sh's check and projection, parseBatch,
+-- ---- blockedBy and covers (2026-09-29, build program unit 24) ----
+-- Two OPTIONAL unit fields, threaded through cc-fleet.sh's check and projection, parseBatch,
 -- batchView and fleetUnitMessage. blockedBy = the slugs of the units this one waits for: its tab
 -- opens, and its merge is ready, only once every one of them has merged. covers = the issue ids
--- the unit covers (unit 25 reads them); packet = the id of its task packet (unit 26). A batch
--- file written before them has none of the three and parses exactly as it did.
+-- the unit covers (unit 25 reads them). A batch file written before them has neither and parses
+-- exactly as it did. (A third, packet -- a task packet's id -- went with task packets on
+-- 2026-11-19: a unit that still names one parses, and the field is ignored.)
 M.BATCH_MAX_BLOCKERS = 8
 M.BATCH_MAX_COVERS = 50
 
 local function batchCoverOk(s)
   return type(s) == "string" and #s <= 60 and s:match("^[%w#][%w._:#/-]*$") ~= nil
-end
-local function batchPacketOk(s)
-  return type(s) == "string" and #s <= 40 and s:match("^[%w][%w._-]*$") ~= nil
 end
 -- A JSON list of strings that each pass `ok`, deduped in order; nil when it isn't one.
 local function batchStringList(t, ok, max)
@@ -5213,12 +5211,11 @@ function M.parseBatch(raw)
       covers = batchStringList(u.covers, batchCoverOk, M.BATCH_MAX_COVERS)
       if not covers then return nil end
     end
-    if u.packet ~= nil and not batchPacketOk(u.packet) then return nil end
     -- 2026-10-03 (mining round 2, E3): the brief pre-flight reads the whole brief, once per file
     local task = capChars(u.task, 4000)
     local scan = M.briefScan(task)
     units[#units + 1] = { type = u.type, slug = u.slug, branch = u.branch, task = task,
-                          blockedBy = blockedBy, covers = covers, packet = u.packet,
+                          blockedBy = blockedBy, covers = covers,
                           flags = scan.flags, cites = scan.cites }
   end
   if M.batchOrderProblem(units) then return nil end
@@ -5345,9 +5342,9 @@ end
 
 -- What the driver sends a unit's tab: the New worktree tab prompt, the task, how to finish, and
 -- who to report to. With the unit worktree's lease (2026-09-29), the prompt states it.
-function M.fleetUnitMessage(batch, unit, lease, packet)
+function M.fleetUnitMessage(batch, unit, lease)
   local who = (batch.driver.name ~= "" and batch.driver.name) or "the session that sent this"
-  -- 2026-09-29: what it comes after, what it covers and its packet, when the batch says so
+  -- 2026-09-29: what it comes after and what it covers, when the batch says so
   local extra = {}
   if type(unit.blockedBy) == "table" and #unit.blockedBy > 0 then
     local after = {}
@@ -5360,11 +5357,6 @@ function M.fleetUnitMessage(batch, unit, lease, packet)
   end
   if type(unit.covers) == "table" and #unit.covers > 0 then
     extra[#extra + 1] = "It covers: " .. table.concat(unit.covers, ", ") .. "."
-  end
-  if type(unit.packet) == "string" and unit.packet ~= "" then
-    -- 2026-09-29 (unit 26): with the packet itself, its evidence, checked unchanged before the tab opened
-    extra[#extra + 1] = "Its task packet: " .. unit.packet .. "."
-      .. ((type(packet) == "table") and ("\n\n" .. M.renderPacket(packet)) or "")
   end
   -- after the task, outside worktreeTabPrompt's 4000-character cap, so a full task can't cut them
   return M.worktreeTabPrompt({ branch = unit.branch, slug = unit.slug }, "Task: " .. unit.task, lease)
@@ -5513,9 +5505,9 @@ function M.batchView(batch, grant, state)
                           opening = us.opening and true or nil,
                           result = type(us.result) == "string" and capChars(us.result, 40) or nil,
                           outcome = outcome, note = note,
-                          -- 2026-09-29: the batch's own word on order, coverage and packet
+                          -- 2026-09-29: the batch's own word on order and coverage
                           blockedBy = (type(u.blockedBy) == "table" and #u.blockedBy > 0) and u.blockedBy or nil,
-                          covers = u.covers, packet = u.packet }
+                          covers = u.covers }
   end
   local v = { id = batch.id, title = batch.title, repo = folder, phase = phase, units = units,
               mergeWhenGreen = batch.mergeWhenGreen, grantMerge = grant.grantMerge and true or nil,
@@ -10814,351 +10806,28 @@ function M.shouldFeed(prev, cur, q, autoOn)
   return cur == "done" and prev ~= nil and prev ~= "done"
 end
 
--- ---- Task packets (2026-09-29, build program unit 26) ------------------------
--- A queued task can carry its evidence: the task, `path:line[-line]` snippets captured with the
--- sha they were read at, repro steps and done-when. Packets live in <qk>.packets.json next to the
--- queue file; the queue holds an `@packet:pN <title>` token in their place. At feed time the panel
--- re-reads every cited range at the TARGET worktree's HEAD, in the background, and feeds only while
--- each one is still exactly what was captured -- otherwise the card says "cited code moved".
-M.PACKET_MAX_CITES = 8
-M.PACKET_MAX_CITE_LINES = 80
-M.PACKET_MAX_TEXT = 4000        -- the task, the repro and done-when, each
-M.PACKET_MAX_TITLE = 80
-M.PACKETS_MAX = 100             -- per queue; a full store drops its oldest packet the queue doesn't hold
-M.PACKET_FRESH_SECONDS = 5      -- a verdict stands this long when HEAD can't be read from the files
-M.PACKET_RETRY_SECONDS = 30     -- a read that failed is tried again after this
-
--- Reads HEAD's sha, then each cited range at that sha, length-prefixed. Run as
--- `/bin/sh -c SCRIPT sh <root> <path> <from> <to> ...`: every value is its own argv word, so
--- nothing is quoted. The ranges are integers core.parseCite checked; a path follows `<sha>:`.
-M.PACKET_READ_SH = [[
-export GIT_OPTIONAL_LOCKS=0
-root=$1; shift
-cd "$root" 2>/dev/null || { echo "no folder $root" >&2; exit 3; }
-sha=$(git rev-parse --verify -q HEAD) || { echo "not a git checkout with a commit" >&2; exit 4; }
-t=$(mktemp) || exit 5
-trap 'rm -f "$t"' EXIT
-printf 'HEAD %s\n' "$sha"
-while [ $# -ge 3 ]; do
-  if [ "$(git cat-file -t "$sha:$1" 2>/dev/null)" = blob ]; then
-    git cat-file blob "$sha:$1" | sed -n "$2,$3p" > "$t"
-    printf 'CITE ok %s\n' "$(wc -c < "$t" | tr -d ' ')"
-    cat "$t"
-  else
-    printf 'CITE missing 0\n'
-  fi
-  shift 3
-done
-]]
-
-function M.packetsFileName(qk) return tostring(qk) .. ".packets.json" end
-
-do
-  local function trimmed(s) return (tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", "")) end
-  local function oneLine(s) return trimmed(tostring(s or ""):gsub("%s+", " ")) end
-  local function sha7(s) return tostring(s or ""):sub(1, 7) end
-
-  -- "path:line" or "path:from-to", relative to the repo root -> { path, from, to }; nil, why.
-  function M.parseCite(s)
-    s = trimmed(s)
-    if s == "" then return nil, "an empty cite" end
-    if s:find("%c") then return nil, "a cite can't hold control characters" end
-    local path, a, b = s:match("^(.-):(%d+)%-(%d+)$")
-    if not path then path, a = s:match("^(.-):(%d+)$"); b = a end
-    if not path or path == "" or path:find(":", 1, true) then
-      return nil, "'" .. s .. "' isn't path:line or path:from-to"
-    end
-    if path:sub(1, 1) == "/" or path:sub(1, 1) == "-" then
-      return nil, "'" .. path .. "' has to be a path relative to the repo root"
-    end
-    for seg in (path .. "/"):gmatch("([^/]*)/") do
-      if seg == "" or seg == "." or seg == ".." then return nil, "'" .. path .. "' has to be a plain path inside the repo" end
-    end
-    local from, to = tonumber(a), tonumber(b)
-    if from < 1 or to < from then return nil, "'" .. s .. "': lines count from 1, first to last" end
-    if to - from + 1 > M.PACKET_MAX_CITE_LINES then
-      return nil, "'" .. s .. "' spans more than " .. M.PACKET_MAX_CITE_LINES .. " lines"
-    end
-    return { path = path, from = from, to = to }
+-- ---- A checkout's HEAD, read from its files (FX.gitHead) ---------------------
+-- (These lived with task packets, removed 2026-11-19; the scheduled-tasks lock check reads HEAD with them.)
+-- HEAD's file -> "ref", "refs/..." | "sha", sha; nil for anything else.
+function M.headRef(content)
+  if type(content) ~= "string" then return nil end
+  local ref = content:match("^ref:%s*(refs/%S+)%s*$")
+  if ref and not ref:find("..", 1, true) then return "ref", ref end
+  local sha = content:match("^(%x+)%s*$")
+  if sha and (#sha == 40 or #sha == 64) then return "sha", sha:lower() end
+  return nil
+end
+function M.packedRefSha(packed, ref)
+  packed = tostring(packed or "")
+  local pos, n = 1, #packed
+  while pos <= n do
+    local nl = packed:find("\n", pos, true) or (n + 1)
+    local line = packed:sub(pos, nl - 1)
+    local sha, name = line:match("^(%x+) (%S+)%s*$")
+    if sha and name == ref and (#sha == 40 or #sha == 64) then return sha:lower() end
+    pos = nl + 1
   end
-
-  function M.citeLabel(c)
-    if c.from == c.to then return c.path .. ":" .. c.from end
-    return c.path .. ":" .. c.from .. "-" .. c.to
-  end
-
-  -- One cite per line (blanks skipped, a repeat kept once) -> a list; nil, why when any is bad.
-  function M.parseCites(text)
-    local out, seen = {}, {}
-    for line in (tostring(text or "") .. "\n"):gmatch("([^\n]*)\n") do
-      if not line:match("^%s*$") then
-        local c, why = M.parseCite(line)
-        if not c then return nil, why end
-        local label = M.citeLabel(c)
-        if not seen[label] then seen[label] = true; out[#out + 1] = c end
-      end
-    end
-    if #out > M.PACKET_MAX_CITES then return nil, "a packet cites at most " .. M.PACKET_MAX_CITES .. " ranges" end
-    return out
-  end
-
-  -- The queue's stand-in for a packet, and back. The token may sit under @all:/@any: and @role:.
-  function M.packetToken(id, title)
-    title = oneLine(title):sub(1, M.PACKET_MAX_TITLE)
-    return "@packet:" .. id .. (title ~= "" and (" " .. title) or "")
-  end
-  function M.packetRef(task)
-    local _, afterBarrier = M.taskBarrier(tostring(task or ""))
-    local _, bare = M.taskRoute(afterBarrier)
-    bare = bare:gsub("^%s+", "")
-    local id, title = bare:match("^@packet:(p%d+)%s+(.*)$")
-    if not id then id = bare:match("^@packet:(p%d+)%s*$"); title = "" end
-    if not id then return nil end
-    return id, trimmed(title)
-  end
-  -- The packet ids a queue's tasks refer to (a set).
-  function M.packetIdsIn(tasks)
-    local ids = {}
-    for _, t in ipairs(type(tasks) == "table" and tasks or {}) do
-      local id = M.packetRef(M.queueText(t))
-      if id then ids[id] = true end
-    end
-    return ids
-  end
-
-  function M.packetReadArgv(root, cites)
-    local argv = { "-c", M.PACKET_READ_SH, "sh", tostring(root) }
-    for _, c in ipairs(cites or {}) do
-      argv[#argv + 1] = c.path; argv[#argv + 1] = tostring(c.from); argv[#argv + 1] = tostring(c.to)
-    end
-    return argv
-  end
-
-  -- The read script's output for n cites -> { head, cites = { {text} | {missing = true} } }; nil
-  -- when it is torn, short or long (the verdict is only ever drawn from a whole read).
-  function M.parsePacketRead(out, n)
-    if type(out) ~= "string" then return nil end
-    local head, pos = out:match("^HEAD (%x+)\n()")
-    if not head or (#head ~= 40 and #head ~= 64) then return nil end
-    local cites = {}
-    for i = 1, tonumber(n) or 0 do
-      local kind, size, at = out:match("^CITE (%a+) (%d+)\n()", pos)
-      if not kind then return nil end
-      size = tonumber(size)
-      if kind == "ok" then
-        if at + size - 1 > #out then return nil end
-        cites[i] = { text = out:sub(at, at + size - 1) }
-        pos = at + size
-      elseif kind == "missing" then
-        cites[i] = { missing = true }
-        pos = at
-      else
-        return nil
-      end
-    end
-    if pos <= #out then return nil end
-    return { head = head:lower(), cites = cites }
-  end
-
-  -- Lines from..to of a text (a plain find walk: the text may end mid-line).
-  function M.packetSlice(text, from, to)
-    text = tostring(text or "")
-    local out, i, pos, n = {}, 1, 1, #text
-    while pos <= n and i <= to do
-      local nl = text:find("\n", pos, true)
-      local stop = nl or n
-      if i >= from then out[#out + 1] = text:sub(pos, stop) end
-      pos, i = stop + 1, i + 1
-    end
-    return table.concat(out)
-  end
-  function M.packetLineCount(text)
-    text = tostring(text or "")
-    if text == "" then return 0 end
-    local _, n = text:gsub("\n", "")
-    if text:sub(-1) ~= "\n" then n = n + 1 end
-    return n
-  end
-
-  local function citeOk(c)
-    return type(c) == "table" and type(c.path) == "string" and M.parseCite(c.path .. ":" .. tostring(c.from) .. "-" .. tostring(c.to)) ~= nil
-      and type(c.sha) == "string" and type(c.text) == "string"
-  end
-  local function packetOk(p)
-    if type(p) ~= "table" or type(p.task) ~= "string" or p.task == "" then return false end
-    if p.cites ~= nil and type(p.cites) ~= "table" then return false end
-    for _, c in ipairs(p.cites or {}) do if not citeOk(c) then return false end end
-    return true
-  end
-
-  -- The store as parsePackets keeps it: { v = 1, next = N, packets = { [id] = packet } }. Nothing
-  -- on disk is an empty store; nil when the file doesn't decode (the panel backs it up first).
-  function M.parsePackets(raw)
-    if raw == nil or raw == "" then return { v = 1, next = 1, packets = {} } end
-    local ok, t = pcall(function() return M.json.decode(raw) end)
-    if not ok or type(t) ~= "table" then return nil end
-    local store = { v = 1, next = math.max(1, math.floor(tonumber(t.next) or 1)), packets = {} }
-    for id, p in pairs(type(t.packets) == "table" and t.packets or {}) do
-      if type(id) == "string" and id:match("^p%d+$") and packetOk(p) then
-        store.packets[id] = { id = id, title = type(p.title) == "string" and p.title or "", task = p.task,
-          cites = p.cites or {}, repro = type(p.repro) == "string" and p.repro or nil,
-          doneWhen = type(p.doneWhen) == "string" and p.doneWhen or nil, at = tonumber(p.at) or 0 }
-        local n = tonumber(id:sub(2))
-        if n >= store.next then store.next = n + 1 end
-      end
-    end
-    return store
-  end
-
-  -- Save a packet: fields {title, task, repro, doneWhen}, its parsed cites, and the read of them
-  -- at the session's HEAD. -> newStore, id; nil, why. `keep` = the ids the queue still holds,
-  -- which a full store never drops.
-  function M.packetNew(store, fields, cites, read, now, keep)
-    store = type(store) == "table" and store or M.parsePackets(nil)
-    fields = type(fields) == "table" and fields or {}
-    local task = trimmed(fields.task)
-    if task == "" then return nil, "a packet needs its task" end
-    for _, k in ipairs({ "task", "repro", "doneWhen" }) do
-      if #tostring(fields[k] or "") > M.PACKET_MAX_TEXT then
-        return nil, "its " .. (k == "doneWhen" and "done-when" or k) .. " is over " .. M.PACKET_MAX_TEXT .. " characters"
-      end
-    end
-    cites = cites or {}
-    if type(read) ~= "table" or type(read.cites) ~= "table" or #read.cites ~= #cites then
-      return nil, "the cited code couldn't be read"
-    end
-    local saved = {}
-    for i, c in ipairs(cites) do
-      local r = read.cites[i]
-      if r.missing then return nil, c.path .. " isn't a file in the repo at " .. sha7(read.head) end
-      if M.packetLineCount(r.text) < c.to - c.from + 1 then
-        return nil, M.citeLabel(c) .. " runs past the end of the file at " .. sha7(read.head)
-      end
-      saved[i] = { path = c.path, from = c.from, to = c.to, sha = read.head, text = r.text }
-    end
-    local title = oneLine(fields.title)
-    if title == "" then title = oneLine(task:match("^[^\n]*")) end
-    title = title:sub(1, M.PACKET_MAX_TITLE)
-    local packets, count = {}, 0
-    for id, p in pairs(store.packets or {}) do packets[id] = p; count = count + 1 end
-    while count >= M.PACKETS_MAX do
-      local oldest, oldestN
-      for id in pairs(packets) do
-        local n = tonumber(id:sub(2)) or 0
-        if not (keep and keep[id]) and (not oldestN or n < oldestN) then oldest, oldestN = id, n end
-      end
-      if not oldest then return nil, "the packet store is full (" .. M.PACKETS_MAX .. " packets, all still queued)" end
-      packets[oldest] = nil; count = count - 1
-    end
-    local nextN = math.max(1, math.floor(tonumber(store.next) or 1))
-    local id = "p" .. nextN
-    local repro, doneWhen = trimmed(fields.repro), trimmed(fields.doneWhen)
-    packets[id] = { id = id, title = title, task = task, cites = saved, at = tonumber(now) or 0,
-                    repro = repro ~= "" and repro or nil, doneWhen = doneWhen ~= "" and doneWhen or nil }
-    return { v = 1, next = nextN + 1, packets = packets }, id
-  end
-
-  function M.packetRemove(store, id)
-    local packets = {}
-    for k, p in pairs(type(store) == "table" and store.packets or {}) do if k ~= id then packets[k] = p end end
-    return { v = 1, next = type(store) == "table" and store.next or 1, packets = packets }
-  end
-
-  -- The cites whose lines are no longer what was captured, against a read at the target's HEAD:
-  -- { {label, why = "changed" | "gone"} }, empty when nothing moved; nil when the read doesn't fit.
-  function M.packetDrift(packet, read)
-    local cites = type(packet) == "table" and type(packet.cites) == "table" and packet.cites or {}
-    if type(read) ~= "table" or type(read.cites) ~= "table" or #read.cites ~= #cites then return nil end
-    local moved = {}
-    for i, c in ipairs(cites) do
-      local r = read.cites[i]
-      if r.missing then moved[#moved + 1] = { label = M.citeLabel(c), why = "gone" }
-      elseif r.text ~= c.text then moved[#moved + 1] = { label = M.citeLabel(c), why = "changed" } end
-    end
-    return moved
-  end
-
-  function M.packetMovedLine(moved)
-    local labels = {}
-    for i = 1, math.min(2, #moved) do labels[i] = moved[i].label end
-    return "cited code moved: " .. table.concat(labels, ", ") .. ((#moved > 2) and (" and " .. (#moved - 2) .. " more") or "")
-  end
-
-  -- What the session is sent: the task, each cite's lines as they were read (fenced so a snippet
-  -- holding backticks can't close it), the repro and done-when.
-  function M.renderPacket(packet)
-    local parts = { packet.task }
-    local cites = type(packet.cites) == "table" and packet.cites or {}
-    if #cites > 0 then
-      local ev = { "Evidence -- the code this task was written against, checked unchanged at HEAD just before it was sent:" }
-      for _, c in ipairs(cites) do
-        local longest = 0
-        for run in c.text:gmatch("`+") do if #run > longest then longest = #run end end
-        local fence = string.rep("`", math.max(3, longest + 1))
-        local body = c.text:sub(-1) == "\n" and c.text or (c.text .. "\n")
-        ev[#ev + 1] = M.citeLabel(c) .. " (read at " .. sha7(c.sha) .. "):\n" .. fence .. "\n" .. body .. fence
-      end
-      parts[#parts + 1] = table.concat(ev, "\n\n")
-    end
-    if packet.repro then parts[#parts + 1] = "Repro:\n" .. packet.repro end
-    if packet.doneWhen then parts[#parts + 1] = "Done when:\n" .. packet.doneWhen end
-    return table.concat(parts, "\n\n")
-  end
-
-  -- May this packet be fed? "feed" | "wait" (its check runs) | "moved" | "missing" | "unreadable",
-  -- and the words for the card. `verdict` is the last read's, `head` the target's HEAD now (nil when
-  -- it can't be read from the files: then a verdict only stands for PACKET_FRESH_SECONDS).
-  function M.packetGateFor(id, packet, verdict, head, now)
-    if type(packet) ~= "table" then
-      return "missing", "packet " .. tostring(id) .. " isn't in this project's packet store"
-    end
-    if type(packet.cites) ~= "table" or #packet.cites == 0 then return "feed" end
-    now = tonumber(now) or 0
-    local waitWhy = "checking the code packet " .. tostring(id) .. " cites"
-    local v = type(verdict) == "table" and verdict or nil
-    if v and v.failed then
-      if now - (tonumber(v.at) or 0) <= M.PACKET_RETRY_SECONDS then
-        return "unreadable", "couldn't read the code packet " .. tostring(id) .. " cites: " .. tostring(v.failed)
-      end
-      return "wait", waitWhy
-    end
-    local fresh = v and type(v.moved) == "table"
-      and ((head and v.head == head) or (not head and now - (tonumber(v.at) or 0) <= M.PACKET_FRESH_SECONDS))
-    if not fresh then return "wait", waitWhy end
-    if #v.moved > 0 then return "moved", M.packetMovedLine(v.moved) end
-    return "feed"
-  end
-
-  -- The autofeed with a packet at the head: the done edge (or a feed held for its packet) feeds
-  -- once the gate says so; while it's checked or moved, the feed is held and tried again for as
-  -- long as the session stays done. -> feedNow, holdNext.
-  function M.packetAutofeed(edge, held, status, gate)
-    if status ~= "done" or not (edge or held) then return false, false end
-    if gate == nil or gate == "feed" then return true, false end
-    return false, true
-  end
-
-  -- HEAD's file -> "ref", "refs/..." | "sha", sha; nil for anything else.
-  function M.headRef(content)
-    if type(content) ~= "string" then return nil end
-    local ref = content:match("^ref:%s*(refs/%S+)%s*$")
-    if ref and not ref:find("..", 1, true) then return "ref", ref end
-    local sha = content:match("^(%x+)%s*$")
-    if sha and (#sha == 40 or #sha == 64) then return "sha", sha:lower() end
-    return nil
-  end
-  function M.packedRefSha(packed, ref)
-    packed = tostring(packed or "")
-    local pos, n = 1, #packed
-    while pos <= n do
-      local nl = packed:find("\n", pos, true) or (n + 1)
-      local line = packed:sub(pos, nl - 1)
-      local sha, name = line:match("^(%x+) (%S+)%s*$")
-      if sha and name == ref and (#sha == 40 or #sha == 64) then return sha:lower() end
-      pos = nl + 1
-    end
-    return nil
-  end
+  return nil
 end
 
 -- ---- Project routing (4c-E, roadmap orchestrator) ---------------------------
@@ -11279,8 +10948,6 @@ function M.taskRoute(task)
   -- as routed and the scaffolding is stripped (renderFeed types the trimmed bare text).
   task = tostring(task or ""):gsub("^%s+", "")
   local role, rest = task:match("^@([%w._%-]+):%s*(.*)$")
-  -- 2026-09-29: "@packet:pN" is a task packet's token (core.packetRef), never a role
-  if role and role:lower() == "packet" then return nil, task end
   if role and rest and rest:gsub("%s+$", "") ~= "" then return role:lower(), rest end
   return nil, task
 end
@@ -24899,9 +24566,6 @@ M.FEATURES = {
   { key = "queue", cat = "Automate", title = "Task queue & auto-feed",
     what = "Line up tasks per session, auto-feed the next when one finishes, and route work to whichever session is free.",
     why = "Keep sessions busy without babysitting each handoff." },
-  { key = "packets", cat = "Automate", new = true, title = "Task packets",
-    what = "A packet is a queued task with its evidence (the panel's + Packet form went with the Queue tab, 2026-11-17; saved packets still gate): the code it cites (path:line or path:from-to, read at the session's HEAD and kept with that commit), repro steps and when it's done. The queue holds @packet:pN. Before it is fed, Shepherd re-reads each cited range at the receiving worktree's HEAD in the background; if any of it changed, the task isn't fed and the card says \"cited code moved\". A batch unit can carry a packet too: it is checked before the unit's tab opens, and its evidence goes into the unit's message.",
-    why = "A task written against yesterday's code doesn't send a session after lines that are no longer there." },
   { key = "recover", cat = "Automate", title = "Auto-respawn & auto-continue",
     what = "Respawn a stuck session and nudge one frozen on an API error to continue — within safe retry budgets.",
     why = "A long-running fleet heals itself instead of silently stalling overnight." },

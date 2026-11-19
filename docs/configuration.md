@@ -174,7 +174,7 @@ Everything lives under `~/.claude/`:
 | `cc-inbox/` | The [session mailbox](automation.md#session-mailbox): messages waiting for each session |
 | `cc-send/`, `cc-send.sh` | Left by cc-send, removed 2026-11-19: nothing reads them; `--purge` deletes them |
 | `cc-tickets/` | [Cross-repo tickets](automation.md#cross-repo-tickets), one file each |
-| `cc-queue/` | Each project's [task queue](automation.md#task-queue) and its [packets](automation.md#task-packets) |
+| `cc-queue/` | Each project's [task queue](automation.md#task-queue); a `<queue>.packets.json` in it is a leftover of task packets, removed 2026-11-19 |
 | `cc-pins/`, `cc-pin.sh` | Left by pinned links, removed 2026-11-19: nothing reads them; `--purge` deletes them |
 | `cc-talk/` | Left by talk mode, removed 2026-11-19: nothing reads it; `--purge` deletes it |
 | `cc-resume/`, `cc-resume.sh` | Left by resume at the limit reset, removed 2026-11-19: nothing reads them, and `make setup` unwires and deletes the hook; `--purge` deletes them |

@@ -8514,7 +8514,8 @@ do
   -- 2026-11-19: 56 -> 55, REQUIREMENT CHANGE: resume at the limit reset ("resume", flagged new) was removed.
   -- 2026-11-19: 55 -> 54, REQUIREMENT CHANGE: kept transcripts ("keeper", flagged new) were removed.
   -- 2026-11-19: 54 -> 53, REQUIREMENT CHANGE: queue hold and the Queues view ("queuehold", flagged new) were removed.
-  eq("FEATURES: the 53 new features are flagged", newCount, 53)
+  -- 2026-11-19: 53 -> 52, REQUIREMENT CHANGE: task packets ("packets", flagged new) were removed.
+  eq("FEATURES: the 52 new features are flagged", newCount, 52)
   check("FEATURES: lists the Compare tab", keys.compare == true)
   check("FEATURES: lists crossings", keys.crossings == true)
   check("FEATURES: no queue hold (removed 2026-11-19)", not keys.queuehold)
@@ -8539,7 +8540,7 @@ do
   check("FEATURES: lists requirement ids and merge receipts", keys.reqs == true)
   check("FEATURES: lists cross-repo tickets", keys.tickets == true)
   check("FEATURES: lists On purpose", keys.onpurpose == true)
-  check("FEATURES: lists task packets", keys.packets == true)
+  check("FEATURES: no task packets (removed 2026-11-19)", not keys.packets)
   check("FEATURES: no decisions inbox (removed 2026-11-19, REQUIREMENT CHANGE)", keys.decisions == nil)
   check("FEATURES: no cc-send (removed 2026-11-19, REQUIREMENT CHANGE)", keys.send == nil)
   check("FEATURES: lists the coverage index", keys.coverage == true)
@@ -16244,7 +16245,7 @@ do
   each("git-locks: gitBranchDeleteCmd", core.gitBranchDeleteCmd("/r/A", "ab/v1"))
   exported("git-locks: RADAR_SH (the overlap radar)", core.RADAR_SH)
   exported("git-locks: SCHED_LOCK_SH", core.SCHED_LOCK_SH)
-  exported("git-locks: PACKET_READ_SH", core.PACKET_READ_SH)
+  -- 2026-11-19: PACKET_READ_SH went with task packets
   -- the matcher itself: a bare git is caught, prose and --git-dir are not runs
   check("git-locks: the matcher catches a bare git", not unlocked("echo @@x; git -C '/r' status"))
   check("git-locks: the matcher catches a bare git after the first", not unlocked("GIT_OPTIONAL_LOCKS=0 git log; { git status; }"))

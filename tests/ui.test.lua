@@ -3323,8 +3323,9 @@ do
           jKitty and jRefuse and jFocus and jKitty < jRefuse and jRefuse < jFocus or false)
   end
   check("sharedwin-pin: auto-feed, auto-continue and self-summary skip a shared window up front",
-        -- 2026-09-29 (unit 26): the done edge now goes through core.packetAutofeed, still behind the guard
-        src:find("and not core.keystrokeBlocked(it) then\n      feedNow, holdPacket = core.packetAutofeed(core.shouldFeed(", 1, true) ~= nil
+        -- 2026-09-29 (unit 26): the done edge went through core.packetAutofeed, still behind the guard
+        -- 2026-11-19: task packets were removed; the done edge is core.shouldFeed again, behind the guard
+        src:find("and not core.keystrokeBlocked(it) then\n      feedNow = core.shouldFeed(", 1, true) ~= nil
         and src:find("enabled = autoContinueOn and not it.remote and not core.keystrokeBlocked(it)", 1, true) ~= nil
         and src:find("{ enabled = not core.keystrokeBlocked(it), prevStatus = pv and pv.status or nil }", 1, true) ~= nil)
   local d = body("function renderDetail(){", 6000)
@@ -4609,8 +4610,8 @@ do
   local fp = src:match("function FX%.fleetTabPoll%(id, slug%)(.-)\nend\n") or ""
   check("leases: a batch unit's worktree gets one when its tab is found",
         fp:find('FX.mintLease(b.repo, core.normDir(b.repo) .. "/.claude/worktrees/" .. slug)', 1, true) ~= nil)
-  -- 2026-09-29 (unit 26): the message also takes the unit's task packet, after the lease
-  check("leases: ...and the unit's message states it", fp:find("core.fleetUnitMessage(b, unit, lease, ", 1, true) ~= nil)
+  -- 2026-09-29 (unit 26): the message also took the unit's task packet, after the lease (gone 2026-11-19)
+  check("leases: ...and the unit's message states it", fp:find("core.fleetUnitMessage(b, unit, lease)", 1, true) ~= nil)
   local rs = src:match("function FX%.removeStatus%(key%)(.-)\nend") or ""
   check("leases: FX.removeStatus prunes the lease files nothing can use", rs:find("FX.pruneLeaseFiles", 1, true) ~= nil)
   local rm = lib:match("\ncc_remove%(%)%s*{(.-)\n}") or ""
@@ -4659,42 +4660,6 @@ do
         and tickBody:find("refreshTimeIndex", 1, true) == nil)
   check("time: its own retained timer runs the index", src:find("FX.timeIndexTimer = hs.timer.doEvery(", 1, true) ~= nil)
   check("time: a chained pass is retained too", src:find("FX._timeIndexChain = hs.timer.doAfter(", 1, true) ~= nil)
-end
-
--- ---- task packets (2026-09-29, build program unit 26) ----
--- A packet at a queue's head is gated at feed time against the target's HEAD (FX.packetGate,
--- async); the card flags a moved one, every feed site keeps the task when renderFeed refuses.
--- (The Queue tab's + Packet form and Feed next were pruned 2026-11-17; FX.packetCapture stays,
--- tests/packets.test.lua drives it.)
-do
-  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
-  local src = f and f:read("*a") or ""
-  if f then f:close() end
-  local tickBody = src:match("\nfunction FX%._refreshBody%(%)(.-)\nend\n") or ""
-  local gateAt = tickBody:find("FX.packetGate(it, qk, core.queuePeek(q), true)", 1, true)
-  local holdAt = tickBody:find("core.packetAutofeed(", 1, true)
-  check("packets: the tick gates the packet at a queue's head before the autofeed decides",
-        gateAt ~= nil and holdAt ~= nil and gateAt < holdAt)
-  check("packets: the card carries a moved packet's line", tickBody:find("it.packetMoved = ", 1, true) ~= nil)
-  check("packets: a moved packet is ledgered once per episode, from the tick",
-        tickBody:find('ledgerFor(it, { type = "packet_moved"', 1, true) ~= nil)
-  check("packets: the router gates the head against the session it picked",
-        tickBody:find("FX.packetGate(item, qk, core.queuePeek(q))", 1, true) ~= nil)
-  check("packets: renderFeed hands a packet to FX.packetFeedText (no template expansion of code)",
-        src:find("if core.packetRef(bare) then return FX.packetFeedText(bare, item) end", 1, true) ~= nil)
-  local sites = 0
-  for _ in src:gmatch("local typed, notFed = renderFeed%(task, %a+%)\n%s+if not typed then") do sites = sites + 1 end
-  eq("packets: both feed sites keep the task when renderFeed refuses", sites, 2)   -- 2026-11-17: Feed next pruned
-  -- 2026-11-19, REQUIREMENT CHANGE: "removing a packet's token from the queue drops the packet" went
-  -- with ☰ → Queues, the only place a line could be removed
-  check("packets: a fed packet leaves the store (both feed sites, besides its definition)",
-        select(2, src:gsub("FX%.dropPacketFed%(qk, task%)", "")) == 3 and src:find("function FX.dropPacketFed(qk, task)", 1, true) ~= nil)
-  check("packets: the card's meta carries the flag (meta is esc()'d)",
-        src:find('if(it.packetMoved){ meta = (meta ? meta + " · " : "") + "📦 " + it.packetMoved; }', 1, true) ~= nil)
-  check("packets: the unit's message carries its packet",
-        src:find("message = core.fleetUnitMessage(b, unit, lease, FX.fleetPacketFor(b, unit)) })", 1, true) ~= nil)
-  check("packets: FX.fleetOpenTab checks the packet before anything opens",
-        (src:match("\nfunction FX%.fleetOpenTab%(b, slug, req%)(.-)\nend\n") or ""):find("FX.fleetPacketGate(b, slug)", 1, true) ~= nil)
 end
 
 -- ---- The decisions Inbox is gone (2026-11-19) ----
@@ -5663,8 +5628,7 @@ do
         and files:find("os.remove(outFile); os.remove(errFile)", 1, true) ~= nil)
   check("taskToFiles: Compare's gh calls write their answers to files",
         src:find("return FX.taskToFiles(R.gh, function(code, out, errText) entry.settle(code, out, errText) end, args)", 1, true) ~= nil)
-  check("taskToFiles: a packet's cited-code read does",
-        src:find('t = FX.taskToFiles("/bin/sh", function(code, out, stderr)', 1, true) ~= nil)
+  -- 2026-11-19, REQUIREMENT CHANGE: "a packet's cited-code read does" went with task packets
   check("taskToFiles: kitty's screen read does",
         src:find("local t = FX.taskToFiles(bin, function(code, so) if code == 0 then out = so end end, argv)", 1, true) ~= nil)
   check("taskToFiles: the background ps does", src:find('return FX.taskToFiles("/bin/ps", function(code, out)', 1, true) ~= nil)
@@ -5783,6 +5747,46 @@ do
   -- what stays
   check("kept: the row styles Tickets and Coach share", src:find(".ib-row{", 1, true) ~= nil)
   check("kept: FX.allItems", src:find("\nfunction FX.allItems()", 1, true) ~= nil)
+end
+
+-- ---- Task packets are gone (2026-11-19) ----
+-- Adam, 2026-11-19: "prune features I have no use for". REQUIREMENT CHANGE: the 2026-09-29 (unit 26)
+-- pins asserted a queued @packet line was checked against the target's HEAD before it was fed, and a
+-- batch unit's packet before its tab opened. Gone: the packet store, its checks, the card's 📦 line,
+-- and a batch unit's "packet" field. A batch unit's message is still built, from its task alone.
+-- Kept: FX.gitHead (the scheduled-tasks lock check reads HEAD from files with it), FX.taskToFiles.
+do
+  local function slurp(name)
+    local f = io.open(ROOT .. name, "r")
+    local s = f and f:read("*a") or ""
+    if f then f:close() end
+    return s
+  end
+  local src, fleet = slurp("claude-dashboard.lua"), slurp("cc-fleet.sh")
+  local okCore, c = pcall(dofile, ROOT .. "cc-core.lua")
+  check("no packets: no packet FX", not src:find("FX.packetCapture", 1, true) and not src:find("FX.packetGate", 1, true)
+        and not src:find("FX.fleetPacketFor", 1, true) and not src:find("FX.fleetPacketGate", 1, true)
+        and not src:find("FX.readPackets", 1, true) and not src:find("FX._packetVerdicts", 1, true))
+  check("no packets: the tick and the feed check none", not src:find("FX.packetFeedText", 1, true) and not src:find("_packetRetry", 1, true)
+        and not src:find("packetAutofeed", 1, true) and not src:find('type = "packet_moved"', 1, true))
+  check("no packets: no 📦 line on a card", not src:find("packetMoved", 1, true))
+  check("no packets: core keeps none of it", okCore and c.packetNew == nil and c.packetRef == nil and c.renderPacket == nil
+        and c.packetGateFor == nil and c.PACKET_READ_SH == nil and c.parsePackets == nil)
+  local keys = {}
+  for _, f in ipairs(okCore and c.FEATURES or {}) do keys[f.key] = true end
+  check("no packets: not in the feature list", okCore and not keys.packets)
+  check("no packets: cc-fleet.sh neither checks nor projects a unit's packet",
+        not fleet:find("packetok", 1, true) and not fleet:find('has("packet")', 1, true))
+  check("no packets: packets.test.lua is gone", io.open(ROOT .. "tests/packets.test.lua", "r") == nil)
+  -- what stays
+  check("kept: a batch unit's message, built without a packet",
+        src:find("message = core.fleetUnitMessage(b, unit, lease) })", 1, true) ~= nil)
+  local okMsg, msg = pcall(c.fleetUnitMessage, { title = "B", driver = { name = "drv" } },
+    { branch = "feat/x", slug = "x", task = "do x", packet = "p1" }, nil)
+  check("kept: ...and it carries the task and no packet line", okMsg and type(msg) == "string"
+        and msg:find("Task: do x", 1, true) ~= nil and not msg:find("packet", 1, true))
+  check("kept: FX.gitHead, which the scheduled-tasks lock check uses", src:find("\nfunction FX.gitHead(root)", 1, true) ~= nil
+        and okCore and type(c.headRef) == "function" and type(c.packedRefSha) == "function")
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

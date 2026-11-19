@@ -101,35 +101,6 @@ each time the session finishes, so a session works through a backlog unattended
 - **Bulk paste**: paste a multi-line list and press Queue. It splits into one task per line
   (bullets and numbering stripped, blanks dropped) after a confirm.
 
-### Task packets
-
-A task written against the code as it is today can send a session after lines that are gone by
-the time it's fed. A **packet** carries its evidence, and isn't fed once that evidence has moved.
-
-- **Save one**: the panel's only way to save one, the Queue tab's **+ Packet** form, was removed
-  with that tab (2026-11-17). A packet held the task, an optional title, the cited code (one
-  `path:line` or `path:from-to` per line, relative to the repo root; up to 8 ranges of up to 80
-  lines), repro steps and done-when, each range read at the session's HEAD and saved with that
-  commit. Packets already saved still gate as below.
-- **Stored**: packets live in `~/.claude/cc-queue/<queue>.packets.json`, next to the queue file,
-  written atomically. The queue holds a token in place of the text, `@packet:p3 <title>`, which
-  can sit behind `@all:`/`@any:` and `@role:` like any task.
-- **At feed time** (auto-feed or the router), Shepherd re-reads every cited range at
-  the **receiving** session's worktree HEAD, in the background. HEAD is read from the repo's
-  files, so a commit the session made just before it finished is noticed at once.
-  - Unchanged: the session gets the task, each cited range as it was read (with its commit),
-    the repro and done-when. A packet isn't template-expanded.
-  - Changed or gone: it isn't fed. The card says `📦 cited code moved: path:from-to`, the ledger
-    records `packet_moved` once, and the packet stays at the head until the code matches again. A
-    queue that can't be read, or a packet that isn't saved, is flagged the same way.
-  - Still being checked: the feed waits. Auto-feed tries again while the session stays done.
-- **Batches**: a unit in a batch file can name a packet (`"packet": "p3"`), one saved from a
-  session in the repo's main checkout. Before its tab opens, Shepherd checks it at the repo's
-  HEAD. If the cited code moved, `cc-fleet.sh tab` is refused with the reason; if not, the
-  packet's evidence goes into the unit's message.
-- A packet leaves the store once it is fed or its token is removed. A queue keeps at most 100
-  packets; when it's full, the oldest one the queue no longer holds goes first.
-
 ### Prompt templates
 
 **Tpl ▾** next to Queue saves the current input as a named template and inserts saved ones back into

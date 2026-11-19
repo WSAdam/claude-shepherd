@@ -7,7 +7,8 @@
 #                     "units": [{"type": "feat|fix|ui|docs", "slug": "...", "task": "..."}]}   (1-8 units)
 #       Optional per unit (2026-09-29): "blockedBy": ["<slug>", ...] -- the units it waits for
 #       (its tab opens, and its merge is ready, only once they have merged; an unknown slug or a
-#       circle is refused), "covers": ["<issue id>", ...] and "packet": "<packet id>".
+#       circle is refused) and "covers": ["<issue id>", ...]. (A unit's "packet" field went with
+#       task packets on 2026-11-19 and is ignored.)
 #       Optional per batch (2026-09-29, the coverage index): "issues": [{"id", "title"}, ...] -- the
 #       issue list it was built from -- and "triage": [{"id", "as": "dup|wontfix|later|covered-elsewhere",
 #       "note"}, ...] for the issues it won't build. With an issue list, every covers and triage id
@@ -288,7 +289,6 @@ cmd_propose() {
                 and (test("\\.$") | not) and (test("\\.lock$") | not);
     # 2026-09-29: the optional unit fields (core.parseBatch checks the same)
     def coverok: type == "string" and test("^[A-Za-z0-9#][A-Za-z0-9._:#/-]{0,59}$");
-    def packetok: type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$");
     # 2026-09-29 (unit 25): the optional issue list and triage (core.parseBatchIssues checks the same)
     def issueok: type == "object" and (.id | coverok) and (.title | type) == "string"
                  and (.title | length) >= 1 and (.title | length) <= 200;
@@ -317,9 +317,7 @@ cmd_propose() {
             (if has("blockedBy") and ((.blockedBy | type) != "array" or (.blockedBy | length) > 8 or (.blockedBy | all(slugok) | not))
              then "unit \(.slug // "?"): blockedBy must be a list of up to 8 unit slugs" else empty end),
             (if has("covers") and ((.covers | type) != "array" or (.covers | length) > 50 or (.covers | all(coverok) | not))
-             then "unit \(.slug // "?"): covers must be a list of up to 50 issue ids (letters, digits and # . _ : / -)" else empty end),
-            (if has("packet") and (.packet | packetok | not)
-             then "unit \(.slug // "?"): packet must be a packet id (letters, digits and . _ -, at most 40)" else empty end)),
+             then "unit \(.slug // "?"): covers must be a list of up to 50 issue ids (letters, digits and # . _ : / -)" else empty end)),
         (if ((.units // []) | type) == "array" and ((.units | map(.slug) | unique | length) != (.units | length)) then "slugs must be unique" else empty end),
         # 2026-09-29 (unit 25): the issue list and triage are well formed, and every covers and
         # triage id names one of the issues (with no issue list, covers are free-form)
@@ -400,8 +398,7 @@ cmd_propose() {
       repo: $repo, commonDir: $common, title: .title, mergeWhenGreen: (.mergeWhenGreen // false),
       units: [ .units[] | { type, slug, task, branch: (.type + "/" + .slug) }
                + (if has("blockedBy") then { blockedBy: (.blockedBy | reduce .[] as $b ([]; if index([$b]) then . else . + [$b] end)) } else {} end)
-               + (if has("covers") then { covers } else {} end)
-               + (if has("packet") then { packet } else {} end) ], at: $at, phase: "proposed" }
+               + (if has("covers") then { covers } else {} end) ], at: $at, phase: "proposed" }
     # 2026-09-29 (unit 25): the issue list and triage, when the batch has them
     + (if has("issues") then { issues: [ .issues[] | { id, title } ] } else {} end)
     + (if has("triage") then { triage: [ .triage[] | { id, as, note } ] } else {} end)' \

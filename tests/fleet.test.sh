@@ -338,11 +338,12 @@ assert_eq "cc_fleet_remove_batch: removes the batch's files" "" "$(cd "$FD" && l
 assert_eq "cc_fleet_remove_batch: ...a bad id removes nothing" "bold12.events.jsonl bold12.json" \
   "$(cd "$FD" && ls bold12.* | tr '\n' ' ' | sed 's/ $//')"
 
-# ---- blockedBy, covers and packet (2026-09-29, build program unit 24) ----
+# ---- blockedBy and covers (2026-09-29, build program unit 24) ----
 # A unit may name the units it waits for: its tab doesn't open and its merge isn't ready until
 # they have merged. The proposal is refused when a blocker isn't one of its units or they go in
-# a circle; covers (issue ids) and packet (a task packet id) ride along; an old batch file
-# without any of the three still works.
+# a circle; covers (issue ids) ride along; an old batch file without them still works.
+# 2026-11-19, REQUIREMENT CHANGE: a unit's "packet" (a task packet id) went with task packets -- a
+# bad one is no longer refused, and the field isn't projected.
 u3() { # <beta's extra fields> <gamma's extra fields> -> a three-unit batch
   printf '{"title":"Order","mergeWhenGreen":true,"units":[{"type":"feat","slug":"one","task":"t"},{"type":"feat","slug":"two","task":"t"%s},{"type":"fix","slug":"three","task":"t"%s}]}' "$1" "$2"
 }
@@ -353,11 +354,10 @@ for bad in "$(u3 ',"blockedBy":["zeta"]' '')" \
            "$(u3 ',"blockedBy":["three"]' ',"blockedBy":["one","two"]')" \
            "$(u3 ',"blockedBy":"one"' '')" \
            "$(u3 ',"covers":"BUG-1"' '')" \
-           "$(u3 ',"covers":["bad id; rm"]' '')" \
-           "$(u3 ',"packet":"p1 && curl x"' '')"; do
+           "$(u3 ',"covers":["bad id; rm"]' '')"; do
   i=$((i + 1))
   batch "$bad"; fleet drv ob$i propose --file "$TMP/batch.json" --wait-max 1   # (a let-through waits: exit 4)
-  assert_eq "blockedBy: a bad order/covers/packet is refused ($i): $(printf '%s' "$bad" | cut -c75-150)" "2" "$(cat "$TMP/ob$i.rc")"
+  assert_eq "blockedBy: a bad order/covers is refused ($i): $(printf '%s' "$bad" | cut -c75-150)" "2" "$(cat "$TMP/ob$i.rc")"
 done
 grep -q "zeta" "$TMP/ob1.out" && got=yes || got=no
 assert_eq "blockedBy: an unknown blocker is named" "yes" "$got"
@@ -375,8 +375,9 @@ fleet drv po propose --file "$TMP/batch.json" & bg=$!
 for i in $(seq 1 60); do BO="$(newest_batch)"; [ -n "$BO" ] && [ "$(jq -r .title "$BO")" = "Order" ] && break; sleep 0.1; done
 assert_json "projection: a unit keeps its blockers" "$BO" '.units[1].blockedBy | join(",")' "one"
 assert_json "projection: ...deduped" "$BO" '.units[2].blockedBy | join(",")' "two"
-assert_json "projection: ...what it covers and its packet" "$BO" '(.units[1].covers | join(",")) + " " + .units[1].packet' "BUG-3,REQ-001 p1"
-assert_json "projection: a unit without them has none of the three keys" "$BO" '.units[0] | (has("blockedBy") or has("covers") or has("packet"))' false
+assert_json "projection: ...what it covers" "$BO" '.units[1].covers | join(",")' "BUG-3,REQ-001"
+assert_json "projection: ...and never a packet (task packets went 2026-11-19)" "$BO" '.units[1] | has("packet")' false
+assert_json "projection: a unit without them has none of the keys" "$BO" '.units[0] | (has("blockedBy") or has("covers") or has("packet"))' false
 decide "$BO" approve true
 wait $bg
 assert_eq "approved: exit 0" "0" "$(cat "$TMP/po.rc")"

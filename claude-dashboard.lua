@@ -1245,48 +1245,7 @@ function FX.feedGuard(fn)
   return true
 end
 
--- ---- Task packets (2026-09-29, build program unit 26) ------------------------------------
--- A queued task can carry its evidence (core.packetNew): packets live in <qk>.packets.json next
--- to the queue file, and the queue holds an `@packet:pN <title>` token. Before one is fed, every
--- cited range is re-read at the TARGET worktree's HEAD by a background /bin/sh
--- (core.PACKET_READ_SH) -- never a synchronous hs.execute in the tick -- and the verdict is kept
--- per worktree, queue and packet, stamped with the HEAD it read at. HEAD itself is read from the
--- files (FX.gitHead), so a commit made just before a session's done edge is noticed at once and
--- checked again before anything is typed.
-FX._packetVerdicts = {}   -- root\0qk\0id\0at -> { head, moved = {...}, at } | { failed, at }
-FX._packetChecks = {}     -- a running read (same key, or a capture's) -> { task, ts, waiters }: retained
-FX._packetMovedSeen = {}  -- same key -> true once its drift was recorded (once per episode)
-FX._packetRetry = {}      -- session key -> true: an autofeed held for its packet, tried while it stays done
-FX.PACKET_CHECK_DEADLINE = 30
-
-function FX.packetsPath(qk) return QUEUE_DIR .. "/" .. core.packetsFileName(qk) end
-
-function FX.readPackets(qk)
-  local path = FX.packetsPath(qk)
-  local store = core.parsePackets(FX.readFile(path))
-  if store then return store end
-  -- an undecodable store is set aside once, so the next save can't overwrite what may be recovered
-  local bak = path .. ".bad." .. tostring(FX.now())
-  pcall(function() os.rename(path, bak) end)
-  print("[cc-queue] ⚠️ undecodable packet store " .. tostring(qk) .. " -- backed up to " .. bak)
-  return core.parsePackets(nil)
-end
-
--- Atomic (temp + rename, like FX.writeQueue); true only when the file landed.
-function FX.writePackets(qk, store)
-  pcall(function() hs.fs.mkdir(QUEUE_DIR) end)
-  local path = FX.packetsPath(qk)
-  local okj, raw = pcall(core.json.encode, store)   -- a cited file that isn't UTF-8 can't be encoded
-  if not okj or type(raw) ~= "string" then return false end
-  local tmp = path .. ".tmp." .. tostring(FX.now())
-  local f = io.open(tmp, "w")
-  if not f then return false end
-  f:write(raw); f:close()
-  if os.rename(tmp, path) then return true end
-  os.remove(tmp)
-  return false
-end
-
+-- (Task packets were removed 2026-11-19; FX.gitHead, which they used, stays for the scheduled-tasks lock check.)
 -- A checkout's HEAD sha from its files alone (its .git folder, or a linked worktree's .git file,
 -- then HEAD, the loose ref and packed-refs in the common dir). nil when any of it can't be read.
 function FX.gitHead(root)
@@ -1306,188 +1265,6 @@ function FX.gitHead(root)
     if k2 == "sha" then return sha end
   end
   return core.packedRefSha(FX.readFile(common .. "/packed-refs"), v)
-end
-
--- The worktree a session's packets are checked in: its stack root, else its git root.
-function FX.packetRootFor(it)
-  if type(it) ~= "table" or it.remote then return nil end
-  if type(it.wtRoot) == "string" and it.wtRoot ~= "" then return it.wtRoot end
-  return FX.gitRoot(it.cwd)
-end
-
--- Read cites at root's HEAD in the background; cb(read | nil, why). Returns the task.
-function FX.packetRead(root, cites, cb)
-  local t
-  local ok, err = pcall(function()
-    -- to files: 8 cites of long lines can pass the 64KB pipe buffer (2026-11-03), and a stream's last
-    -- chunk can land after the exit (2026-11-04) -- FX.taskToFiles
-    t = FX.taskToFiles("/bin/sh", function(code, out, stderr)
-      local read = (code == 0) and core.parsePacketRead(out, #cites) or nil
-      local why = nil
-      if not read then
-        why = tostring(stderr or ""):gsub("%s+$", ""):sub(1, 160)
-        if why == "" then why = (code == 0) and "unexpected output" or ("git exited " .. tostring(code)) end
-      end
-      cb(read, why)
-    end, core.packetReadArgv(root, cites))
-    if not t then error("task create failed") end
-    t:start()
-  end)
-  if not ok then
-    print("[cc-queue] ❌ couldn't start reading cited code in " .. tostring(root) .. ": " .. tostring(err))
-    cb(nil, "Shepherd couldn't start git")
-  end
-  return t
-end
-
-function FX.packetKey(root, qk, id, packet)
-  return tostring(root) .. "\0" .. tostring(qk) .. "\0" .. tostring(id) .. "\0" .. tostring(type(packet) == "table" and packet.at or "")
-end
-
--- Start re-reading a packet's cited ranges at root's HEAD, unless a read for it already runs
--- (then onDone joins it). The verdict lands in FX._packetVerdicts; onDone(verdict) after.
-function FX.packetCheck(root, qk, id, packet, onDone)
-  local key, now = FX.packetKey(root, qk, id, packet), FX.now()
-  local run = FX._packetChecks[key]
-  if run and now - run.ts < FX.PACKET_CHECK_DEADLINE then
-    if onDone then run.waiters[#run.waiters + 1] = onDone end
-    return
-  end
-  if run and run.task then pcall(function() run.task:terminate() end) end   -- a hung read: reclaim it
-  run = { ts = now, waiters = { onDone } }
-  FX._packetChecks[key] = run
-  print("[cc-queue] 🔍 checking the code packet " .. tostring(id) .. " cites, at " .. tostring(root))
-  run.task = FX.packetRead(root, packet.cites, function(read, why)
-    if FX._packetChecks[key] ~= run then return end   -- superseded by a newer read
-    FX._packetChecks[key] = nil
-    local moved = read and core.packetDrift(packet, read)
-    if moved then
-      FX._packetVerdicts[key] = { head = read.head, moved = moved, at = FX.now() }
-      if #moved > 0 then print("[cc-queue] ⚠️ packet " .. tostring(id) .. ": " .. core.packetMovedLine(moved) .. " at " .. read.head:sub(1, 7))
-      else print("[cc-queue] ✅ packet " .. tostring(id) .. ": cited code unchanged at " .. read.head:sub(1, 7)) end
-    else
-      FX._packetVerdicts[key] = { failed = why or "unexpected output", at = FX.now() }
-      print("[cc-queue] ❌ packet " .. tostring(id) .. ": couldn't read its cited code in " .. tostring(root) .. ": " .. tostring(why))
-    end
-    for _, w in ipairs(run.waiters) do pcall(w, FX._packetVerdicts[key]) end
-  end)
-end
-
--- The gate at root: core.packetGateFor over the kept verdict and the HEAD read from the files,
--- starting a check when it waits. `record` (the tick) marks the first "moved" of an episode.
-function FX.packetGateAt(root, qk, id, packet, record)
-  local key = FX.packetKey(root, qk, id, packet)
-  local gate, why = core.packetGateFor(id, packet, FX._packetVerdicts[key], FX.gitHead(root), FX.now())
-  if gate == "wait" then FX.packetCheck(root, qk, id, packet) end
-  local first = false
-  if record then
-    if gate == "moved" and not FX._packetMovedSeen[key] then FX._packetMovedSeen[key] = true; first = true
-    elseif gate == "feed" then FX._packetMovedSeen[key] = nil end
-  end
-  return gate, why, first
-end
-
--- A queued task at a session: nil when it isn't a packet; else gate, why, first (FX.packetGateAt).
-function FX.packetGate(it, qk, task, record)
-  local id = core.packetRef(task)
-  if not id then return nil end
-  local packet = FX.readPackets(qk).packets[id]
-  if packet and #packet.cites > 0 then
-    local root = FX.packetRootFor(it)
-    if not root then
-      return "unreadable", "couldn't read the code packet " .. id .. " cites: the session isn't in a git checkout", false
-    end
-    return FX.packetGateAt(root, qk, id, packet, record)
-  end
-  return core.packetGateFor(id, packet)
-end
-
--- Feed next on a packet that isn't checked yet: fn runs once the check lands (and gates again).
-function FX.packetCheckThen(it, qk, task, fn)
-  local id = core.packetRef(task)
-  local packet = id and FX.readPackets(qk).packets[id]
-  local root = FX.packetRootFor(it)
-  if not (packet and root) then return false end
-  FX.packetCheck(root, qk, id, packet, function() fn() end)
-  return true
-end
-
--- What renderFeed types for a packet: its evidence, only while the gate says feed; else nil, why.
-function FX.packetFeedText(task, item)
-  local qk = FX.queueKeyFor(item)
-  local gate, why = FX.packetGate(item, qk, task)
-  if gate ~= "feed" then return nil, why or "the packet isn't ready" end
-  return core.renderPacket(FX.readPackets(qk).packets[(core.packetRef(task))])
-end
-
--- Save a packet from the queue editor: its cites read at the session's HEAD in the background,
--- the store written atomically, then its token queued. cb(true, id, token) | cb(false, why).
-function FX.packetCapture(it, qk, fields, cb)
-  fields = type(fields) == "table" and fields or {}
-  local cites, bad = core.parseCites(fields.cites)
-  if not cites then return cb(false, bad) end
-  if tostring(fields.task or ""):match("^%s*$") then return cb(false, "a packet needs its task") end
-  local root = FX.packetRootFor(it)
-  if #cites > 0 and not root then return cb(false, "this session isn't in a git checkout, so it has no code to cite") end
-  local function save(read)
-    local s2, id = core.packetNew(FX.readPackets(qk), fields, cites, read, FX.now(),
-                                  core.packetIdsIn(FX.readQueue(qk).tasks or {}))
-    if not s2 then return cb(false, id) end
-    if not FX.writePackets(qk, s2) then return cb(false, "couldn't write " .. FX.packetsPath(qk)) end
-    local token = core.packetToken(id, s2.packets[id].title)
-    FX.writeQueue(qk, core.queuePush(FX.readQueue(qk), token))
-    print("[cc-queue] ✅ saved packet " .. id .. " for " .. tostring(qk) .. " (" .. #cites .. " cite(s)"
-      .. ((read.head ~= "") and (" at " .. read.head:sub(1, 7)) or "") .. ") and queued it")
-    cb(true, id, token)
-  end
-  if #cites == 0 then return save({ head = "", cites = {} }) end
-  local key = "capture\0" .. tostring(qk) .. "\0" .. tostring(FX.now()) .. "\0" .. tostring(math.random(1e9))
-  local run = { ts = FX.now(), waiters = {} }
-  FX._packetChecks[key] = run
-  run.task = FX.packetRead(root, cites, function(read, why)
-    FX._packetChecks[key] = nil
-    if not read then return cb(false, "couldn't read the cited code in " .. root .. ": " .. tostring(why)) end
-    local ok, err = pcall(save, read)   -- the form always hears back, whatever went wrong
-    if not ok then
-      print("[cc-queue] ❌ saving a packet for " .. tostring(qk) .. " failed: " .. tostring(err))
-      cb(false, "Shepherd hit an error saving it (see the console)")
-    end
-  end)
-end
-
--- A packet whose token left the queue (fed, or removed) leaves the store, with its verdicts.
-function FX.dropPacket(qk, id)
-  if type(id) ~= "string" then return end
-  local store = FX.readPackets(qk)
-  if not store.packets[id] then return end
-  if FX.writePackets(qk, core.packetRemove(store, id)) then print("[cc-queue] packet " .. id .. " left " .. tostring(qk)) end
-  local tag = "\0" .. tostring(qk) .. "\0" .. id .. "\0"
-  for _, m in ipairs({ FX._packetVerdicts, FX._packetMovedSeen }) do
-    for k in pairs(m) do if k:find(tag, 1, true) then m[k] = nil end end
-  end
-end
-function FX.dropPacketFed(qk, task) FX.dropPacket(qk, (core.packetRef(task))) end
-
--- A batch unit's packet is one saved from a session in the batch's repo (its main checkout's queue).
-function FX.fleetPacketFor(b, unit)
-  if type(unit) ~= "table" or type(unit.packet) ~= "string" then return nil end
-  return FX.readPackets(core.queueKey({ projectKey = b.repo })).packets[unit.packet]
-end
-
--- Before a unit's tab opens: its packet checked at the repo's HEAD (the base its worktree is cut
--- from). "feed" opens, "wait" asks again next tick, anything else refuses with the reason.
-function FX.fleetPacketGate(b, slug)
-  local unit
-  for _, u in ipairs(b.units or {}) do if u.slug == slug then unit = u end end
-  if not (unit and type(unit.packet) == "string") then return "feed" end
-  local qk = core.queueKey({ projectKey = b.repo })
-  local packet = FX.readPackets(qk).packets[unit.packet]
-  local gate, why
-  if packet and #packet.cites > 0 then gate, why = FX.packetGateAt(b.repo, qk, unit.packet, packet)
-  else gate, why = core.packetGateFor(unit.packet, packet) end
-  if gate == "feed" or gate == "wait" then return gate end
-  return gate, "unit " .. slug .. "'s task packet " .. unit.packet .. ": " .. tostring(why)
-    .. " -- nothing was opened; save a fresh packet, or drop it from the unit"
 end
 
 -- Persistent relabels (F1): a JSON map of project path (cwd) -> override name.
@@ -5281,17 +5058,6 @@ end
 -- Open a unit's tab: an empty Claude tab in the repo's window; FX.fleetTabPoll then finds the
 -- new session. One tab opening per repo at a time, so two new sessions can't be confused.
 function FX.fleetOpenTab(b, slug, req)
-  -- 2026-09-29 (unit 26): a unit carrying a task packet opens only while the code it cites is
-  -- unchanged at the repo's HEAD. Still being checked (in the background): the next tick asks again.
-  do
-    local pg, pwhy = FX.fleetPacketGate(b, slug)
-    if pg == "wait" then return end
-    if pg ~= "feed" then
-      print("[cc-dashboard] ⚠️ didn't open unit " .. slug .. "'s tab: " .. tostring(pwhy))
-      FX.fleetAnswer(b.id, slug, { nonce = req.nonce, ok = false, reason = pwhy })
-      return
-    end
-  end
   -- 2026-09-17: a window still running a bridge without "expect" refuses the unit's tag, and the
   -- tab could never be closed after its merge (2026-09-15, bridge 0.1.0). Refuse before opening.
   -- (A window Shepherd has to open loads the installed bridge, so only an open one is checked.)
@@ -5403,7 +5169,7 @@ function FX.fleetTabPoll(id, slug)
     local okl, lease = pcall(function() return FX.mintLease(b.repo, core.normDir(b.repo) .. "/.claude/worktrees/" .. slug) end)
     if not okl then print("[cc-dashboard] ❌ lease for unit " .. slug .. " failed: " .. tostring(lease)); lease = nil end
     return finish({ nonce = t.nonce, ok = true, name = s.name, sessionId = s.sessionId, pid = tostring(s.pid),
-                    message = core.fleetUnitMessage(b, unit, lease, FX.fleetPacketFor(b, unit)) })
+                    message = core.fleetUnitMessage(b, unit, lease) })
   end
   if (why and why:find("at once", 1, true)) or FX.now() - t.sent >= FX.FLEET_TAB_WAIT then
     return finish({ nonce = t.nonce, ok = false, reason = why and why:find("at once", 1, true) and why
@@ -12279,16 +12045,12 @@ end
 -- is returned unchanged -- so existing non-template queues are byte-unaffected.
 -- The raw queued task is still what gets popped/persisted/ledgered; only the typed
 -- text is rendered.
--- 2026-09-29 (unit 26): a task packet's token types the packet -- its task and evidence, never
--- template-expanded -- and only while its cited code is checked unchanged at the target's HEAD;
--- otherwise nil, why, and every caller keeps the task queued.
 local function renderFeed(task, item)
   -- strip the L4 routing scaffolding so the session never sees it: a leading
   -- @all:/@any: join barrier, then an @role: prefix (the dispatcher already used
   -- them to gate + choose the target). Only the bare text is typed.
   local _, afterBarrier = core.taskBarrier(tostring(task or ""))
   local _, bare = core.taskRoute(afterBarrier)
-  if core.packetRef(bare) then return FX.packetFeedText(bare, item) end
   local prevOut = (item and type(item.activity) == "string") and item.activity or ""
   local r = core.renderTemplate(bare, {},
     { now = os.time(), prevOutput = prevOut, keepMissing = true })
@@ -12326,7 +12088,6 @@ function FX.autoModelPreface(item, task)
   -- ({{prev_output}}, date built-ins), so suggestModel's word-count tiers reflect the
   -- delivered prompt -- not a 2-word template that expands to hundreds of words.
   local typed = renderFeed(task, item)
-  if not typed then return nil end   -- 2026-09-29: a packet that won't be fed needs no model switch
   local s = core.suggestModel(typed, loadConfig())
   if not s or not s.model then return nil end
   -- R3-03: compare against the LIVE model, not the spawn-time snapshot. item.model is
@@ -25300,9 +25061,6 @@ local HTML = [[
       if(it.queue > 0){ meta = (meta ? meta + " · " : "") + (it.routed ? "⇉" : "+") + it.queue + " queued"; }
       else if(it.routed){ meta = (meta ? meta + " · " : "") + "⇉ routed"; }
       if(it.starved){ meta = (meta ? meta + " · " : "") + "⌛ queue starved"; }
-      // 2026-09-29 (unit 26): the task packet at the head isn't fed -- its cited code moved (or it
-      // can't be read, or isn't saved). Paths are anyone's text: it rides meta, which is esc()'d.
-      if(it.packetMoved){ meta = (meta ? meta + " · " : "") + "📦 " + it.packetMoved; }
       if(it.autopilot){ meta = (meta ? meta + " · " : "") + "🛫 autopilot"; }
       if(it.draining){ meta = (meta ? meta + " · " : "") + "⛔ draining"; }
       if(it.collide){ meta = (meta ? meta + " · " : "") + "⚠ shared dir"; }
@@ -26766,17 +26524,6 @@ function FX._refreshBody()
     local qk = FX.queueKeyFor(it)
     local q = FX.readQueue(qk)
     it.queue = core.queueDepth(q)
-    -- 2026-09-29 (unit 26): a task packet at the head is checked against THIS session's worktree
-    -- in the background (FX.packetGate); a moved one flags the card, recorded once per episode.
-    do
-      local g, why, first
-      if it.queue > 0 and not it.remote and not it.stale then
-        g, why, first = FX.packetGate(it, qk, core.queuePeek(q), true)
-      end
-      it.packetHead = g   -- the autofeed below reads it
-      it.packetMoved = (g == "moved" or g == "missing" or g == "unreadable") and why or nil
-      if first then ledgerFor(it, { type = "packet_moved", packet = (core.packetRef(core.queuePeek(q))), why = why }) end
-    end
     -- 4c-E routing bookkeeping: retire a satisfied/expired in-flight marker,
     -- collect project membership for the post-loop dispatcher, and badge armed
     -- projects. An ARMED project skips the per-tile 4b autofeed below -- the
@@ -26794,16 +26541,11 @@ function FX._refreshBody()
     end
     -- (a session in a shared window is never auto-fed: the task would be pasted into
     -- whichever tab is in front -- it stays queued; core.keystrokeBlocked)
-    -- 2026-09-29 (unit 26): with a task packet at the head, the done edge's feed is held while the
-    -- packet is checked (or has moved) and goes on a later tick once the check says feed, for as
-    -- long as the session stays done (core.packetAutofeed, FX._packetRetry).
-    local feedNow, holdPacket = false, false
+    local feedNow = false
     if not drained and not it.stale and not it.remote and not routedHere
        and not core.keystrokeBlocked(it) then
-      feedNow, holdPacket = core.packetAutofeed(core.shouldFeed(pv and pv.status, it.status, q, autofeed),
-        FX._packetRetry[it.key] == true and autofeed and core.queuePeek(q) ~= nil, it.status, it.packetHead)
+      feedNow = core.shouldFeed(pv and pv.status, it.status, q, autofeed)
     end
-    FX._packetRetry[it.key] = holdPacket or nil
     if feedNow then
       do
         -- 2026-09-29: queue.dryRun (and automation.dryRun) are judged by FX.automationAct in the
@@ -26823,13 +26565,10 @@ function FX._refreshBody()
           FX.feedGuard(function()
           local task, q2 = core.queuePop(FX.readQueue(qk))
           if not task then return end
-          -- 2026-09-29 (unit 26): a packet not (or no longer) checked unchanged is not typed: kept
-          -- queued, and the feed held for a later tick while the session stays done
           local typed, notFed = renderFeed(task, it)
           if not typed then
             print("[cc-queue] not fed: " .. tostring(notFed) .. " -- task kept queued")
             FX.automationRefuse(notFed)
-            FX._packetRetry[it.key] = true
             return
           end
           print("[cc-queue] feeding '" .. tostring(task) .. "' to " .. it.name)
@@ -26837,7 +26576,6 @@ function FX._refreshBody()
           local commit = core.queueFeedCommit(FX.feedTask(winTarget(it), typed, pre and pre.cmd))
           if commit.persist then
             FX.writeQueue(qk, q2)
-            FX.dropPacketFed(qk, task)
             it.queue = core.queueDepth(q2)
             stampTaskStart(it, task, "autofeed")
             if pre then ledgerFor(it, { type = "model_change", from = pre.from, to = pre.model, by = "auto", reason = pre.reason }); it.model = pre.model; FX.patchStatus(it.key, { model = pre.model }) end
@@ -27210,12 +26948,6 @@ function FX._refreshBody()
         starvedSince[qk] = nil; starvedAlerted[qk] = nil
         local item
         for _, m in ipairs(members) do if m.key == pick.key then item = m; break end end
-        -- 2026-09-29 (unit 26): a task packet at the head goes only once it's checked unchanged at
-        -- the pick's worktree; while it's checked (in the background) or moved, nobody is fed
-        if item then
-          local g = FX.packetGate(item, qk, core.queuePeek(q))
-          if g and g ~= "feed" then item = nil end
-        end
         if item then
           do
             -- 2026-09-29: queue.dryRun is judged in the router's slot by FX.automationAct (would_route,
@@ -27252,8 +26984,6 @@ function FX._refreshBody()
               end
               local task, q2 = core.queuePop(freshQ)
               if not task then FX.automationRefuse("queue empty"); routePending[item.key] = nil; return end
-              -- 2026-09-29 (unit 26): a packet not checked unchanged at this member is kept queued;
-              -- the level-triggered router tries again next tick
               local typed, notFed = renderFeed(task, item)
               if not typed then
                 print("[cc-route] not fed: " .. tostring(notFed) .. " -- task kept queued")
@@ -27265,7 +26995,6 @@ function FX._refreshBody()
               local commit = core.queueFeedCommit(FX.feedTask(winTarget(item), typed, pre and pre.cmd))
               if commit.persist then
                 FX.writeQueue(qk, q2)
-                FX.dropPacketFed(qk, task)
                 stampTaskStart(item, task, "router")
                 if pre then ledgerFor(item, { type = "model_change", from = pre.from, to = pre.model, by = "auto", reason = pre.reason }); item.model = pre.model; FX.patchStatus(item.key, { model = pre.model }) end
               else
@@ -27316,12 +27045,6 @@ function FX._refreshBody()
   end
 
   FX.reapWorkingOn(list)   -- 2026-09-29: ended sessions leave the working-on cache
-  -- 2026-09-29 (unit 26): a feed held for its task packet leaves with its session
-  do
-    local live = {}
-    for _, x in ipairs(list) do if x.key then live[x.key] = true end end
-    core.reapUnbacked(FX._packetRetry, live)
-  end
 
   -- Errored tiles were detected mid-loop (status overridden to "error"); re-sort so they
   -- surface near approvals -- parseStatusList sorted before we'd read any transcript.

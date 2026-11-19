@@ -754,10 +754,10 @@ A batch unit can name the units it waits for:
 - When a blocker ends **blocked**, every unit waiting on it, directly or down a chain, counts as
   *blocked by a blocked unit (api-schema)*, so the batch can still finish.
 
-Two more optional unit fields travel with the batch: `covers` (the issue ids the unit covers, up to
-50; with an issue list, see [the coverage index](#coverage-index-a-batch-says-what-it-covers)) and
-`packet` (the id of its task packet). The unit's message states them, with what it comes
-after. A batch file without any of the three works as before.
+One more optional unit field travels with the batch: `covers` (the issue ids the unit covers, up to
+50; with an issue list, see [the coverage index](#coverage-index-a-batch-says-what-it-covers)). The
+unit's message states it, with what it comes after. A batch file without either works as before. (A
+unit's `packet` field went with task packets on 2026-11-19; it is ignored.)
 
 ## Try it: the worktree demo
 
