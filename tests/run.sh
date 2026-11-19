@@ -382,7 +382,7 @@ echo ""
 echo "== lua: gate blame -- a red gate's command again at the merge-base, behind the gates that judge a merge, split into main's failures and the branch's (behavioral, stubbed hs + a real git repo) =="
 HOME="$(mktemp -d)" lua "$DIR/gateblame.test.lua" || fail=1
 echo ""
-echo "== lua: the main-green check -- a request runs the repo's merge gate in its main checkout, in the gate lane; red raises one banner, a card flag and a coach-log entry, green clears it, couldn't-run never reds, a freeze or a held session stands it down (behavioral, stubbed hs + a real git repo) =="
+echo "== lua: the main-green check -- a request runs the repo's merge gate in its main checkout, in the gate lane; red raises one banner, a card flag and a coach-log entry, green clears it, couldn't-run never reds (behavioral, stubbed hs + a real git repo) =="
 HOME="$(mktemp -d)" lua "$DIR/maingreen.test.lua" || fail=1
 echo ""
 echo "== lua: Remote Control on every card -- a session file with no bridgeSessionId shows a chip, and a VS Code tab alone in its window gets /remote-control once past the grace, never a shared window or one that's in (behavioral, stubbed hs + a temp session registry) =="
@@ -535,7 +535,7 @@ echo ""
 echo "== bash: a checklist run's reports -- done and blocked for the run and item a brief names, refusals, the record core.parseRunReport reads (cc-run.sh) =="
 bash "$DIR/checklist-run.test.sh" || fail=1
 echo ""
-echo "== lua: Run selected -- a run of what can run, each item's tab opened with its brief typed in (never a key), the box or its own session's report, Adam's checkmark by the run, one run per repo, freeze / live-run / Stop (behavioral, stubbed hs) =="
+echo "== lua: Run selected -- a run of what can run, each item's tab opened with its brief typed in (never a key), the box or its own session's report, Adam's checkmark by the run, one run per repo, live-run / Stop (behavioral, stubbed hs) =="
 HOME="$(mktemp -d)" lua "$DIR/worklist-runner.test.lua" || fail=1
 echo ""
 echo "== node: My List Run selected -- ▶ Run… picks nothing preselected, Run selected sends the tab and ids in tab order, the run bar, ✓ by run, escaped (real browser) =="

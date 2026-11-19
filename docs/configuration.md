@@ -51,7 +51,7 @@ form-managed block is dropped on Save. Its tabs:
 
 File-only switches include, among others: `providers` and `spawn.provider`
 ([provider profiles](providers-and-integrations.md#providers-and-models)), `hotkeys`, `voice`, `pricing.*`, `merge.*`, `verify.*`,
-`gate.fence`, `resume.enabled`, `lease.*`,
+`gate.fence`, `lease.*`,
 `coach.*`, `radar.*`, `schedLock.*`, `timeLost.*`, `score.weights`,
 `subagents.*`, `status.resumeSlack`, `autoContinue.backoff.*`, `fleet.enabled`, `commits.*`,
 `usage.limitAlerts.*`, `ask.waitSeconds`, `ask.awayIdleSeconds`, `tabless.autoEndMinutes`, `escalation.hung`, `search.*`,

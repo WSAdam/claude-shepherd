@@ -60,9 +60,7 @@ let it, and what it did while you were away. Your own clicks never go through it
   (`automation.dryRun`) or for one feature at a time (`autoContinue.dryRun`,
   `respawn.dryRun`, `summary.dryRun`, `tabless.dryRun`, `mailbox.dryRun`, `remoteControl.dryRun`).
   In a dry run Shepherd records what it would have done and does nothing: nothing typed, nothing
-  launched or
-  ended, no message left, and a resume is planned as *skip* so the hook stops without waking the
-  session. A typed action still waits until the session [can take it](#when-automation-types)
+  launched or ended, no message left. A typed action still waits until the session [can take it](#when-automation-types)
   first, so what's recorded is what would really have been typed; a refusal is still a refusal.
   A Settings Save keeps these switches; a fresh install has them off.
 - **The trace.** ☰ → **⚡ Automation trace** lists every decision fleet-wide, newest first; the
@@ -73,9 +71,10 @@ let it, and what it did while you were away. Your own clicks never go through it
   **×N** and the time it started; a different decision in between starts a new row. The trace keeps
   the last 500 distinct decisions since Hammerspoon loaded.
 - **Ledger.** With the audit ledger on, each new row is also written once: `would_<kind>`
-  (`would_continue`, `would_feed`, `would_route`, `would_rule`, `would_respawn`, `would_summary`,
-  `would_resume`, `would_tabless_end`, `would_mailbox`, `would_rc`, `would_restart`) for a dry run, `automation`
-  with `outcome` `acted` or `refused` (and `reason`) otherwise. Repeats bump the trace's count and
+  (`would_continue`, `would_respawn`, `would_summary`, `would_tabless_end`, `would_mailbox`,
+  `would_rc`) for a dry run, `automation` with `outcome` `acted` or `refused` (and `reason`)
+  otherwise. An older ledger can also hold `would_feed`, `would_route`, `would_rule`,
+  `would_resume` and `would_restart`, from automation removed on 2026-11-19. Repeats bump the trace's count and
   aren't written again.
 
 Outside a dry run nothing changes: each action does exactly what it did before, with the same
