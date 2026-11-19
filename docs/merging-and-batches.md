@@ -67,9 +67,7 @@ session that is working. Heads-ups include:
   holds it, and it turns red on a fail),
 - a merged unit whose post-merge gate went red (main is red, and its worktree is already gone),
 - a connection blip the session is still retrying (the only one that reads **Retrying**),
-- an error you stopped yourself, or one on a session that has exited,
-- a session stopped by a usage limit while its
-  [resume at the reset](automation.md#resume-at-the-limit-reset) is scheduled.
+- an error you stopped yourself, or one on a session that has exited.
 
 A merge request Shepherd is still checking (its test gate running or queued) is neither: the card
 reads **Working**, with the working dot, and ranks with the working sessions. Nothing on it is

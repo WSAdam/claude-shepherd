@@ -87,7 +87,7 @@ Every feature below has a reference page one click away. The panel lists the sam
 
 ### Automate
 
-A fresh install turns on auto-continue, handoff notes, resume at the limit reset, auto-compact and
+A fresh install turns on auto-continue, handoff notes, auto-compact and
 the fleet idle alert; every other automatic behaviour here waits for its switch.
 
 - [**Task queue & auto-feed**](docs/automation.md#task-queue): line up tasks per session, feed the
@@ -104,8 +104,6 @@ the fleet idle alert; every other automatic behaviour here waits for its switch.
   /clear the new session is told where it is, and a respawned session starts with it.
 - [**Session mailbox**](docs/automation.md#session-mailbox): Shepherd leaves a session a message
   that arrives at its next turn end or start, and types it only where typing is safe.
-- [**Resume at the limit reset**](docs/automation.md#resume-at-the-limit-reset): a session stopped
-  by a usage limit carries on by itself at the reset, once per window, with Resume now and Cancel on its card.
 - [**Auto-compact with notes**](docs/automation.md#auto-compact-with-notes): sessions compact at 85%
   of their window, write their notes just before, and get them back right after.
 - [**Automation rules**](docs/automation.md#automation-rules): when a session finishes, errors or
@@ -245,8 +243,8 @@ Every session follows these rules from `~/.claude/CLAUDE.md`
 a fresh install starts from [defaults/cc-config.json](defaults/cc-config.json) (`make setup` adds
 any key you haven't set).
 
-**On out of the box:** auto-continue (`autoContinue`), respawn (`respawn`), resume at the limit
-reset (`resume`), auto-compact (`compact`), worktree leases (`lease`), the audit ledger (`ledger`),
+**On out of the box:** auto-continue (`autoContinue`), respawn (`respawn`),
+auto-compact (`compact`), worktree leases (`lease`), the audit ledger (`ledger`),
 the three Stop guards (`stopGuards`), the fleet idle alert (`alerts.idleMinutes`) and the My List review heads-up (`worklist.reviewCount`), plus the merge
 checker, the worktree fence, held questions, Remote Control for spawned sessions, ending leftover
 processes that have no tab, the main moved notice and grant grading. Auto-feed, rules, routines,

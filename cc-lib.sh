@@ -328,10 +328,6 @@ CC_INBOX_DIR="${CC_INBOX_DIR:-${HOME}/.claude/cc-inbox}"
 # <epoch>-<pid>.json, which Shepherd moves into the repo's coach log. Default MUST match the
 # dashboard's FX.LESSON_DIR.
 CC_LESSON_DIR="${CC_LESSON_DIR:-${HOME}/.claude/cc-lesson}"
-# Resume at the usage limit's reset (build program unit 13, 2026-09-29): cc-resume.sh's arm
-# (<key>.json), Shepherd's plan (<key>.plan.json) and the card's Cancel (<key>.cancel), per
-# session key. A clean Stop clears them (cc-status.sh). Default MUST match the dashboard's FX.RESUME_DIR.
-CC_RESUME_DIR="${CC_RESUME_DIR:-${HOME}/.claude/cc-resume}"
 # The Stop guards (mining round 2, 2026-10-02): a guard that blocks a stop leaves a once-marker,
 # <key>.<guard>, holding what it blocked (a turn's id). Default MUST match the dashboard's FX.GUARD_DIR.
 CC_GUARD_DIR="${CC_GUARD_DIR:-${HOME}/.claude/cc-guard}"
@@ -648,8 +644,6 @@ cc_lease_prune() {
 # crash in between leaves <key>.json.tmp.<pid> and friends. Both used to outlive
 # the session that owned them -- keys are UUIDs, so nothing matched them again.
 # <key>.checker.json (2026-09-29) is the merge checker's verdict, which only Shepherd writes.
-# cc-resume/<key>.json, .plan.json and .cancel (2026-09-29): a resume waiting for a usage limit's
-# reset -- its waiter sees the arm gone and stops.
 # cc-lease/ (2026-09-29) is keyed by main checkout: cc_lease_prune drops only what nothing can use.
 # cc-tickets/ (2026-09-29) is keyed by ticket: cc_ticket_release frees the ones this session held
 # (the ones it filed stay for its next start), cc_ticket_prune drops old and stale files.
@@ -673,8 +667,6 @@ cc_remove() {
     "$CC_MERGE_DIR/$1.notyet" "$CC_MERGE_DIR/$1.notyet".tmp.* \
     "$CC_ASK_DIR/$1.answer" "$CC_ASK_DIR/$1.answer".claim.* \
     "$CC_ASK_DIR/$1.answer".tmp.* \
-    "$CC_RESUME_DIR/$1.json" "$CC_RESUME_DIR/$1.json".tmp.* "$CC_RESUME_DIR/$1.plan.json" \
-    "$CC_RESUME_DIR/$1.plan.json".tmp.* "$CC_RESUME_DIR/$1.cancel" \
     "$CC_NOTES_DIR/$1.due-at" "$CC_NOTES_DIR/$1.due-at".tmp.* "$CC_NOTES_DIR/$1.notes-asked" 2>/dev/null || true
   # The mailbox is a folder (cc-inbox/<key>/): its messages, claims and temps, then the folder.
   # A key that could name anything outside it (nothing, . or ..) never gets that far.

@@ -4304,36 +4304,42 @@ do
   check("workingOn: the escaping sweep knows it.workingOn", sinks:find("workingOn", 1, true) ~= nil)
 end
 
--- ---- resume at the usage limit's reset (2026-09-29) ----
--- Build program unit 13. tests/resume.test.lua drives FX.stepResume itself; this pins that the
--- tick runs it (isolated, so a failure can't stop the tick), that its typed line goes through
--- the readiness door, and that the card's two buttons reach it.
+-- ---- Resume at the usage limit's reset is gone (2026-11-19) ----
+-- Adam, 2026-11-19: "prune features I have no use for". REQUIREMENT CHANGE: the 2026-09-29 pins here
+-- asserted the tick stepped the resumes and the card's Resume now / Cancel reached it. Gone with it:
+-- the cc-resume.sh hook (out of SHIPPED, settings-hooks.json and core.OUR_HOOK_SCRIPTS; install.sh
+-- strips an old install's wiring), ~/.claude/cc-resume/ (FX.RESUME_DIR, CC_RESUME_DIR), FX.stepResume
+-- and the card's resume line, core's resume block and the "resumes at the reset" heads-up. Kept: a
+-- usage-limit error still reads as an error on its card (Needs you).
 do
-  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
-  local src = f and f:read("*a") or ""
-  if f then f:close() end
-  local tick = src:match("function FX%._refreshBody%(%)(.-)\nend\n") or ""
-  check("resume: the tick steps the resumes, isolated in a pcall", tick:find("pcall(FX.stepResume, list)", 1, true) ~= nil)
-  local typer = src:match("function FX%.resumeType%(it, key%)(.-)\nend\n") or ""
-  check("resume: the typed line waits for readiness",
-        typer:find('FX.typeWhenReady(it, "resume", function()', 1, true) ~= nil)
-  check("resume: ...and records it typed on the plan, so it is never typed twice",
-        typer:find("plan.typedAt = FX.now()", 1, true) ~= nil)
-  check("resume: FX.RESUME_DIR reads CC_RESUME_DIR, as cc-lib.sh does",
-        src:find('FX.RESUME_DIR = os.getenv("CC_RESUME_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-resume")', 1, true) ~= nil)
-  check("resume: the card's buttons reach the panel's handler",
-        src:find('if a == "resume-now" or a == "resume-cancel" then', 1, true) ~= nil
-        and src:find("FX.resumeNow(key)", 1, true) ~= nil and src:find("FX.resumeCancel(key)", 1, true) ~= nil)
-  check("resume: the detail panel's status line says it too",
-        src:find('document.getElementById("d-status").textContent += resumeTail(it);', 1, true) ~= nil)
-  local lib = io.open(ROOT .. "cc-lib.sh"):read("*a")
-  check("resume: its files are in cc_remove", lib:find('"$CC_RESUME_DIR/$1.json"', 1, true) ~= nil
-        and lib:find('"$CC_RESUME_DIR/$1.plan.json"', 1, true) ~= nil and lib:find('"$CC_RESUME_DIR/$1.cancel"', 1, true) ~= nil)
-  local df = io.open(ROOT .. "defaults/cc-config.json", "r")
-  local dsrc = df and df:read("*a") or ""
-  if df then df:close() end
-  local okd, dcfg = pcall(core.json.decode, dsrc)
-  eq("resume: a fresh install resumes at the reset", okd and type(dcfg) == "table" and (dcfg.resume or {}).enabled, true)
+  local function slurp(name)
+    local f = io.open(ROOT .. name, "r")
+    local s = f and f:read("*a") or ""
+    if f then f:close() end
+    return s
+  end
+  local src, lib, shipped, hooks, st = slurp("claude-dashboard.lua"), slurp("cc-lib.sh"), slurp("SHIPPED"),
+    slurp("settings-hooks.json"), slurp("cc-status.sh")
+  local okCore, core2 = pcall(dofile, ROOT .. "cc-core.lua")
+  check("no resume: cc-resume.sh isn't shipped, wired, or in the checkout", not shipped:find("cc-resume.sh", 1, true)
+        and not hooks:find("cc-resume.sh", 1, true) and io.open(ROOT .. "cc-resume.sh", "r") == nil)
+  local ours = {}
+  for _, n in ipairs(okCore and core2.OUR_HOOK_SCRIPTS or {}) do ours[n] = true end
+  check("no resume: core doesn't count it among our hooks", okCore and not ours["cc-resume.sh"])
+  check("no resume: the tick steps no resume", not src:find("FX.stepResume", 1, true) and not src:find("FX.RESUME_DIR", 1, true))
+  check("no resume: the card has no Resume now / Cancel", not src:find('a == "resume-now"', 1, true) and not src:find("resumeTail", 1, true))
+  check("no resume: the hooks keep no cc-resume folder", not lib:find("CC_RESUME_DIR", 1, true) and not st:find("CC_RESUME_DIR", 1, true))
+  check("no resume: core keeps none of it", okCore and core2.RESUME == nil and core2.resumePlan == nil and core2.resumeCard == nil
+        and core2.resumeRoute == nil and core2.parseResumeArm == nil)
+  local keys = {}
+  for _, f in ipairs(okCore and core2.FEATURES or {}) do keys[f.key] = true end
+  check("no resume: no Resume at the limit reset in the feature list", okCore and not keys.resume)
+  -- what stays
+  local inst = slurp("install.sh")
+  check("no resume: install.sh strips an old install's cc-resume.sh wiring and deletes the script",
+        inst:find('RETIRED_HOOKS="cc-resume.sh"', 1, true) ~= nil and inst:find('rm -f "$CLAUDE_DIR/$f"', 1, true) ~= nil)
+  check("kept: a usage-limit error still needs Adam on its card",
+        okCore and core2.needsYouKind({ key = "k", status = "error", error_reason = "budget_exceeded" }, 100) == "needs")
 end
 
 -- ---- automation dry run and trace (2026-09-29) ----
@@ -4394,8 +4400,7 @@ do
   wrapped("rule", 'processor = "relabel", to = p.label')
   wrapped("rule", 'processor = "feed", text = tostring(p.text):sub(1, 200)')
   wrapped("mailbox", "FX.writeFileAtomic(path, m.body)")
-  wrapped("resume", "caps[core.resumeCapKey(key, plan.window)] = now")
-  wrapped("resume", 'FX.push(topic, "Claude Shepherd", tostring(it.label or it.name or key)')
+  -- 2026-11-19: the two "resume" effects went with resume at the limit reset (REQUIREMENT CHANGE)
   check("trace: queue.dryRun has no side door of its own (it goes through the one door now)",
         src:find("queueDry", 1, true) == nil)
   -- a refusal the readiness door makes lands in the Trace too, now and at send time

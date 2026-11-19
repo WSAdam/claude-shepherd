@@ -165,10 +165,9 @@ eq("an error Adam stopped himself reads Heads-up, not Retrying", api.statusWords
 const exited = { key: "x", status: "error", needsYou: "fyi", needsYouSource: "error", stale: true, procAlive: false,
                  needsYouWhy: "that session has exited", error_reason: "runtime_error" };
 eq("...and so does an error on a session that has exited", api.statusWords(exited), "Heads-up");
-const limited = { key: "l", status: "error", needsYou: "fyi", needsYouSource: "error", error_reason: "budget_exceeded",
-                  resume: { phase: "waiting", line: "resumes at 3:00pm", cancel: true, now: true } };
-eq("...and a usage limit waiting for its reset", api.statusWords(limited), "Heads-up");
-eq("...each with the neutral dot, like any heads-up", [stopped, exited, limited].map(api.effStatus).join(","), "idle,idle,idle");
+// (2026-11-19, REQUIREMENT CHANGE: a usage limit waiting for its reset was a third such heads-up; resume
+// at the limit reset was removed, so core stamps a usage limit "needs" again and the case went.)
+eq("...each with the neutral dot, like any heads-up", [stopped, exited].map(api.effStatus).join(","), "idle,idle");
 check("the tick stamps which error heads-up is a retry, and clears last tick's",
       src.indexOf("local kind, source, why, retrying = core.needsYouKind(it, now)") >= 0
       && src.indexOf("it.retrying = retrying or nil") >= 0

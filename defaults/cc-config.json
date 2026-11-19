@@ -144,9 +144,6 @@
       "dailyUsd": 3
     }
   },
-  "resume": {
-    "enabled": true
-  },
   "compact": {
     "enabled": true,
     "atPct": 85,

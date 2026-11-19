@@ -28,8 +28,7 @@ panel ──► ~/.claude/cc-bridge/<pid>.in/ ──► tab bridge (VS Code exte
 - [cc-merge.sh](../cc-merge.sh) and [cc-fleet.sh](../cc-fleet.sh) are the ready-to-merge and
   batch-driving channels ([Merging and batches](merging-and-batches.md)).
 - [cc-worktree-guard.sh](../cc-worktree-guard.sh) denies an `EnterWorktree` into a worktree another
-  live session is using, and [cc-resume.sh](../cc-resume.sh) waits out a usage limit
-  ([Automation](automation.md#resume-at-the-limit-reset)).
+  live session is using.
 - [cc-ticket.sh](../cc-ticket.sh), [cc-lesson.sh](../cc-lesson.sh) and [cc-run.sh](../cc-run.sh) are
   the commands a session runs itself: file a ticket for
   another repo, file a lesson for the

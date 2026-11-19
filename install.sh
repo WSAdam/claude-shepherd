@@ -316,6 +316,34 @@ else
   echo "⚠️  jq not found — install jq, then merge $TEMPLATE into $SETTINGS"
 fi
 
+# 3a. Retired hooks (2026-11-19): a hook script Shepherd no longer ships is unwired from settings.json
+# and its leftover copy deleted, so an upgraded install doesn't keep running it. cc-resume.sh went
+# with resume at the limit reset (Adam pruned it). Only the entries that run it go; a group left
+# with none goes too; nothing else is touched. uninstall.sh strips the same names.
+RETIRED_HOOKS="cc-resume.sh"
+RETIRED_RE="$(printf '%s\n' $RETIRED_HOOKS | sed 's/\./\\./g' | paste -sd '|' -)"
+if have_jq && [ -f "$SETTINGS" ] && jq -e . "$SETTINGS" >/dev/null 2>&1; then
+  stripped="$(jq --arg re "$RETIRED_RE" '
+    def retired: ((.command? // "") | type == "string") and ((.command? // "") | test($re));
+    if (.hooks | type) != "object" then . else
+      .hooks |= with_entries(
+        if (.value | type) != "array" then . else
+          .value |= map(if (type == "object") and ((.hooks? | type) == "array") and any(.hooks[]; retired)
+                        then (.hooks |= map(select(retired | not)))
+                             | (if (.hooks | length) == 0 then empty else . end)
+                        else . end)
+        end)
+    end' "$SETTINGS" 2>/dev/null)"
+  if [ -n "$stripped" ] && [ "$stripped" != "$(jq . "$SETTINGS")" ]; then
+    cp "$SETTINGS" "$SETTINGS.bak.$(date +%s)"
+    real="$(resolve_link "$SETTINGS")"
+    printf '%s\n' "$stripped" > "$(dirname "$real")/.settings.json.tmp.$$" \
+      && mv -f "$(dirname "$real")/.settings.json.tmp.$$" "$real"
+    echo "✅ unwired retired hooks ($RETIRED_HOOKS) from $SETTINGS (backup made)"
+  fi
+fi
+for f in $RETIRED_HOOKS; do rm -f "$CLAUDE_DIR/$f"; done
+
 # 3b. The Claude Code settings the worktree flow relies on (defaults/claude-settings.json:
 # worktrees branch from HEAD, Remote Control at startup, push notifications, effort, and the
 # permission deny rules that enforce the methodology's secrets rules) -- each scalar added only

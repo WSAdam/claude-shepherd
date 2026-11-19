@@ -35,6 +35,9 @@ if [ -r "$HERE/SHIPPED" ]; then
   CLAUDE_FILES="$(shipped claude | tr '\n' ' ')"
   HS_FILES="$(shipped hs | tr '\n' ' ')"
   HOOK_RE="$(shipped hook | sed 's/\./\\./g' | paste -sd '|' -)"
+  # 2026-11-19: and the hooks Shepherd no longer ships (install.sh's RETIRED_HOOKS), in case an old
+  # install still wires one
+  [ -z "$HOOK_RE" ] || HOOK_RE="$HOOK_RE|cc-resume\.sh"
 fi
 if [ -z "$CLAUDE_FILES" ] || [ -z "$HS_FILES" ] || [ -z "$HOOK_RE" ]; then
   echo "❌ SHIPPED is missing or empty in $HERE -- it names the files and hooks to remove; aborting before touching anything."
@@ -44,7 +47,7 @@ fi
 STATE="cc-ab.json cc-agents.json cc-approved cc-ask cc-audit cc-automodel cc-autopilot cc-autotitles.json cc-bridge cc-coach
   cc-compare.json cc-config.json cc-decide cc-decide.sh cc-exports cc-fleet cc-gate-tools cc-gate.enabled cc-groups.json cc-guard cc-hidden.json cc-hold cc-inbox cc-labels.json
   cc-lease cc-ledger cc-lesson cc-lock.json cc-main-green.json cc-mcp-configs cc-mcp.json cc-merge cc-notes cc-pin.sh cc-pins cc-policy cc-policy-override cc-presets.json
-  cc-prompts cc-queue cc-recent-dirs.json cc-reqs.json cc-restart.json cc-resume cc-rules.json cc-run cc-scenarios cc-schedules.json cc-scratch cc-send cc-send.sh cc-shepherd.log cc-skill-labels.json cc-tickets
+  cc-prompts cc-queue cc-recent-dirs.json cc-reqs.json cc-restart.json cc-resume cc-resume.sh cc-rules.json cc-run cc-scenarios cc-schedules.json cc-scratch cc-send cc-send.sh cc-shepherd.log cc-skill-labels.json cc-tickets
   cc-status cc-status-mirror cc-talk cc-templates.json cc-usage-state.json cc-worklist.json cc-worklist-archive.json"
 
 echo "🚀 uninstalling Claude Shepherd"

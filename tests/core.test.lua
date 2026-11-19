@@ -2752,10 +2752,11 @@ do
   -- 2026-09-11 requirement change: cc-ask.sh (the question hook) joined the set.
   -- 2026-09-28 requirement change: cc-worktree-guard.sh (one worktree, one agent) joined it.
   -- 2026-09-29 requirement change: cc-resume.sh (resume at the usage limit's reset) joined it.
-  local wantScripts = { "cc-approve.sh", "cc-ask.sh", "cc-popup.sh", "cc-resume.sh", "cc-status.sh", "cc-worktree-guard.sh" }  -- sorted
+  -- 2026-11-19 requirement change: cc-resume.sh left it (resume at the limit reset was removed).
+  local wantScripts = { "cc-approve.sh", "cc-ask.sh", "cc-popup.sh", "cc-status.sh", "cc-worktree-guard.sh" }  -- sorted
   local scriptsOk = (#got == #wantScripts)
   for i = 1, #wantScripts do if got[i] ~= wantScripts[i] then scriptsOk = false end end
-  check("mergeHooks: OUR_HOOK_SCRIPTS == {cc-approve, cc-ask, cc-popup, cc-resume, cc-status, cc-worktree-guard}.sh exactly", scriptsOk)
+  check("mergeHooks: OUR_HOOK_SCRIPTS == {cc-approve, cc-ask, cc-popup, cc-status, cc-worktree-guard}.sh exactly", scriptsOk)
 
   -- 2026-09-28: SHIPPED is the one list of shipped files; its `hook` lines are what install.sh
   -- wires and uninstall.sh removes. OUR_HOOK_SCRIPTS (the panel's hook inventory and Diagnostics)
@@ -8510,7 +8511,8 @@ do
   -- 2026-11-19: 59 -> 58, REQUIREMENT CHANGE: Seance ("seance", flagged new) was removed.
   -- 2026-11-19: 58 -> 57, REQUIREMENT CHANGE: pinned links ("pins", flagged new) were removed.
   -- 2026-11-19: 57 -> 56, REQUIREMENT CHANGE: cc-send ("send", flagged new) was removed.
-  eq("FEATURES: the 56 new features are flagged", newCount, 56)
+  -- 2026-11-19: 56 -> 55, REQUIREMENT CHANGE: resume at the limit reset ("resume", flagged new) was removed.
+  eq("FEATURES: the 55 new features are flagged", newCount, 55)
   check("FEATURES: lists the Compare tab", keys.compare == true)
   check("FEATURES: lists crossings", keys.crossings == true)
   check("FEATURES: lists queue hold and the Queues view", keys.queuehold == true)
@@ -8547,7 +8549,7 @@ do
   check("FEATURES: lists auto-compact with notes", keys.compact == true)
   check("FEATURES: lists what each session is working on", keys.workingon == true)
   check("FEATURES: lists the session mailbox", keys.mailbox == true)
-  check("FEATURES: lists resume at the limit reset", keys.resume == true)
+  check("FEATURES: no resume at the limit reset (removed 2026-11-19, REQUIREMENT CHANGE)", keys.resume == nil)
   check("FEATURES: lists the merge checker", keys.checker == true)
   check("FEATURES: lists handoff notes", keys.handoffs == true)
   check("FEATURES: lists the worktree fence", keys.fence ~= nil)
@@ -13142,7 +13144,7 @@ do
   local byKind = {}
   for _, k in ipairs(core.AUTOMATION_KINDS or {}) do byKind[k.kind] = k end
   for _, want in ipairs({ { "continue", "autoContinue" }, { "feed", "queue" }, { "route", "queue" }, { "rule", "rules" },
-                          { "respawn", "respawn" }, { "summary", "summary" }, { "resume", "resume" },
+                          { "respawn", "respawn" }, { "summary", "summary" },
                           { "tabless_end", "tabless" }, { "mailbox", "mailbox" }, { "rc", "remoteControl" } }) do
     eq("dry run: " .. want[1] .. " is switched by " .. want[2] .. ".dryRun", byKind[want[1]] and byKind[want[1]].feature, want[2])
   end
@@ -13150,13 +13152,16 @@ do
   for _, k in ipairs(core.AUTOMATION_KINDS or {}) do if type(k.label) ~= "string" or k.label == "" then labelled = false end end
   -- 2026-09-30: 10 -> 11 kinds, for "restart" (the requirement grew by one kind; nothing was removed)
   -- 2026-11-19: 11 -> 10, REQUIREMENT CHANGE: restart in place was removed, and its kind with it
-  check("dry run: every kind has a label for the Trace", labelled and #(core.AUTOMATION_KINDS or {}) == 10)
+  -- 2026-11-19: 10 -> 9, REQUIREMENT CHANGE: resume at the limit reset was removed, and its kind with it
+  check("dry run: every kind has a label for the Trace", labelled and #(core.AUTOMATION_KINDS or {}) == 9)
   check("dry run: no restart kind or typist (restart in place was removed 2026-11-19)",
         byKind.restart == nil and (core.AUTOMATION_TYPISTS or {}).restart == nil)
+  check("dry run: no resume kind or typist (resume at the limit reset was removed 2026-11-19)",
+        byKind.resume == nil and (core.AUTOMATION_TYPISTS or {}).resume == nil)
   -- every automated typist maps to its kind
   for typist, kind in pairs({ autofeed = "feed", router = "route", ["rule-nudge"] = "rule", ["rule-continue"] = "rule",
                               ["auto-continue"] = "continue", summary = "summary", mailbox = "mailbox",
-                              resume = "resume", ["rc-sweep"] = "rc" }) do
+                              ["rc-sweep"] = "rc" }) do
     eq("dry run: typist " .. typist .. " is kind " .. kind, (core.AUTOMATION_TYPISTS or {})[typist], kind)
   end
 
@@ -13203,7 +13208,7 @@ do
     for _, k in ipairs(core.SETTINGS_KEEP_SUBKEYS[block] or {}) do if k == "dryRun" then return true end end
     return false
   end
-  for _, block in ipairs({ "automation", "queue", "autoContinue", "rules", "respawn", "summary", "resume",
+  for _, block in ipairs({ "automation", "queue", "autoContinue", "rules", "respawn", "summary",
                            "tabless", "mailbox", "remoteControl" }) do
     check("dry run: " .. block .. ".dryRun is in SETTINGS_KEEP_SUBKEYS", keeps(block))
   end
@@ -14362,39 +14367,23 @@ bug("loop signature of a search", function()
   eq("a Glob with nothing in it is still just its name", core.toolCallSig("Glob", {}), "Glob\1")
 end)
 
--- A usage-limited card with a resume scheduled at the reset still ranks red "Needs you"
+-- A usage-limited card reads as an error that needs Adam
 bug("usage limit with a resume scheduled", function()
-  -- 2026-09-30: core.needsYouKind kept every usage limit red ("he waits, or switches"), written
-  -- before resume at the reset existed (unit 13). With a resume scheduled Shepherd does the waiting.
+  -- 2026-09-30: with a resume scheduled at the reset the card was a heads-up. 2026-11-19, REQUIREMENT
+  -- CHANGE: resume at the limit reset was removed (Adam: "prune features I have no use for"), so a
+  -- usage limit is an error that needs him again, whatever a stale it.resume says.
   local NOW = 1000000
   local function limited(extra)
     local it = { key = "l", status = "error", error_reason = "budget_exceeded", errorEpisode = { since = NOW - 600, count = 1 } }
     for k, v in pairs(extra or {}) do it[k] = v end
     return it
   end
-  local arm = { nonce = "n1", state = "waiting" }
-  local plan = { nonce = "n1", verdict = "wait", resetAt = NOW + 3600 }
-  local waiting = limited()
-  waiting.resume = core.resumeCard(arm, plan, waiting, NOW, 0)
-  eq("the fixture's card says when it resumes", waiting.resume and waiting.resume.phase, "waiting")
-  local kind, source, why = core.needsYouKind(waiting, NOW)
-  eq("a usage limit with a resume scheduled at the reset is a heads-up", kind, "fyi")
-  eq("...still from the error", source, "error")
-  check("...and says it resumes by itself  (" .. tostring(why) .. ")", type(why) == "string" and why:find("resume", 1, true) ~= nil)
-  eq("...so it ranks below a working session", core.instanceTier(waiting, {}, NOW), core.TIER_FYI)
-  local due = limited()
-  due.resume = core.resumeCard(arm, plan, due, NOW + 3601, 0)
-  eq("once the reset has passed it needs Adam again until it is going", (core.needsYouKind(due, NOW + 3601)), "needs")
-  local shared = limited()
-  shared.resume = core.resumeCard(arm, { nonce = "n1", verdict = "wait", resetAt = NOW - 300, notifiedAt = NOW - 100 }, shared, NOW, 0)
-  eq("a reset Shepherd couldn't type into a shared window is his to continue", (core.needsYouKind(shared, NOW)), "needs")
-  local model = limited()
-  model.resume = core.resumeCard(arm, { nonce = "n1", verdict = "skip", reason = "model", model = "Opus" }, model, NOW, 0)
-  eq("a per-model limit (nothing scheduled: switch model) still needs him", (core.needsYouKind(model, NOW)), "needs")
-  eq("a usage limit with no resume scheduled still needs him", (core.needsYouKind(limited(), NOW)), "needs")
-  local gone = limited({ procAlive = false })
-  gone.resume = { phase = "waiting", line = "resumes at 3:00pm", cancel = true, now = true }
-  eq("a resume scheduled for a session whose process has gone can't happen: it needs him", (core.needsYouKind(gone, NOW)), "needs")
+  check("core keeps no resume plan or card", core.resumeCard == nil and core.resumePlan == nil and core.RESUME == nil)
+  local kind, source = core.needsYouKind(limited(), NOW)
+  eq("a usage limit needs him", kind, "needs")
+  eq("...from the error", source, "error")
+  eq("...even with a stale resume on the card", (core.needsYouKind(limited({ resume = { phase = "waiting", line = "resumes at 3:00pm" } }), NOW)), "needs")
+  eq("...and it ranks as Needs you (the error tier, above a heads-up)", core.instanceTier(limited(), {}, NOW), 2)
 end)
 
 -- An error you stopped yourself, or one on an exited session, reads "Retrying" on its card
@@ -14411,9 +14400,9 @@ bug("retrying only when something retries", function()
   eq("...nor a stale error on a session that has exited",
      retrying({ key = "e", status = "error", error_reason = "runtime_error", procAlive = false, stale = true,
                 errorEpisode = { since = NOW - 400, count = 1 } }), nil)
-  eq("...nor a usage limit waiting for its reset",
-     retrying({ key = "e", status = "error", error_reason = "budget_exceeded",
-                resume = { phase = "waiting", line = "resumes at 3:00pm", cancel = true, now = true } }), nil)
+  -- (2026-11-19: the fixture's resume line went with resume at the limit reset)
+  eq("...nor a usage limit",
+     retrying({ key = "e", status = "error", error_reason = "budget_exceeded" }), nil)
   eq("...nor a heads-up that isn't an error at all",
      retrying({ key = "m", status = "done", merge = { phase = "merged", needsYou = true } }), nil)
   eq("...nor an error that needs him", retrying({ key = "e", status = "error", error_reason = "unknown" }), nil)

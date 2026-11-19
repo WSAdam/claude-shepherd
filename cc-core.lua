@@ -1668,8 +1668,7 @@ M.FYI_WORD = "Heads-up"
 -- (2026-09-17 live: Adam started a VPN, a card went red with "[runtime error] Connectio..."
 -- and outranked every working session; the fault healed itself and the session was back to
 -- "working" 40s later, with nothing that was ever his to do.) budget_exceeded is deliberately
--- NOT here -- a usage limit is something he acts on: wait, or switch. (2026-09-30: unless a resume
--- is already scheduled at its reset; needsYouKind's error arm says when.)
+-- NOT here -- a usage limit is something he acts on: wait, or switch.
 M.ERROR_TRANSIENT = { runtime_error = true, timeout = true, model_error = true }
 -- 75s: past a retry round-trip and past the 40s the VPN blip took to heal, while still well
 -- inside the time it takes him to walk back to the screen. Still failing after 75s is an
@@ -1795,14 +1794,8 @@ function M.needsYouKind(it, now)
     if not alive and it.stale then return "fyi", "error", "that session has exited" end
     local reason = tostring(it.error_reason or "unknown")
     if reason == "user_cancelled" then return "fyi", "error", "you stopped it yourself" end
-    -- 2026-09-30: a usage limit with a resume already scheduled at the reset (it.resume, from
-    -- core.resumeCard via FX.stepResume) has nothing of his to do until then: Shepherd does the
-    -- waiting, and Resume now / Cancel stay on the card. Only while the reset is still ahead and the
-    -- session is alive to be woken -- past it, or once Shepherd couldn't type it, it is his again.
-    local rs = type(it.resume) == "table" and it.resume or nil
-    if reason == "budget_exceeded" and alive and rs and rs.phase == "waiting" then
-      return "fyi", "error", "the usage limit resets by itself -- it resumes then"
-    end
+    -- (2026-11-19: a usage limit's "it resumes at the reset" heads-up went with resume at the limit
+    -- reset; a usage limit is an error that needs him, like any other non-transient cause.)
     if not M.ERROR_TRANSIENT[reason] then return "needs", "error" end
     if not alive or it.hung then return "needs", "error" end   -- nothing is left to retry it
     local ep = type(it.errorEpisode) == "table" and it.errorEpisode or {}
@@ -7140,7 +7133,7 @@ local NARRATE = {
   would_rule    = { "🧪", "would fire a rule" },
   would_respawn = { "🧪", "would respawn" },
   would_summary = { "🧪", "would ask for a summary" },
-  would_resume  = { "🧪", "would resume at the reset" },
+  would_resume  = { "🧪", "would resume at the reset" },   -- (resume at the reset: removed 2026-11-19; old ledgers)
   would_tabless_end = { "🧪", "would end a tab-less leftover" },
   would_mailbox = { "🧪", "would leave a message" },
   would_rc      = { "🧪", "would type /rc" },
@@ -12810,7 +12803,6 @@ M.SETTINGS_KEEP_SUBKEYS = {
   rules = { "dryRun" },
   respawn = { "dryRun" },
   summary = { "dryRun" },
-  resume = { "dryRun" },
   tabless = { "dryRun" },
   mailbox = { "dryRun" },
   remoteControl = { "dryRun" },
@@ -12904,8 +12896,8 @@ end
 -- user hook whose basename ENDS in one of these (e.g. my-cc-status.sh) is a false
 -- positive, acceptable next to the old bare-"cc-" net. KEEP IN SYNC with SHIPPED's `hook`
 -- lines, which install.sh wires and uninstall.sh removes (tests/core.test.lua checks).
-M.OUR_HOOK_SCRIPTS = { "cc-status.sh", "cc-approve.sh", "cc-popup.sh", "cc-ask.sh", "cc-worktree-guard.sh",
-                       "cc-resume.sh" }
+-- (2026-11-19: cc-resume.sh went with resume at the limit reset; install.sh strips its old wiring.)
+M.OUR_HOOK_SCRIPTS = { "cc-status.sh", "cc-approve.sh", "cc-popup.sh", "cc-ask.sh", "cc-worktree-guard.sh" }
 function M.mergeHooks(existing, template)
   existing = type(existing) == "table" and existing or {}
   local out = {}
@@ -13004,7 +12996,6 @@ M.HOOK_WIRING = {
   { event = "Stop", script = "cc-status.sh" },
   { event = "Stop", script = "cc-popup.sh" },
   { event = "StopFailure", script = "cc-status.sh" },
-  { event = "StopFailure", script = "cc-resume.sh" },
   { event = "PreCompact", script = "cc-status.sh" },
   { event = "SessionEnd", script = "cc-status.sh" },
 }
@@ -14136,7 +14127,6 @@ M.DRY_RUN_FEATURES = {
   { feature = "rules",         label = "Automation rules" },
   { feature = "respawn",       label = "Auto-respawn" },
   { feature = "summary",       label = "Post-run self-summary" },
-  { feature = "resume",        label = "Resume at the limit reset" },
   { feature = "tabless",       label = "Ending tab-less leftovers" },
   { feature = "mailbox",       label = "Mailbox messages" },
   { feature = "remoteControl", label = "The /rc startup sweep" },
@@ -14149,7 +14139,6 @@ M.AUTOMATION_KINDS = {
   { kind = "rule",        feature = "rules",         label = "Rule" },
   { kind = "respawn",     feature = "respawn",       label = "Auto-respawn" },
   { kind = "summary",     feature = "summary",       label = "Self-summary" },
-  { kind = "resume",      feature = "resume",        label = "Resume at the reset" },
   { kind = "tabless_end", feature = "tabless",       label = "End tab-less leftover" },
   { kind = "mailbox",     feature = "mailbox",       label = "Mailbox" },
   { kind = "rc",          feature = "remoteControl", label = "/rc sweep" },
@@ -14157,7 +14146,7 @@ M.AUTOMATION_KINDS = {
 -- FX.typeWhenReady's senders -> their kind.
 M.AUTOMATION_TYPISTS = {
   autofeed = "feed", router = "route", ["rule-nudge"] = "rule", ["rule-continue"] = "rule",
-  ["auto-continue"] = "continue", summary = "summary", mailbox = "mailbox", resume = "resume", ["rc-sweep"] = "rc",
+  ["auto-continue"] = "continue", summary = "summary", mailbox = "mailbox", ["rc-sweep"] = "rc",
 }
 local AUTOMATION_FEATURE_OF = {}
 for _, k in ipairs(M.AUTOMATION_KINDS) do AUTOMATION_FEATURE_OF[k.kind] = k.feature end
@@ -15045,272 +15034,6 @@ function M.crossRows(records, onCard, nameOf)
                         fromRepo = M.capChars(repoName({ root = r.from.root }), 80), view = M.crossView(r) }
   end
   return rows
-end
-end
-
--- ---- Resume at the usage limit's reset (2026-09-29) ----
--- Build program unit 13. A turn stopped by a usage limit fires StopFailure (error "rate_limit"):
--- cc-resume.sh arms ~/.claude/cc-resume/<key>.json and waits. Shepherd plans it here -- when the
--- limit resets (the plan meter's resets_at for the full window, else the time in the error text),
--- whether to wait at all (once per window per session, never for a per-model limit, never while
--- Claude Code's own autoContinueAtUsageLimit resumes a terminal session) -- and writes
--- <key>.plan.json, bound to the arm's nonce. The hook fires at the reset plus jitter (exit 2,
--- asyncRewake). The rewake of an IDLE session is unverified, so past the reset Shepherd looks
--- again: a session still stopped gets the line typed where typing is allowed, and a card in a
--- VS Code window shared with other Claude tabs says so instead. (One do-block: its helpers take
--- none of the main chunk's 200 locals.)
-do
-M.RESUME = {
-  line = "[shepherd] The usage limit has reset: continue the task.",
-  jitterMin = 15, jitterMax = 75,   -- the hook's wait past the reset, so a fleet doesn't wake at once
-  poll = 15,                        -- how often the hook looks at the plan, the cancel file and the pid
-  fallbackGrace = 120,              -- Shepherd's fallback runs this long past the reset (> jitter + poll)
-  nowGrace = 30,                    -- ...or past a Resume now (the hook fires at its next poll)
-  maxWaitSeconds = 8 * 86400,       -- the hook's timeout: a reset further out isn't waited for
-  capDays = 8,                      -- a window tried is remembered this long
-}
-local RESUME_MONTHS = { jan = 1, feb = 2, mar = 3, apr = 4, may = 5, jun = 6, jul = 7, aug = 8,
-                        sep = 9, oct = 10, nov = 11, dec = 12 }
-local RESUME_MONTH_NAMES = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" }
--- tz: seconds east of UTC, or a function of the epoch that returns them (core.localTzOffset).
-local function resumeOffset(tz, e)
-  if type(tz) == "function" then return tonumber(tz(e)) or 0 end
-  return tonumber(tz) or 0
-end
--- The epoch of a civil local time, in the offset that holds AT that time (two passes, so a reset
--- on the far side of a daylight-saving change reads right). nil for a date that doesn't exist.
-local function resumeLocalEpoch(y, mo, d, h, mi, tz, ref)
-  local base = M.isoToEpoch(string.format("%04d-%02d-%02dT%02d:%02d:00Z", y, mo, d, h, mi))
-  if not base then return nil end
-  local t = os.date("!*t", base)
-  if t.month ~= mo or t.day ~= d then return nil end   -- Feb 30 and friends
-  local guess = base - resumeOffset(tz, ref)
-  return base - resumeOffset(tz, guess)
-end
-
--- The reset in a usage-limit message, as an epoch: "You've hit your session limit · resets 3pm
--- (America/New_York)". Claude Code prints a time of day ("3pm", "3:30pm") when the reset is under
--- a day away, else a date ("Oct 3, 9am", with the year when it isn't this one), in its own zone,
--- which it names in brackets -- the machine's, so it is read in `tz`. A time of day is its next
--- occurrence after `ref`, when the message was written (Claude Code drops the seconds, so a
--- couple of minutes' slack). Returns epoch, zone name; nil when there is no reset to read.
-function M.parseResetTime(text, ref, tz)
-  if type(text) ~= "string" then return nil end
-  ref = tonumber(ref)
-  if not ref then return nil end
-  local s = text:match("[Rr]esets%s+(.*)$")
-  if not s then return nil end
-  s = s:gsub("%s*\194\183.*$", "")                        -- up to the next " · " (e.g. "progress saved")
-  local zone = s:match("%(([^)]*)%)")
-  s = s:gsub("%b()", ""):gsub("\226\128\175", " "):gsub("^%s+", ""):gsub("%s+$", "")
-  local mon, day, rest = s:match("^(%a+)%.?%s+(%d%d?)(.*)$")
-  local mo, year
-  if mon then
-    mo = RESUME_MONTHS[mon:sub(1, 3):lower()]
-    if not mo or #mon < 3 then return nil end
-    day = tonumber(day)
-    local y2, rest2 = rest:match("^,%s*(%d%d%d%d)(.*)$")
-    if y2 then year, rest = tonumber(y2), rest2 end
-    rest = rest:gsub("^,%s*", ""):gsub("^%s+", "")
-  else
-    rest = s
-  end
-  local h, mi
-  if rest ~= "" then
-    local hh, mm, ap = rest:match("^(%d%d?):(%d%d)%s*([AaPp][Mm])$")
-    if not hh then hh, ap = rest:match("^(%d%d?)%s*([AaPp][Mm])$"); mm = "0" end
-    if not hh then return nil end
-    h, mi = tonumber(hh), tonumber(mm)
-    if h < 1 or h > 12 or mi > 59 then return nil end
-    local pm = ap:lower() == "pm"
-    if h == 12 then h = pm and 12 or 0 elseif pm then h = h + 12 end
-  elseif mon then
-    h, mi = 0, 0                                            -- a date alone: its midnight
-  else
-    return nil
-  end
-  local SLACK = 120
-  if mon then
-    local refLocal = os.date("!*t", ref + resumeOffset(tz, ref))
-    local e = resumeLocalEpoch(year or refLocal.year, mo, day, h, mi, tz, ref)
-    if e and not year and e < ref - 86400 then e = resumeLocalEpoch(refLocal.year + 1, mo, day, h, mi, tz, ref) end
-    if not e then return nil end
-    return e, zone
-  end
-  local today = os.date("!*t", ref + resumeOffset(tz, ref))
-  local e = resumeLocalEpoch(today.year, today.month, today.day, h, mi, tz, ref)
-  if e and e < ref - SLACK then
-    local nxt = os.date("!*t", ref + resumeOffset(tz, ref) + 86400)
-    e = resumeLocalEpoch(nxt.year, nxt.month, nxt.day, h, mi, tz, ref)
-  end
-  if not e then return nil end
-  return e, zone
-end
-
--- Which limit stopped it, from Claude Code's own labels ("You've hit your <label> · ..."):
--- "session" (the 5-hour window), "weekly", "model" + its name for a per-model limit (Opus limit,
--- Fable limit -- the only labels that start with a capital), else "other" (spend, fast mode...).
-function M.resumeLimit(message)
-  local s = tostring(message or ""):gsub("\226\128\153", "'")
-  local label = s:match("hit your ([%w%s']-) limit")
-  if label == "session" then return "session" end
-  if label == "weekly" then return "weekly" end
-  if label and label:match("^%u%a*$") then return "model", label end
-  return "other"
-end
-
--- Claude Code's own autoContinueAtUsageLimit (its settings.json) waits for the reset and
--- continues a terminal session itself; Shepherd stands down there rather than resume it twice.
--- Claude Code reads the key ABSENT as on (2.1.284: `autoContinueAtUsageLimit: kCt() ?? true`), so
--- only an explicit false hands a kitty or terminal session to Shepherd.
-function M.resumeStandDown(editor, ccSettings)
-  if editor ~= "kitty" and editor ~= "terminal" then return false end
-  return not (type(ccSettings) == "table" and ccSettings.autoContinueAtUsageLimit == false)
-end
-
-local RESUME_ARM_STATES = { waiting = true, fired = true, cancelled = true, skipped = true, expired = true }
-local RESUME_VERDICTS = { wait = true, skip = true, cancelled = true }
-local function resumeDecode(raw)
-  if type(raw) ~= "string" or raw == "" then return nil end
-  local ok, t = pcall(function() return M.json.decode(raw) end)
-  if not ok or type(t) ~= "table" then return nil end
-  if type(t.nonce) ~= "string" or not t.nonce:match("^%w+$") then return nil end
-  return t
-end
-local function str(v) return type(v) == "string" and v or nil end
--- The arm cc-resume.sh writes, read back; nil for anything torn, foreign or unknown.
-function M.parseResumeArm(raw)
-  local t = resumeDecode(raw)
-  if not t or not M.mailboxKeyOk(t.key) or not RESUME_ARM_STATES[t.state] then return nil end
-  return { key = t.key, session_id = str(t.session_id), nonce = t.nonce, pid = tonumber(t.pid),
-           waiter = tonumber(t.waiter), editor = str(t.editor), kind = str(t.kind),
-           message = str(t.message) or "", armedAt = tonumber(t.armedAt), state = t.state,
-           firedAt = tonumber(t.firedAt) }
-end
--- The plan Shepherd writes, read back whole (a rewrite keeps every field).
-function M.parseResumePlan(raw)
-  local t = resumeDecode(raw)
-  if not t or not RESUME_VERDICTS[t.verdict] then return nil end
-  return { nonce = t.nonce, verdict = t.verdict, reason = str(t.reason), resetAt = tonumber(t.resetAt),
-           window = str(t.window), limit = str(t.limit), model = str(t.model), source = str(t.source),
-           now = t.now == true or nil, plannedAt = tonumber(t.plannedAt), typedAt = tonumber(t.typedAt),
-           notifiedAt = tonumber(t.notifiedAt), doneAt = tonumber(t.doneAt) }
-end
-
--- An ISO resets_at with its UTC offset ("2026-09-29T19:00:00.5+00:00"), as an epoch.
-local function resumeIsoEpoch(s)
-  local e = M.isoToEpoch(s)
-  if not e then return nil end
-  local sign, oh, om = s:match("([+%-])(%d%d):?(%d%d)%s*$")
-  if sign then
-    local off = tonumber(oh) * 3600 + tonumber(om) * 60
-    e = e + ((sign == "-") and off or -off)
-  end
-  return e
-end
-
-function M.resumeCapKey(key, window) return tostring(key) .. "|" .. tostring(window) end
--- Forget attempts older than the longest wait. Mutates caps; returns how many it dropped.
-function M.pruneResumeCaps(caps, now)
-  if type(caps) ~= "table" then return 0 end
-  local cutoff, drop = (tonumber(now) or 0) - M.RESUME.capDays * 86400, {}
-  for k, v in pairs(caps) do
-    if not tonumber(v) or tonumber(v) < cutoff then drop[#drop + 1] = k end
-  end
-  for _, k in ipairs(drop) do caps[k] = nil end
-  return #drop
-end
-
--- Plan an arm: { nonce, verdict = "wait"|"skip", reason, resetAt, window, limit, model, source,
--- plannedAt }. ctx = { now, tz, enabled, standDown }; caps = the attempts already made, keyed
--- core.resumeCapKey(session, window). The window is the limit plus its reset to the minute, so
--- the plan meter and the error text name the same one.
-function M.resumePlan(arm, official, caps, ctx)
-  ctx = type(ctx) == "table" and ctx or {}
-  arm = type(arm) == "table" and arm or {}
-  local now = tonumber(ctx.now) or os.time()
-  local plan = { nonce = arm.nonce, plannedAt = now }
-  local function skip(reason) plan.verdict = "skip"; plan.reason = reason; return plan end
-  local limit, model = M.resumeLimit(arm.message)
-  plan.limit, plan.model = limit, model
-  if ctx.enabled == false then return skip("off") end
-  if limit == "model" then return skip("model") end
-  if ctx.standDown then return skip("claude-code") end
-  local resetAt, source
-  local win = type(official) == "table"
-    and ((limit == "session" and official.five_hour) or (limit == "weekly" and official.seven_day)) or nil
-  if type(win) == "table" and type(win.resets_at) == "string" then
-    local e = resumeIsoEpoch(win.resets_at)
-    if e and e > now - 60 then resetAt, source = e, "plan" end
-  end
-  if not resetAt then
-    resetAt = M.parseResetTime(arm.message, tonumber(arm.armedAt) or now, ctx.tz)
-    source = resetAt and "message" or nil
-  end
-  if not resetAt then return skip("no reset") end
-  plan.resetAt, plan.source = math.floor(resetAt), source
-  if resetAt - now > M.RESUME.maxWaitSeconds then return skip("too far") end
-  plan.window = limit .. ":" .. string.format("%d", math.floor((resetAt + 30) / 60) * 60)
-  if type(caps) == "table" and caps[M.resumeCapKey(arm.key, plan.window)] then return skip("tried") end
-  plan.verdict = "wait"
-  return plan
-end
-
--- What Shepherd does this tick for an armed session: nil (nothing), "wait" (not due yet),
--- "resumed" (it's going again -- the rewake or Adam started it), "type" (still stopped, and
--- typing is allowed: kitty, or a VS Code window to itself) or "notify" (still stopped in a VS
--- Code window shared with other Claude tabs: its card says so and the phone gets a push). A
--- plan that already typed, notified or saw it resume does nothing again.
-function M.resumeRoute(arm, plan, it, now)
-  if type(arm) ~= "table" or type(plan) ~= "table" or plan.nonce ~= arm.nonce then return nil end
-  if plan.verdict ~= "wait" or (arm.state ~= "waiting" and arm.state ~= "fired") then return nil end
-  if plan.typedAt or plan.notifiedAt or plan.doneAt then return nil end
-  local resetAt = tonumber(plan.resetAt)
-  if not resetAt then return nil end
-  local due = resetAt + (plan.now and M.RESUME.nowGrace or M.RESUME.fallbackGrace)
-  if (tonumber(now) or 0) < due then return "wait" end
-  if type(it) ~= "table" or it.remote then return nil end
-  if it.status == "working" or it.status == "approval" or it.gate == "waiting" then return "resumed" end
-  if M.keystrokeBlocked(it) then return "notify" end
-  return "type"
-end
-
--- "3:00pm", or "Oct 3 at 9:00am" when the time is more than a day out.
-function M.resumeClock(e, now, tz)
-  e = tonumber(e) or 0
-  local t = os.date("!*t", e + resumeOffset(tz, e))
-  local h = t.hour % 12
-  if h == 0 then h = 12 end
-  local s = string.format("%d:%02d%s", h, t.min, t.hour < 12 and "am" or "pm")
-  if e - (tonumber(now) or e) > 86400 then return RESUME_MONTH_NAMES[t.month] .. " " .. t.day .. " at " .. s end
-  return s
-end
-
--- What the card says: { phase, line, cancel, now } or nil. "resumes at 3:00pm" with Cancel and
--- Resume now while it waits; "resuming now" past the reset; "limit reset — continue it" where
--- Shepherd couldn't type it; "<Model> limit — switch model" for a per-model limit.
-function M.resumeCard(arm, plan, it, now, tz)
-  if type(arm) ~= "table" or type(plan) ~= "table" or plan.nonce ~= arm.nonce then return nil end
-  if type(it) == "table" and it.status == "working" then return nil end
-  if arm.state == "cancelled" or plan.verdict == "cancelled" then return nil end
-  if plan.verdict == "skip" then
-    if plan.reason == "model" then
-      return { phase = "model", line = tostring(plan.model or "model") .. " limit — switch model" }
-    end
-    return nil
-  end
-  if plan.typedAt or plan.doneAt then return nil end
-  if plan.notifiedAt then return { phase = "reset", line = "limit reset — continue it" } end
-  if arm.state ~= "waiting" and arm.state ~= "fired" then return nil end
-  local resetAt = tonumber(plan.resetAt)
-  if not resetAt then return nil end
-  now = tonumber(now) or 0
-  if now < resetAt then
-    local clock = M.resumeClock(resetAt, now, tz)
-    local line = (resetAt - now > 86400) and ("resumes " .. clock) or ("resumes at " .. clock)
-    return { phase = "waiting", line = line, cancel = true, now = true }
-  end
-  return { phase = "due", line = "resuming now", cancel = true }
 end
 end
 
@@ -25647,11 +25370,8 @@ M.FEATURES = {
   { key = "mailbox", cat = "Automate", new = true, title = "Session mailbox",
     what = "Shepherd can leave a session a message instead of typing it. The message waits in ~/.claude/cc-inbox and arrives when the session's current turn ends -- it carries on with it -- or at its next start. An idle session in a kitty window or a VS Code window of its own gets it typed, as one line, once it's ready; in a VS Code window shared with other Claude tabs nothing is typed and the card says the message is waiting. Diagnostics counts what's waiting.",
     why = "Automation can reach a session in a shared window, or mid-turn, without keystrokes landing in the wrong tab." },
-  { key = "resume", cat = "Automate", new = true, title = "Resume at the limit reset",
-    what = "A session stopped by a usage limit carries on by itself when the limit resets, once per window. Its card says \"resumes at 3:00pm\", with Cancel and Resume now. The reset comes from the plan meter, or from the error's own \"resets 3pm\". A per-model limit says \"switch model\" instead. In a VS Code window shared with other Claude tabs, where Shepherd may not type, the card says \"limit reset — continue it\" and your phone gets a push.",
-    why = "A fleet that hits the 5-hour limit overnight picks up at the reset instead of waiting for you to notice." },
   { key = "trace", cat = "Automate", new = true, title = "Automation dry run & trace",
-    what = "Every automatic action -- auto-continue, auto-feed and routing, rules, respawn, the self-summary, resume at the reset, ending a tab-less leftover, a mailbox message, the /rc sweep -- is recorded as acted, refused (with why) or, in a dry run, would. Settings turns dry run on for all automation or one feature at a time; ☰ → Automation trace (or ⚡ Trace in the detail panel for one session) lists the decisions newest first, repeats collapsed to ×N.",
+    what = "Every automatic action -- auto-continue, auto-feed and routing, rules, respawn, the self-summary, ending a tab-less leftover, a mailbox message, the /rc sweep -- is recorded as acted, refused (with why) or, in a dry run, would. Settings turns dry run on for all automation or one feature at a time; ☰ → Automation trace (or ⚡ Trace in the detail panel for one session) lists the decisions newest first, repeats collapsed to ×N.",
     why = "See what automation would do before you let it, and what it did while you were away." },
   { key = "compact", cat = "Automate", new = true, title = "Auto-compact with notes",
     what = "Claude Code compacts each session at 85% of its window (changeable in Settings; Shepherd sets CLAUDE_AUTOCOMPACT_PCT_OVERRIDE in ~/.claude/settings.json). At the first turn end a few points before that, the session is asked once to write its working notes to ~/.claude/cc-notes; the summary is told they come back, and the session gets them back whole right after it compacts. A 📝 on the card means it has notes; the detail panel says when they're next due. Diagnostics warns if the installed claude stops reading the override.",

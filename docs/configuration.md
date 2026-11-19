@@ -95,11 +95,10 @@ install's [defaults](../defaults/cc-config.json) differ.
 | Key | Default | Fresh install | Reference |
 |-----|---------|---------------|-----------|
 | `automation.dryRun` | `false` | | [Dry run](automation.md#dry-run-and-the-automation-trace) |
-| `<feature>.dryRun` (`autoContinue`, `queue`, `rules`, `respawn`, `summary`, `resume`, `tabless`, `mailbox`, `remoteControl`, `restart`) | `false` | | [Dry run](automation.md#dry-run-and-the-automation-trace) |
+| `<feature>.dryRun` (`autoContinue`, `queue`, `rules`, `respawn`, `summary`, `tabless`, `mailbox`, `remoteControl`) | `false` | | [Dry run](automation.md#dry-run-and-the-automation-trace) |
 | `autoContinue.backoff.startSeconds` / `maxSeconds` | `120` / `1800` (`startSeconds: 0` turns it off) | | [Auto-continue](automation.md#auto-respawn-and-auto-continue) |
 | `compact.enabled` | `false` | `true` | [Auto-compact with notes](automation.md#auto-compact-with-notes) |
 | `compact.atPct` / `notesLeadPct` | `85` / `5` | | [Auto-compact with notes](automation.md#auto-compact-with-notes) |
-| `resume.enabled` | `true` | | [Resume at the limit reset](automation.md#resume-at-the-limit-reset) |
 | `coach.enabled` | `false` (the 🧭 Coach button works either way) | | [The coach](automation.md#the-coach) |
 | `coach.day` / `maxBudgetUsd` / `timeoutSeconds` | `"mon"` / `1` / `600` | | [The coach](automation.md#the-coach) |
 | `coach.evidence.minItems` / `cooldownHours` / `dailyUsd` | unset: no evidence runs / `24` / `3` (evidence runs also need `coach.enabled`) | `10` | [Evidence runs](automation.md#the-coach) |
@@ -178,7 +177,7 @@ Everything lives under `~/.claude/`:
 | `cc-queue/` | Each project's [task queue](automation.md#task-queue) and its [packets](automation.md#task-packets) |
 | `cc-pins/`, `cc-pin.sh` | Left by pinned links, removed 2026-11-19: nothing reads them; `--purge` deletes them |
 | `cc-talk/` | Left by talk mode, removed 2026-11-19: nothing reads it; `--purge` deletes it |
-| `cc-resume/` | [Resumes waiting for a usage limit's reset](automation.md#resume-at-the-limit-reset): the hook's arm, Shepherd's plan, a Cancel |
+| `cc-resume/`, `cc-resume.sh` | Left by resume at the limit reset, removed 2026-11-19: nothing reads them, and `make setup` unwires and deletes the hook; `--purge` deletes them |
 | `cc-notes/` | [Handoff notes](automation.md#handoff-notes), and [auto-compact](automation.md#auto-compact-with-notes)'s due-ats and each session's own notes; `pending/` also holds an [agent profile](providers-and-integrations.md#agent-profiles)'s policy bundle until the session it spawned takes it |
 | `cc-bridge/` | The tab bridge's per-window tab lists and command folders |
 | `cc-lease/` | [Worktree leases](fleet.md#worktree-leases): each repo's leased ports and database paths, and (by default) the databases in `db/` |

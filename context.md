@@ -16,11 +16,11 @@ A local, single-user macOS console for a fleet of Claude Code sessions (renamed 
 write each session's status to `~/.claude/cc-status/`; the panel turns that into one card per
 project, and lets Adam approve, deny, answer a held question, stop, nudge, jump to or close a
 session. It also runs Adam's parallel-worktree method end to end. What it automates, by area
-(the README's [feature tour](README.md#feature-tour) has the full list; `core.FEATURES` holds 89
+(the README's [feature tour](README.md#feature-tour) has the full list; `core.FEATURES` holds 82
 entries):
 
 - **Feeding work:** task queues with auto-feed and routing, routines (cron spawns, digests, the
-  main-green check), event rules, auto-continue with back-off, resume at a usage-limit reset,
+  main-green check), event rules, auto-continue with back-off,
   auto-respawn with handoff notes, auto-compact with notes, task packets.
 - **Steering without keystrokes:** the session mailbox, cross-repo tickets,
   AskUserQuestion answered on the card, the Stop guards.
@@ -84,7 +84,7 @@ Single user, no server, no accounts. Records store env-var names, never secrets.
   | PostToolUseFailure | `cc-status.sh` (clears `tool_started_at` after a failed tool; without it `core.readyToType` refused every send to that session) |
   | PermissionRequest, Notification | `cc-status.sh`, `cc-popup.sh approval` |
   | Stop | `cc-status.sh stop` (can block the turn, see below), `cc-popup.sh complete` |
-  | StopFailure | `cc-status.sh`; matcher `rate_limit`: `cc-resume.sh` (async, asyncRewake) |
+  | StopFailure | `cc-status.sh` (`cc-resume.sh`, which waited out a usage limit, was removed 2026-11-19; `make setup` unwires it) |
   | PreCompact | `cc-status.sh precompact` |
   | SessionEnd | `cc-status.sh sessionend` (`cc_remove` reaps the session's files) |
 
@@ -260,8 +260,6 @@ disk, `FX.alert`, interrupted turns, FSEvents). These are the others.
   keyboard path.
 - **Keystrokes go to a window, not a tab**, so a VS Code window with several sessions gets none
   (mailbox instead). Kitty (`kitty @`) is the one surface where typing is fully reliable.
-- **Waking an idle session** with `asyncRewake` (the resume at a limit reset) is unverified; Shepherd
-  types the line where typing is allowed, else says so on the card and pushes.
 - **A pop on completion** with both `popOn*` flags off is the VS Code extension raising its own
   window, not Shepherd.
 
@@ -363,7 +361,7 @@ each unit a worktree that Shepherd merged on a green gate. The
 - Reaching a session: the session mailbox, tickets (`cc-ticket.sh`). (Restart fleet in place,
   `cc-send.sh` and the decisions inbox, `cc-decide.sh` and ☰ → 📥 Inbox, were removed 2026-11-19.)
 - Automation: readiness before typing, the automation door with dry run and the ⚡ Trace,
-  auto-continue back-off, resume at the limit reset (`cc-resume.sh`), handoff notes, auto-compact with
+  auto-continue back-off, handoff notes, auto-compact with
   notes, task packets, the coach.
 - Safety: always-ask commands, the worktree fence, `cc-worktree-guard.sh`.
 - Merging: merge hardening (markers, clean main, stash count), the merge checker, the red-first proof,

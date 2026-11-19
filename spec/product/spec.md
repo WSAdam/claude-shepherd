@@ -87,7 +87,6 @@ return paths for the answers only Adam gives. No daemon, no socket, no DB.
 Claude Code hooks ──► cc-status.sh ──► ~/.claude/cc-status/<session_id>.json ──► dashboard (tiles)
                   ├─► cc-approve.sh ◄── ~/.claude/cc-status/<session_id>.decision ◄── (panel Approve/Deny)
                   ├─► cc-ask.sh ◄── ~/.claude/cc-ask/<key>.answer ◄── (panel answers a held question)
-                  ├─► cc-resume.sh ◄── ~/.claude/cc-resume/<key>.plan.json ◄── (panel's limit-reset plan)
                   ├─► cc-worktree-guard.sh  (EnterWorktree: one worktree, one agent)
                   └─► cc-popup.sh           (optional editor focus-pop)
 Stop ──► cc-status.sh ──► {"decision":"block"}  (a mailbox message, a notes request, a Stop guard)
@@ -103,8 +102,8 @@ Stop ──► cc-status.sh ──► {"decision":"block"}  (a mailbox message, 
   decision file the panel writes — **no window focus, no keystrokes** needed to approve.
 - **`cc-ask.sh`** is a PreToolUse hook on the AskUserQuestion matcher (D-19);
   **`cc-worktree-guard.sh`** one on EnterWorktree, denying a linked worktree another live session
-  works in; **`cc-resume.sh`** a StopFailure hook on `rate_limit` that wakes the session at the
-  usage limit's reset.
+  works in. (`cc-resume.sh`, a StopFailure hook that woke a session at its usage limit's reset,
+  was removed 2026-11-19 with resume at the limit reset; `install.sh` unwires an old install's copy.)
 - **`cc-core.lua`** is the pure logic (parsing, sorting, action selection, deck layout,
   spawn-command building) — no `hs.*`, fully unit-tested.
 - **`claude-dashboard.lua`** is the Hammerspoon bootstrap: reads the JSON, renders tiles,
@@ -379,7 +378,7 @@ $3 a day across repos; its across-repos run at most once a day).
 it on their next fire. Not everything starts off; this is exactly what is on, and when:
 
 - **With no file at all**, only conveniences act by themselves: a held question answered on the
-  card (D-19), resume at a usage limit's reset, worktree leases, Remote Control for spawned
+  card (D-19), worktree leases, Remote Control for spawned
   sessions, ending a tab-less leftover, plan-limit alerts, the **fleet idle alert**
   (`alerts.idleMinutes`, 15), the **main moved notice** (`merge.mainMovedNotice`) and closing a
   merged unit's tab. **Grant grading** holds merges on a batch grant from the start

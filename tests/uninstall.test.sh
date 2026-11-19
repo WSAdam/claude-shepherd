@@ -56,6 +56,10 @@ printf '{"fixture":"20260930-101500-proj-done.jsonl","window":65536,"expect":{"t
 FAKE="$TMP/code"
 printf '#!/bin/sh\necho "$*" >> "%s"\nexit 0\n' "$TMP/code.calls" > "$FAKE"; chmod +x "$FAKE"
 
+# 2026-11-19: an install from before resume at the limit reset was removed still wires cc-resume.sh
+jq '.hooks.StopFailure += [{ matcher: "rate_limit", hooks: [{ type: "command", command: "bash \"$HOME/.claude/cc-resume.sh\"" }] }]' \
+  "$C/settings.json" > "$C/settings.json.tmp" && mv "$C/settings.json.tmp" "$C/settings.json"
+printf '#!/bin/bash\n' > "$C/cc-resume.sh"
 check_installed="$(grep -c 'cc-status.sh' "$C/settings.json")"
 assert_eq "setup: the install really wired hooks and wrote the methodology" "yes" \
   "$([ "$check_installed" -gt 0 ] && grep -q 'shepherd-methodology:start' "$C/CLAUDE.md" && echo yes || echo no)"
@@ -67,7 +71,8 @@ run_uninstall() {
 run_uninstall
 
 # 2026-09-28 requirement change: cc-worktree-guard.sh (one worktree, one agent) is a Shepherd hook too.
-# 2026-09-29 requirement change: and cc-resume.sh (resume at the usage limit's reset).
+# 2026-09-29 requirement change: and cc-resume.sh (resume at the usage limit's reset). (2026-11-19: it
+# is retired, and an old install's wiring of it goes too.)
 assert_eq "no Shepherd hook is left in settings.json" "0" \
   "$(jq '[.. | .command? // empty | select(test("cc-(status|approve|popup|ask|worktree-guard|resume)\\.sh"))] | length' "$C/settings.json")"
 assert_json "the user's own Stop hook is kept" "$C/settings.json" '.hooks.Stop[0].hooks[0].command' "echo mine"
@@ -75,7 +80,7 @@ assert_json "...as the only Stop group" "$C/settings.json" '.hooks.Stop | length
 assert_json "an event left with no hooks is dropped" "$C/settings.json" '.hooks | has("PreToolUse")' "false"
 assert_json "the user's other settings are kept" "$C/settings.json" '.model' "opus"
 # 2026-09-29: cc-ticket.sh (cross-repo tickets) is shipped too. (2026-11-19: cc-send.sh isn't any more.)
-for f in cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-merge.sh cc-fleet.sh cc-ask.sh cc-commits.sh cc-worktree-guard.sh cc-resume.sh cc-ticket.sh cc-core.lua; do
+for f in cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-merge.sh cc-fleet.sh cc-ask.sh cc-commits.sh cc-worktree-guard.sh cc-ticket.sh cc-core.lua; do
   assert_eq "removes $f from the claude dir" "gone" "$([ -e "$C/$f" ] && echo there || echo gone)"
 done
 assert_eq "a user's own cc-*.sh is kept" "there" "$([ -e "$C/cc-mine.sh" ] && echo there || echo gone)"
@@ -127,6 +132,7 @@ assert_eq "--purge removes the lessons waiting for the coach" "gone" "$([ -e "$C
 assert_eq "--purge removes the checklist runs" "gone" "$([ -e "$C/cc-run" ] && echo there || echo gone)"
 # 2026-09-29: the resumes waiting for a usage limit's reset (cc-resume/) are Shepherd's state too
 assert_eq "--purge removes the resumes waiting for a limit reset" "gone" "$([ -e "$C/cc-resume" ] && echo there || echo gone)"
+assert_eq "--purge removes a retired cc-resume.sh" "gone" "$([ -e "$C/cc-resume.sh" ] && echo there || echo gone)"
 # 2026-09-29: the pinned links (cc-pins/) are Shepherd's state too (2026-11-19: a leftover of the
 # removed pinned links on an old install, still purged)
 assert_eq "--purge removes the pinned links" "gone" "$([ -e "$C/cc-pins" ] && echo there || echo gone)"

@@ -10,7 +10,7 @@
   },
 
   "automation": {
-    "_comment": "Dry run for ALL automation (auto-continue, auto-feed, routing, rules, respawn, the self-summary, resume at the reset, ending tab-less leftovers, mailbox messages, the /rc sweep): each records what it would do -- ☰ → Automation trace, and would_<kind> in the ledger -- and acts on nothing. Each feature also has its own dryRun (queue.dryRun below, autoContinue.dryRun, rules.dryRun, ...). Settings → Automation → Dry run switches them; a Save keeps them.",
+    "_comment": "Dry run for ALL automation (auto-continue, auto-feed, routing, rules, respawn, the self-summary, ending tab-less leftovers, mailbox messages, the /rc sweep): each records what it would do -- ☰ → Automation trace, and would_<kind> in the ledger -- and acts on nothing. Each feature also has its own dryRun (queue.dryRun below, autoContinue.dryRun, rules.dryRun, ...). Settings → Automation → Dry run switches them; a Save keeps them.",
     "dryRun": false
   },
 
@@ -193,11 +193,6 @@
     "onMerge": true,
     "maxBudgetUsd": 1,
     "timeoutSeconds": 600
-  },
-
-  "resume": {
-    "_comment": "Resume at the usage limit's reset (ON unless false). When a usage limit stops a turn, cc-resume.sh (StopFailure, matcher rate_limit) waits for the reset -- the plan meter's resets_at, else the error's 'resets 3pm' -- and wakes the session with '[shepherd] The usage limit has reset: continue the task.' Once per window per session; a per-model limit says 'switch model' instead; kitty/terminal stand down while Claude Code's own autoContinueAtUsageLimit is on (it is when unset in ~/.claude/settings.json; only false hands them to Shepherd). If the session still sits 2 minutes past the reset, Shepherd types the line where typing is allowed, or in a VS Code window shared with other Claude tabs says 'limit reset -- continue it' and pushes to escalation.pushTopic. The card offers Resume now and Cancel.",
-    "enabled": true
   },
 
   "compact": {

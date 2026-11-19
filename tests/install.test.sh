@@ -75,15 +75,29 @@ exists "copies cc-ask.sh -> claude dir" "$CDIR/cc-ask.sh"
 assert_json "cc-worktree-guard.sh runs for EnterWorktree only" "$CDIR/settings.json" \
   '[.hooks.PreToolUse[] | select(.hooks[].command | contains("cc-worktree-guard.sh")) | .matcher] | join(",")' "EnterWorktree"
 exists "copies cc-worktree-guard.sh -> claude dir" "$CDIR/cc-worktree-guard.sh"
-# 2026-09-29: resume at the limit reset -- cc-resume.sh runs for a usage limit only (StopFailure,
-# matcher rate_limit), in the background, waking the model when it exits 2.
-assert_json "cc-resume.sh runs for a usage limit only (StopFailure rate_limit)" "$CDIR/settings.json" \
-  '[.hooks.StopFailure[] | select(.hooks[].command | contains("cc-resume.sh")) | .matcher] | join(",")' "rate_limit"
-assert_json "...async, with asyncRewake" "$CDIR/settings.json" \
-  '[.hooks.StopFailure[].hooks[] | select(.command | contains("cc-resume.sh")) | (.async and .asyncRewake)] | join(",")' "true"
+# 2026-11-19: REQUIREMENT CHANGE -- resume at the limit reset was removed (Adam: "prune features I
+# have no use for"): cc-resume.sh is no longer copied or wired, and every error still reaches cc-status.sh
+assert_json "cc-resume.sh isn't wired any more" "$CDIR/settings.json" \
+  '[.hooks.StopFailure[].hooks[] | select(.command | contains("cc-resume.sh"))] | length' "0"
 assert_json "...and every error still reaches cc-status.sh first" "$CDIR/settings.json" \
   '.hooks.StopFailure[0].hooks[0].command | endswith("cc-status.sh\" stopfailure")' "true"
-exists "copies cc-resume.sh -> claude dir" "$CDIR/cc-resume.sh"
+assert_eq "cc-resume.sh isn't copied any more" "gone" "$([ -e "$CDIR/cc-resume.sh" ] && echo there || echo gone)"
+# ...and an install from before keeps neither its wiring nor its script: make setup strips them
+RC="$TMP/retired-claude"; mkdir -p "$RC"; printf '#!/bin/bash\n' > "$RC/cc-resume.sh"
+cat > "$RC/settings.json" <<'JSON'
+{ "hooks": { "StopFailure": [
+    { "hooks": [ { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" stopfailure" } ] },
+    { "matcher": "rate_limit", "hooks": [
+      { "type": "command", "command": "bash \"$HOME/.claude/cc-resume.sh\"", "async": true, "asyncRewake": true, "timeout": 691200 } ] },
+    { "matcher": "rate_limit", "hooks": [ { "type": "command", "command": "echo my own" } ] } ] } }
+JSON
+CC_INSTALL_CLAUDE_DIR="$RC" CC_INSTALL_HS_DIR="$TMP/retired-hs" CC_INSTALL_NO_APP=1 \
+  bash "$ROOT/install.sh" >/dev/null 2>&1
+assert_json "make setup unwires a retired hook (cc-resume.sh)" "$RC/settings.json" \
+  '[.hooks.StopFailure[].hooks[] | select(.command | contains("cc-resume.sh"))] | length' "0"
+assert_json "...drops the group it leaves empty, and keeps the user's own" "$RC/settings.json" \
+  '[.hooks.StopFailure[] | .hooks | map(.command) | join(",")] | join("|")' 'bash "$HOME/.claude/cc-status.sh" stopfailure|echo my own'
+assert_eq "...and deletes its leftover script" "gone" "$([ -e "$RC/cc-resume.sh" ] && echo there || echo gone)"
 # 2026-11-19: REQUIREMENT CHANGE -- cc-send.sh was removed: it is no longer copied, or wired
 assert_eq "cc-send.sh isn't copied any more" "gone" "$([ -e "$CDIR/cc-send.sh" ] && echo there || echo gone)"
 # 2026-09-29: cc-ticket.sh -- cross-repo tickets (a command, not a hook)
