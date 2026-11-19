@@ -13610,6 +13610,55 @@ do
   -- (2026-11-19, requirement change: mainGreenPrune -- a repo whose gate routine is gone loses its
   -- flag -- went with routines)
 
+  -- ---- main-green after each merge (2026-11-19) ----
+  -- Adam: "Run it after each merge". Routines, the check's only trigger, were removed the same day,
+  -- so nothing started it. A merged request's own post-merge gate is main's verdict when it ran;
+  -- otherwise one fresh check is asked. Once per merged commit, and never for an old merge.
+  do
+    local NOW, SHA2 = 100000, string.rep("c", 40)
+    local am = core.mainGreenAfterMerge
+    check("afterMerge: core.mainGreenAfterMerge exists", type(am) == "function")
+    am = am or function() return nil end
+    local W = core.MAIN_GREEN_AFTER_MERGE_WINDOW or 0
+    local r = { phase = "merged", commonDir = "/r/A/.git", sha = SHA2, branch = "feat/x", base = "main", doneAt = NOW - 30 }
+    local a = am(r, nil, nil, true, NOW)
+    check("afterMerge: a fresh merge with no post-merge gate asks one check of main",
+          a and a.act == "fire" and a.req and a.req.folder == "/r/A" and a.req.branch == "main"
+          and a.req.name == "after merging feat/x")
+    eq("afterMerge: ...but not when no gate is configured for the repo", am(r, nil, nil, false, NOW), nil)
+    eq("afterMerge: ...nor twice for the same merged commit", am(r, nil, { state = "green", afterMerge = SHA2 }, true, NOW), nil)
+    for _, st in ipairs({ "running", "queued", "reading" }) do
+      local w = am(r, { state = st }, nil, true, NOW)
+      check("afterMerge: a post-merge gate still " .. st .. " is waited for, never doubled", w and w.act == "wait")
+    end
+    for _, st in ipairs({ "passed", "failed", "timedOut", "couldntRun" }) do
+      local fd = am(r, { state = st }, nil, true, NOW)
+      check("afterMerge: a finished post-merge gate (" .. st .. ") is main's verdict, fed in once",
+            fd and fd.act == "feed" and fd.name == "after merging feat/x" and fd.folder == "/r/A" and fd.branch == "main")
+    end
+    eq("afterMerge: a request not merged yet asks nothing",
+       am({ phase = "requested", commonDir = "/r/A/.git", sha = SHA2, branch = "feat/x", base = "main" }, nil, nil, true, NOW), nil)
+    check("afterMerge: the window is a sane number of seconds", W >= 600 and W <= 86400)
+    eq("afterMerge: a merge done long ago (a request left on disk across a reload) asks nothing",
+       am({ phase = "merged", commonDir = "/r/A/.git", sha = SHA2, branch = "feat/x", base = "main", doneAt = NOW - W - 1 },
+          nil, nil, true, NOW), nil)
+    eq("afterMerge: ...nor one with no done time", am({ phase = "merged", commonDir = "/r/A/.git", sha = SHA2,
+       branch = "feat/x", base = "main" }, nil, nil, true, NOW), nil)
+    eq("afterMerge: ...nor one with no merged sha", am({ phase = "merged", commonDir = "/r/A/.git", branch = "feat/x",
+       base = "main", doneAt = NOW }, nil, nil, true, NOW), nil)
+    -- the record keeps which merge it checked, through a verdict and a reload
+    local vr = core.mainGreenVerdict({ state = "green", afterMerge = SHA2 }, { state = "failed", code = 2,
+      output = "FAIL - x\n", command = "make test", routine = "after merging feat/x" }, NOW)
+    eq("afterMerge: a verdict keeps the merged commit already handled", vr and vr.afterMerge, SHA2)
+    local parsed = core.parseMainGreen(core.json.encode({ ["/r/A/.git"] = { afterMerge = SHA2 } }))
+    check("afterMerge: a record that only says which merge was handled survives a reload",
+          parsed["/r/A/.git"] ~= nil and parsed["/r/A/.git"].afterMerge == SHA2)
+    eq("afterMerge: ...and flags no card", core.mainRedView(parsed["/r/A/.git"]), nil)
+    local tip = (core.mainRedView(vr) or {}).tip or ""
+    check("afterMerge: a red flag's tooltip says the check ran after the merge, not by a routine  (" .. tip:gsub("\n", " | ") .. ")",
+          tip:find("after merging feat/x", 1, true) ~= nil and not tip:find("routine", 1, true))
+  end
+
   -- the coach hears about it
   local log = core.coachLogAdd({}, { kind = "mainred", id = "mainred|/r/A/.git|" .. SHA, branch = "main",
     summary = "make test", note = "FAIL - two" }, 1000)

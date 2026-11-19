@@ -275,8 +275,9 @@ Around a merge Shepherd gathers more of its own evidence (D-5):
   them) touch the merged files gets one mailbox note — "main moved to <sha7> (<unit>), touching
   <files>: rebase onto main before you ask to merge". It is handed over at a turn end or start,
   never typed, and announced once per repo and merged sha, across reloads (`main-moved.seen`).
-- **Main-green check** (2026-10-03): a check (a routine with `"action": "gate"` started one until
-  routines were removed on 2026-11-19; nothing in the panel starts one now) runs the repo's merge
+- **Main-green check** (2026-10-03): a check (since 2026-11-19, once after each merge Shepherd saw
+  land, `merge.mainGreenAfterMerge`; the merge's own post-merge gate counts as it when it ran; a
+  routine with `"action": "gate"` started it until routines were removed) runs the repo's merge
   gate in its main checkout, behind any
   merge in the repo's gate lane, after checking the checkout is on its branch with no uncommitted
   tracked changes. Red raises one banner (and a phone push with escalation push on), **⚠ main is

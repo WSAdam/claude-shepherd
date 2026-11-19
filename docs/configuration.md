@@ -119,6 +119,7 @@ install's [defaults](../defaults/cc-config.json) differ.
 | `merge.gates[].redFirstCommand` | none | | [The red-first proof](merging-and-batches.md#the-red-first-proof-do-the-new-tests-fail-without-the-fix) |
 | `radar.enabled` / `refreshSeconds` | `true` / `120` (at least 30) | | [The overlap radar](merging-and-batches.md#the-overlap-radar) |
 | `merge.mainMovedNotice` | `true` | | [Main moved](merging-and-batches.md#main-moved-sibling-worktrees-hear-about-a-merge) |
+| `merge.mainGreenAfterMerge` | `true` | | [Is main still green?](merging-and-batches.md#is-main-still-green-a-check-after-each-merge) |
 | `schedLock.enabled` / `refreshSeconds` | `true` / `60` (at least 30) | | [Scheduled-tasks lock](troubleshooting.md#a-card-flags-a-scheduled-tasks-lock) |
 | `timeLost.enabled` / `refreshSeconds` / `days` | `true` / `120` / `7` | | [Where the time went](usage-and-cost.md#where-the-time-went) |
 | `score.weights` | `{ "error": 18, "deny": 6, "loop": 12, "respawn": 14 }` | | [Run score](usage-and-cost.md#run-score) |
@@ -194,7 +195,7 @@ Everything lives under `~/.claude/`:
 | `cc-templates.json`, `cc-prompts/` | Leftovers of prompt templates (removed 2026-11-19): the templates and the folder they imported from. Nothing reads them; `uninstall.sh --purge` deletes them |
 | `cc-schedules.json` | Leftover of routines (removed 2026-11-19). Nothing reads it; `uninstall.sh --purge` deletes it |
 | `cc-rules.json` | Leftover of automation rules (removed 2026-11-19). Nothing reads it; `uninstall.sh --purge` deletes it |
-| `cc-main-green.json` | Each repo's last [main-green check](merging-and-batches.md#is-main-still-green-a-scheduled-check) verdict, so a reload keeps the card's flag (Shepherd is its only writer) |
+| `cc-main-green.json` | Each repo's last [main-green check](merging-and-batches.md#is-main-still-green-a-check-after-each-merge) verdict, so a reload keeps the card's flag (Shepherd is its only writer) |
 | `cc-ab.json` | Leftover of A/B compare (removed 2026-11-19): its cohorts. Nothing reads it; `uninstall.sh --purge` deletes it |
 | `cc-lock.json` | The screen lock's salted password hash |
 | `cc-exports/` | Exported sessions |

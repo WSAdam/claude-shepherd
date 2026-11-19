@@ -6140,7 +6140,7 @@ end
 -- A check runs its repo's merge gate (core.mainGreenGateFor) in the repo's MAIN checkout through the
 -- gate lane, `low` (FX.mergeGatePump), one check per repo at a time. A { name, folder, branch? }
 -- record put on FX._mainGreen.due is a request (a routine with action "gate" put it there until
--- routines were removed on 2026-11-19; nothing in the panel does now): FX.stepMainGreen runs after
+-- routines were removed on 2026-11-19; since then FX.mainGreenAfterMerge does): FX.stepMainGreen runs after
 -- the stacks are stamped, starts it, judges each finished run once (core.mainGreenVerdict) and stamps it.mainRed on every
 -- card of a red repo. Red: ONE banner (plus ntfy when escalation push is on) and a coach-log entry;
 -- the next green clears the flag; couldn't-run and timed-out change nothing. Each repo's record is
@@ -6242,6 +6242,43 @@ function FX.mainGreenJudge(cd, g, cfg)
   if g.logPath then pcall(os.remove, g.logPath); g.logPath = nil end
   if g.script then pcall(os.remove, g.script); g.script = nil end
   return changed
+end
+
+-- 2026-11-19: after each merge (Adam: "Run it after each merge"; routines, the check's only trigger,
+-- were removed that day). The merge loop hands over each merged request with its post-merge gate (or
+-- nil); core.mainGreenAfterMerge decides. A finished post-merge gate -- the same suite, in the main
+-- checkout -- is fed in as main's verdict, so main is never tested twice for one merge; with none, one
+-- fresh check is asked. The merged commit is marked on the repo's record (on disk) either way.
+function FX.mainGreenAfterMerge(r, post, cfg)
+  if core.config(cfg, "merge.mainGreenAfterMerge", true) == false then return nil end
+  if type(r) ~= "table" or r.phase ~= "merged" then return nil end
+  local state = FX.mainGreenLoad()
+  local cd = r.commonDir
+  local root = core.repoMainRoot(cd)
+  local a = core.mainGreenAfterMerge(r, post, state[cd], root ~= nil and core.mainGreenGateFor(cfg, root) ~= nil, FX.now())
+  if not a or a.act == "wait" then return a end
+  if a.act == "feed" then
+    local g = { state = post.state, code = post.code, output = post.output, command = post.command,
+                branch = a.branch, routine = a.name, folder = a.folder }
+    local rec, event = core.mainGreenVerdict(state[cd], g, FX.now())
+    rec = rec or {}
+    -- the post-merge gate prints no sha line: what it tested is the merged commit
+    if rec.state and not rec.sha then rec.sha = r.sha end
+    rec.afterMerge = r.sha
+    state[cd] = rec
+    print("[cc-dashboard] 🔍 main green: " .. tostring(r.branch) .. "'s post-merge gate (" .. tostring(post.state)
+      .. ") is " .. tostring(a.branch) .. "'s verdict -- no second run")
+    FX.mainGreenEvent(cd, rec, event, g, cfg)
+  else
+    local rec = state[cd] or {}
+    rec.afterMerge = r.sha
+    state[cd] = rec
+    table.insert(FX._mainGreen.due, a.req)
+    print("[cc-dashboard] 🚀 main green: " .. tostring(r.branch) .. " merged into " .. tostring(a.req.branch)
+      .. " with no post-merge gate -- checking " .. tostring(a.req.branch) .. " once")
+  end
+  FX.mainGreenSave()
+  return a
 end
 
 -- ---- Remote Control on every card (2026-10-22) ----
@@ -6826,6 +6863,9 @@ function FX.annotateMerges(list, cfg, bannerOn)
       -- 2026-09-17: the same gate runs ONCE in the main checkout before the unit's tab closes,
       -- so a merge that left main red is caught here instead of by the next unit to ask.
       gate = FX.mergeGatePost(r, cfg)
+      -- 2026-11-19: main-green's verdict comes from that gate, or one check of main is asked
+      local okm, errm = pcall(FX.mainGreenAfterMerge, r, gate, cfg)
+      if not okm then print("[cc-dashboard] ❌ main green after merge: " .. tostring(errm)) end
       -- 2026-09-22: running and queued are two different things here too -- a post-merge gate
       -- that is still waiting for the repo's one lane must not claim it is running the suite.
       if gate and gate.state == "running" then

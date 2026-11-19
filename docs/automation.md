@@ -388,7 +388,7 @@ instructions every session in it reads first. It suggests; nothing changes until
   session's first), your interrupts, tool errors, tool calls you denied with a note, and **Not
   yet** notes. Shepherd adds what transcripts don't hold: your **Not yet** notes on merge requests,
   blocked merges' notes, merge-checker fails and findings, lessons sessions filed with
-  `cc-lesson.sh` (below), and the times the [main-green check](merging-and-batches.md#is-main-still-green-a-scheduled-check)
+  `cc-lesson.sh` (below), and the times the [main-green check](merging-and-batches.md#is-main-still-green-a-check-after-each-merge)
   found main red, from its own log (`~/.claude/cc-coach/<repo>.log.json`, three weeks, 40 entries;
   `<repo>` in these file names is the main checkout's encoded project folder, as in
   `~/.claude/projects/`). The digest is capped at about 30KB;

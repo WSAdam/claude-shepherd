@@ -100,7 +100,7 @@ the fleet idle alert; every other automatic behaviour here waits for its switch.
   of their window, write their notes just before, and get them back right after.
 - [**Automation dry run & trace**](docs/automation.md#dry-run-and-the-automation-trace): see what
   automation would do, did, or refused and why.
-- [**Main-green check**](docs/merging-and-batches.md#is-main-still-green-a-scheduled-check): run a repo's merge gate on main and flag its cards when main is red. (Routines, which scheduled it, were removed.)
+- [**Main-green check**](docs/merging-and-batches.md#is-main-still-green-a-check-after-each-merge): run a repo's merge gate on main and flag its cards when main is red, once after each merge (the merge's own post-merge gate counts).
 - [**Coach**](docs/automation.md#the-coach): a read-only Sonnet reads a repo's last 10 sessions and
   suggests `CLAUDE.md` edits with evidence, and auto-memory changes (backed up, with Undo). A card starts it;
   with `coach.enabled` it also runs weekly and on new evidence (`cc-lesson.sh` files a lesson); remembers what you applied, skipped or

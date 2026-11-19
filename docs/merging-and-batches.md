@@ -233,14 +233,22 @@ at the merge-base** and the review splits the failing lines in two: *already fai
   stays refused, and a batch unit's merge on your grant never goes through on it. Fix main (or
   rebase onto a fixed main) and the gate runs again.
 
-#### Is main still green? A scheduled check
+#### Is main still green? A check after each merge
 
-Gates run when a unit asks to merge. Main can still go red between merges: a hand edit, a
-dependency, a clock. A main-green check runs the repo's merge gate on main. A **⏰ Routines**
-routine with the action **Check main is green** started one at the time you set; routines were
-removed on 2026-11-19, so nothing in the panel starts a check now. The check itself is kept: a
-`{ name, folder, branch? }` request on the panel's `FX._mainGreen.due` list runs one on the next
-tick, through everything below.
+Gates run when a unit asks to merge, on the unit's branch. A main-green check answers for main
+itself, once each merge Shepherd saw lands (`cc-merge.sh done` with `--result merged`):
+
+- **The post-merge gate counts.** When the merge's own post-merge gate ran (the same suite, in the
+  main checkout, before the unit's tab closes), its result is main's verdict. Main isn't tested
+  twice for one merge.
+- **Otherwise one check runs.** With no post-merge gate for that merge (it had no pre-merge gate in
+  this Shepherd run, for example), one check of main is queued, through everything below.
+- **Once per merge.** The merged commit is kept on the repo's record, so a reload asks nothing
+  again, and a merge done over an hour ago (a request left on disk) is never checked late.
+- **Off switch:** `merge.mainGreenAfterMerge` (default `true`).
+
+Until 2026-11-19 a **⏰ Routines** routine started the check on a schedule; routines were removed
+that day.
 
 - **What runs:** the `merge.gates` entry a session in the repo's main checkout would get (matched on
   its project key, then its path), or main's own `.worktree-check` with `merge.repoGate` on. No gate

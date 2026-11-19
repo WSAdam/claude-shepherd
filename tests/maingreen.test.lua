@@ -312,6 +312,54 @@ check("a green verdict survives a direct FX.mainGreenFire before it is judged", 
 finishTask(lastGate("GATE-R"), 0, GREEN)
 tick()
 
+-- ---- after each merge (2026-11-19) ----
+-- Adam: "Run it after each merge". Routines, the check's only trigger, were removed that day. A merged
+-- request's post-merge gate is main's verdict when it ran; otherwise one check of main is asked. Once
+-- per merged commit, kept on disk, so a reload asks nothing again.
+check("FX.mainGreenAfterMerge exists", type(fx.mainGreenAfterMerge) == "function")
+if type(fx.mainGreenAfterMerge) ~= "function" then finish() end
+do
+  local n0, b0 = #tasks("GATE-R"), #banners
+  local function merged(sha, branch)
+    return { phase = "merged", commonDir = "/r/R/.git", sha = sha, branch = branch, base = "main",
+             doneAt = os.time() - 5, nonce = "n-" .. branch, key = "k-" .. branch }
+  end
+  local m1 = merged(string.rep("d", 40), "feat/one")
+  quiet(function() fx.mainGreenAfterMerge(m1, nil, CFG) end)
+  tick()
+  local gm = lastGate("GATE-R")
+  check("a merge with no post-merge gate asks one check of main", #tasks("GATE-R") == n0 + 1 and gm ~= nil and gm.dir == "/r/R")
+  quiet(function() fx.mainGreenAfterMerge(m1, nil, CFG) end)
+  tick()
+  check("...once: the same merge asks nothing again", #tasks("GATE-R") == n0 + 1)
+  if gm then finishTask(gm, 1, RED) end
+  tick()
+  local f1 = flag()
+  check("...and its red flags the card, saying it ran after the merge  (" .. tostring(f1 and f1.tip):gsub("\n", " | ") .. ")",
+        f1 ~= nil and f1.tip:find("after merging feat/one", 1, true) ~= nil and #banners == b0 + 1)
+  fx._mainGreen.state = nil   -- what a reload starts with
+  quiet(function() fx.mainGreenAfterMerge(m1, nil, CFG) end)
+  tick()
+  check("...and after a reload the same merge still asks nothing", #tasks("GATE-R") == n0 + 1 and flag() ~= nil)
+  -- a merge whose own post-merge gate ran in the main checkout: that verdict is main's, no second run
+  local m2 = merged(string.rep("e", 40), "feat/two")
+  quiet(function() fx.mainGreenAfterMerge(m2, { state = "running", command = "GATE-R" }, CFG) end)
+  tick()
+  check("a post-merge gate still running is waited for: no run of its own", #tasks("GATE-R") == n0 + 1 and flag() ~= nil)
+  quiet(function() fx.mainGreenAfterMerge(m2, { state = "passed", code = 0, output = "ok   - all\n", command = "GATE-R" }, CFG) end)
+  tick()
+  check("its green verdict clears the flag, with no run of its own",
+        flag() == nil and #tasks("GATE-R") == n0 + 1 and (saved()["/r/R/.git"] or {}).afterMerge == m2.sha)
+  quiet(function() fx.mainGreenAfterMerge(m2, { state = "failed", code = 1, output = "FAIL - late\n", command = "GATE-R" }, CFG) end)
+  tick()
+  check("...fed in once: the same merge's gate isn't read again", flag() == nil)
+  -- the switch
+  local off = { merge = { gates = CFG.merge.gates, mainGreenAfterMerge = false } }
+  quiet(function() fx.mainGreenAfterMerge(merged(string.rep("f", 40), "feat/three"), nil, off) end)
+  tick()
+  check("merge.mainGreenAfterMerge false asks nothing", #tasks("GATE-R") == n0 + 1)
+end
+
 -- ---- the real shell line, against a real repo ----
 local R = T .. "/repo"
 local function sh(c) return os.execute("cd '" .. R .. "' && " .. c .. " >/dev/null 2>&1") == true end

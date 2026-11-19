@@ -18527,9 +18527,9 @@ M.ALWAYS_ASK_BUILTINS = {
 -- main's commit under test, and the run is couldn't-run -- then prints the sha it tests.
 -- M.mainGreenVerdict folds a finished run into the repo's record: red once (one banner, one coach-log
 -- entry), red again quietly, and the next green clears it; a run that couldn't run or timed out says
--- nothing about main and changes nothing. Opt-in: a routine with action "gate" asked for a check
--- until routines were removed (2026-11-19); nothing in the panel asks for one now (the dashboard's
--- FX._mainGreen.due takes a request).
+-- nothing about main and changes nothing. A routine with action "gate" asked for a check until
+-- routines were removed (2026-11-19); since then a merge asks for one (M.mainGreenAfterMerge), and the
+-- dashboard's FX._mainGreen.due takes the request.
 M.MAIN_GREEN_SHA_TAG = "@@main-sha"
 M.MAIN_GREEN_LINES = 12          -- failing lines kept on the record (and the card's tooltip)
 M.MAIN_GREEN_TAIL_LINES = 8      -- ...or, when none matches a failure shape, the log's last lines
@@ -18580,7 +18580,9 @@ function M.mainGreenVerdict(prev, g, now)
   local out = type(g.output) == "string" and g.output or ""
   local wasRed = prev ~= nil and prev.state == "red"
   local rec = { sha = M.mainGreenSha(out), branch = g.branch or "main", command = g.command,
-                at = tonumber(now) or 0, routine = g.routine, folder = g.folder }
+                at = tonumber(now) or 0, routine = g.routine, folder = g.folder,
+                -- 2026-11-19: which merged commit was already checked (M.mainGreenAfterMerge)
+                afterMerge = prev and prev.afterMerge or nil }
   if g.state == "passed" then
     rec.state = "green"
     return rec, wasRed and "cleared" or nil
@@ -18614,8 +18616,9 @@ function M.mainRedView(rec)
   if tonumber(rec.since) and tonumber(rec.at) and tonumber(rec.since) < tonumber(rec.at) then
     tip = tip .. "\nRed since " .. os.date("%Y-%m-%d %H:%M", tonumber(rec.since))
   end
-  tip = tip .. "\nChecked in the main checkout by the routine '" .. tostring(rec.routine or "?")
-    .. "'; the flag clears on its next green run."
+  -- 2026-11-19: the check runs after a merge now (routines, which named it, were removed)
+  tip = tip .. "\nChecked in the main checkout (" .. tostring(rec.routine or "?")
+    .. "); the flag clears on its next green run."
   return { label = "⚠ " .. b .. " is red", tip = tip }
 end
 
@@ -18629,9 +18632,41 @@ function M.parseMainGreen(raw)
   local ok, t = pcall(M.json.decode, raw)
   if not ok or type(t) ~= "table" then return out end
   for cd, rec in pairs(t) do
-    if type(cd) == "string" and type(rec) == "table" and (rec.state == "red" or rec.state == "green") then out[cd] = rec end
+    -- 2026-11-19: a record that only says which merge was handled (afterMerge) is kept too, so a
+    -- reload doesn't check the same merge again
+    if type(cd) == "string" and type(rec) == "table"
+       and (rec.state == "red" or rec.state == "green" or type(rec.afterMerge) == "string") then out[cd] = rec end
   end
   return out
+end
+
+-- ---- main-green after each merge (2026-11-19) ----
+-- Adam: "Run it after each merge" (routines, the check's only trigger, were removed that day). For
+-- a request Shepherd saw merge (`cc-merge.sh done` wrote phase, sha and doneAt):
+--   {act="wait"}  its post-merge gate (the same suite, in the main checkout) is still going;
+--   {act="feed"}  that gate finished: its verdict is main's, fed into the record (never a 2nd run);
+--   {act="fire", req}  no post-merge gate ran for it: one fresh check, if the repo has a gate.
+-- nil otherwise, and for a merge already handled (rec.afterMerge) or done over
+-- MAIN_GREEN_AFTER_MERGE_WINDOW ago -- a request left on disk across a reload must not start a
+-- suite hours later (the 2026-09-17 trap with merge.gates).
+M.MAIN_GREEN_AFTER_MERGE_WINDOW = 3600
+function M.mainGreenAfterMerge(r, post, rec, hasGate, now)
+  if type(r) ~= "table" or r.phase ~= "merged" then return nil end
+  if type(r.commonDir) ~= "string" or r.commonDir == "" or type(r.sha) ~= "string" or r.sha == "" then return nil end
+  local done, t = tonumber(r.doneAt), tonumber(now)
+  if not done or not t or t - done > M.MAIN_GREEN_AFTER_MERGE_WINDOW then return nil end
+  if type(rec) == "table" and rec.afterMerge == r.sha then return nil end
+  local root = M.repoMainRoot(r.commonDir)
+  if not root then return nil end
+  local base = mergeRefOk(r.base) and r.base or "main"
+  local name = "after merging " .. tostring(r.branch or "a branch")
+  if type(post) == "table" then
+    local st = post.state
+    if st == "queued" or st == "running" or st == "reading" or st == nil then return { act = "wait" } end
+    return { act = "feed", name = name, folder = root, branch = base }
+  end
+  if not hasGate then return nil end
+  return { act = "fire", req = { name = name, folder = root, branch = base } }
 end
 
 -- ---- L5: detail-panel tab strip ------------------------------------------
@@ -22029,7 +22064,7 @@ M.FEATURES = {
     what = "When a merge's test gate goes red, Shepherd runs the same gate on a scratch worktree at the merge-base (once per merge-base, behind any gate that judges a merge), and the review splits the failing lines: already failing on main, or new in this branch. It's information only: a red gate stays red, and a run on main that couldn't finish counts on neither side.",
     why = "A unit cut from a red main no longer takes the blame for main's failures, and a real regression isn't waved off as old." },
   { key = "maingreen", cat = "Control", new = true, title = "Main-green check",
-    what = "A check runs a repo's merge gate in its main checkout, in the repo's gate lane behind any merge. (A routine with the action \"Check main is green\" started one at the time you set; routines were removed on 2026-11-19, so nothing in the panel starts one now.) When main goes red you get one banner, the repo's card shows ⚠ main is red with the failing lines in its tooltip, and the coach's log notes it; the next green run clears the flag. A run that couldn't run (uncommitted changes, another branch checked out, a busy suite) or timed out never counts as red.",
+    what = "A check runs a repo's merge gate in its main checkout, in the repo's gate lane behind any merge. It runs once after each merge Shepherd sees land; when that merge's own post-merge gate ran, its result is main's verdict and nothing runs twice. (A routine started it on a schedule until routines were removed on 2026-11-19.) When main goes red you get one banner, the repo's card shows ⚠ main is red with the failing lines in its tooltip, and the coach's log notes it; the next green run clears the flag. A run that couldn't run (uncommitted changes, another branch checked out, a busy suite) or timed out never counts as red.",
     why = "A main that broke between merges is caught on your schedule, not by the next unit's red gate." },
   { key = "reqs", cat = "Control", new = true, title = "Requirement ids and merge receipts",
     what = "Every merge review carries a receipt: the source (the batch, the REQ ids the request names, or the session's first prompt), the requester's words, the tests it changed by layer, the gate, red-first and checker evidence, and the known issues from cc-merge.sh request --known-issues. The receipt is display only.",

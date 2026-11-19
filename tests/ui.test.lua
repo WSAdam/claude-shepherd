@@ -5773,5 +5773,21 @@ do
   check("kept: cc-run.sh ships", slurp("SHIPPED"):find("cc-run.sh", 1, true) ~= nil)
 end
 
+-- ---- The main-green check runs after each merge (2026-11-19) ----
+-- Adam: "Run it after each merge" (routines, its only trigger, were removed the same day). The merge
+-- loop hands every merged request and its post-merge gate to FX.mainGreenAfterMerge, guarded.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local post = src:find("gate = FX.mergeGatePost(r, cfg)", 1, true)
+  local call = src:find("pcall(FX.mainGreenAfterMerge, r, gate, cfg)", 1, true)
+  check("main green after merge: the merge loop hands a merged request and its post-merge gate over",
+        post ~= nil and call ~= nil and call > post and call - post < 400)
+  check("main green after merge: FX.mainGreenAfterMerge asks core and honours merge.mainGreenAfterMerge",
+        src:find("core.mainGreenAfterMerge(r, post,", 1, true) ~= nil
+        and src:find('"merge.mainGreenAfterMerge", true', 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)
