@@ -5,7 +5,7 @@
 // view }) -- view is core.timeLostSummary: plain-sentence callouts plus the seconds behind them. The
 // callouts and the name carry a session's words, so every one goes through esc() (the name as
 // textContent). Runs the REAL shipped tlvDur / timeLostHtml / ccTimeLost sliced out of
-// claude-dashboard.lua (the pins-view.test.js pattern).
+// claude-dashboard.lua (the pattern of pins-view.test.js, removed with pinned links 2026-11-19).
 //
 // Usage: node tests/time-view.test.js [path/to/claude-dashboard.lua]
 

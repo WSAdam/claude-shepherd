@@ -5,7 +5,7 @@
 // stamps it on the session as it.lease ({ port, db }). The card's badges row shows ":PORT", with the
 // database path in its tooltip. Both come from a file on disk, so both go through esc(). Runs the
 // REAL shipped leaseTitle / leaseBadge / badgesHtml sliced out of claude-dashboard.lua (the
-// pins-view.test.js pattern).
+// pins-view.test.js pattern, a suite removed with pinned links 2026-11-19).
 //
 // Usage: node tests/lease-badge.test.js [path/to/claude-dashboard.lua]
 
@@ -41,7 +41,7 @@ if (!(escSrc && titleSrc && badgeSrc && badgesSrc)) {
 }
 const lib = new Function(
   "function riskBadge(){ return ''; } function prBadgeHtml(){ return ''; }\n" +
-  "function bgBadge(){ return ''; } function notesBadge(){ return ''; } function pinChipsHtml(){ return ''; }\n" +
+  "function bgBadge(){ return ''; } function notesBadge(){ return ''; }\n" +
   "function ticketBadge(){ return ''; } function coachBadge(){ return ''; } function schedLockBadge(){ return ''; }\n" +
   "function mainRedBadge(){ return ''; }\n" +   // 2026-10-03: the main-green check's flag joined the row
   "function rcOffBadge(){ return ''; }\n" +     // 2026-10-22: the Remote Control chip joined the row

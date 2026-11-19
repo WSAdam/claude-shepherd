@@ -637,25 +637,6 @@ EOF
 # Default MUST match cc-fleet.sh's FLEET_DIR and the dashboard's FX.FLEET_DIR.
 CC_FLEET_DIR="${CC_FLEET_DIR:-${HOME}/.claude/cc-fleet}"
 
-# Pinned links (build program unit 31, 2026-09-29): cc-pin.sh keeps a worktree's links in
-# CC_PINS_DIR/<encoded git root>.json. They belong to the WORKTREE, not a session key -- they
-# outlive /clear and a respawn -- so the removers can't drop them by key. Instead both drop the
-# pins of every worktree that is gone (its folder removed), their torn writes, and any pins file
-# that names no worktree. KEEP IN SYNC with FX.prunePins. Default MUST match FX.PINS_DIR.
-CC_PINS_DIR="${CC_PINS_DIR:-${HOME}/.claude/cc-pins}"
-cc_pins_prune() {
-  cc_have_jq || return 0
-  local f root
-  for f in "$CC_PINS_DIR"/*.json; do
-    [ -f "$f" ] || continue
-    root="$(jq -r 'if (.root | type) == "string" then .root else empty end' "$f" 2>/dev/null)"
-    case "$root" in /*) [ -d "$root" ] && continue ;; esac
-    rm -f "$f" "$f".tmp.* 2>/dev/null
-    cc_debug "cc_pins_prune: dropped $f (its worktree ${root:-?} is gone)"
-  done
-  return 0
-}
-
 # Worktree leases (build program unit 27, 2026-09-29): Shepherd leases each worktree it starts a
 # session for its own PORT and DB path, in CC_LEASE_DIR/<encoded main checkout>.json. Shepherd is
 # the ONLY writer -- its sweep frees a gone worktree's lease and deletes the database file it named
@@ -692,7 +673,6 @@ cc_lease_prune() {
 # <key>.checker.json (2026-09-29) is the merge checker's verdict, which only Shepherd writes.
 # cc-resume/<key>.json, .plan.json and .cancel (2026-09-29): a resume waiting for a usage limit's
 # reset -- its waiter sees the arm gone and stops.
-# cc-pins/ (2026-09-29) is keyed by worktree, not session: cc_pins_prune drops only a gone worktree's.
 # cc-lease/ (2026-09-29) is keyed by main checkout: cc_lease_prune drops only what nothing can use.
 # cc-send/ (2026-09-29) is keyed by request, each named for the session that made it: cc_send_prune
 # drops that session's, and any past CC_SEND_KEEP_SECONDS.
@@ -732,8 +712,6 @@ cc_remove() {
     # cc-send (2026-09-29): the requests this session made go with it, undelivered; stale ones too
     cc_send_prune "$1" ;;
   esac
-  # Pinned links are per worktree, not per key: only those of a worktree that's gone (2026-09-29).
-  cc_pins_prune
   # Worktree leases are per main checkout: only the files nothing can use (2026-09-29).
   cc_lease_prune
   # Cross-repo tickets: the ones the session had on its plate go back, then every stale file (2026-09-29).

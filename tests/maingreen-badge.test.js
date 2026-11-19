@@ -40,7 +40,7 @@ if (!(escSrc && badgeSrc && badgesSrc)) {
 }
 const lib = new Function(
   "function riskBadge(){ return ''; } function prBadgeHtml(){ return ''; }\n" +
-  "function bgBadge(){ return ''; } function notesBadge(){ return ''; } function pinChipsHtml(){ return ''; }\n" +
+  "function bgBadge(){ return ''; } function notesBadge(){ return ''; }\n" +
   "function leaseBadge(){ return ''; } function ticketBadge(){ return ''; } function coachBadge(){ return ''; }\n" +
   "function schedLockBadge(){ return ''; }\n" +
   "function rcOffBadge(){ return ''; }\n" +     // 2026-10-22: the Remote Control chip joined the row

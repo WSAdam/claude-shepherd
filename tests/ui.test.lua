@@ -4515,35 +4515,33 @@ do
      'bash "$HOME/.claude/cc-status.sh" precompact')
 end
 
--- ---- pinned links (2026-09-29, build program unit 31) ----
+-- ---- Pinned links are gone (2026-11-19) ----
+-- Adam, 2026-11-19: "prune features I have no use for". REQUIREMENT CHANGE: the 2026-09-29 pins here
+-- asserted cc-pin.sh, ~/.claude/cc-pins/ and the card's and detail panel's chips. Gone with them:
+-- FX.stepPins / openPin / clearPins / prunePins, the open-pin message, pinChipsHtml / renderPins,
+-- cc_pins_prune, core's pin rules and tests/fixtures/pin-links.tsv. Kept: the worktree leases' file
+-- naming (core.leaseFileName, which pins' encoder used to serve) and cc-pins/ on --purge's list.
 do
   local function read(p) local h = io.open(ROOT .. p, "r"); local s = h and h:read("*a") or ""; if h then h:close() end; return s end
   local src, lib, shipped = read("claude-dashboard.lua"), read("cc-lib.sh"), read("SHIPPED")
-  local tick = src:match("function FX%._refreshBody%(%)(.-)\nend\n") or ""
-  check("pins: the tick stamps each session's pins, isolated in a pcall", tick:find("pcall(FX.stepPins, list)", 1, true) ~= nil)
-  local open = src:match('if a == "open%-pin" then(.-)\n    return\n  end') or ""
-  check("pins: a chip's click reaches FX.openPin with the card's key and the pin's number",
-        open:find("FX.openPin(byKey[tostring(payload.v or \"\")], payload.text)", 1, true) ~= nil)
-  local op = src:match("function FX%.openPin%(it, i%)(.-)\nend\n") or ""
-  check("pins: a file opens with /usr/bin/open given an argv", op:find('hs.task.new("/usr/bin/open"', 1, true) ~= nil)
-  check("pins: ...never through a shell", op ~= "" and op:find("hs.execute", 1, true) == nil and op:find("os.execute", 1, true) == nil)
-  check("pins: ...and every link is checked again first (core.pinOpenPlan)", op:find("core.pinOpenPlan(", 1, true) ~= nil)
-  local rs = src:match("function FX%.removeStatus%(key%)(.-)\nend") or ""
-  check("pins: FX.removeStatus drops the pins of a worktree that's gone", rs:find("FX.prunePins", 1, true) ~= nil)
-  local rm = lib:match("\ncc_remove%(%)%s*{(.-)\n}") or ""
-  check("pins: ...and so does cc_remove", rm:find("cc_pins_prune", 1, true) ~= nil)
-  local ac = src:match("function FX%.mergeAutoClose%(r, it%)(.-)\nend\n") or ""
-  check("pins: a verified merge clears the unit's pins", ac:find("if ok then pcall(FX.clearPins, r.worktree,", 1, true) ~= nil)
-  check("pins: the card's badges row carries the chips", src:find("b += pinChipsHtml(it);", 1, true) ~= nil)
-  check("pins: the detail panel renders them", src:find("renderPins(it);", 1, true) ~= nil
-        and src:find('<div id="d-pins"></div>', 1, true) ~= nil)
-  check("pins: FX.PINS_DIR reads CC_PINS_DIR, as cc-lib.sh does",
-        src:find('FX.PINS_DIR = os.getenv("CC_PINS_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-pins")', 1, true) ~= nil
-        and lib:find('CC_PINS_DIR="${CC_PINS_DIR:-${HOME}/.claude/cc-pins}"', 1, true) ~= nil)
-  local line = shipped:match("\n(cc%-pin%.sh[^\n]*)")
-  check("pins: SHIPPED ships cc-pin.sh to ~/.claude", line ~= nil and line:find("claude", 1, true) ~= nil)
-  check("pins: ...as a command, not a hook", line ~= nil and line:find("hook", 1, true) == nil)
-  check("pins: --purge takes cc-pins/ with Shepherd's other state", read("uninstall.sh"):find(" cc-pins ", 1, true) ~= nil)
+  local okCore, core2 = pcall(dofile, ROOT .. "cc-core.lua")
+  check("no pins: cc-pin.sh isn't shipped, or in the checkout", not shipped:find("cc-pin.sh", 1, true) and io.open(ROOT .. "cc-pin.sh", "r") == nil)
+  check("no pins: the panel keeps no cc-pins folder", not src:find("FX.PINS_DIR", 1, true) and not src:find("cc-pins", 1, true))
+  check("no pins: the tick stamps none and a click opens none", not src:find("FX.stepPins", 1, true) and not src:find("FX.openPin", 1, true)
+        and not src:find('a == "open-pin"', 1, true))
+  check("no pins: no removers or merge clear them", not src:find("FX.prunePins", 1, true) and not src:find("FX.clearPins", 1, true)
+        and not lib:find("cc_pins_prune", 1, true) and not lib:find("CC_PINS_DIR", 1, true))
+  check("no pins: no chips on the card or in the detail panel", not src:find("pinChipsHtml", 1, true) and not src:find("renderPins", 1, true)
+        and not src:find('id="d-pins"', 1, true) and not src:find("it.pins", 1, true))
+  check("no pins: core keeps none of the rules", okCore and core2.pinCheck == nil and core2.pinOpenPlan == nil and core2.parsePins == nil
+        and core2.PINS_MAX == nil and core2.pinFileName == nil)
+  check("no pins: the shared fixture table is gone too", io.open(ROOT .. "tests/fixtures/pin-links.tsv", "r") == nil)
+  local keys = {}
+  for _, f in ipairs(okCore and core2.FEATURES or {}) do keys[f.key] = true end
+  check("no pins: no Pinned links in the feature list", okCore and not keys.pins)
+  -- what stays
+  check("kept: worktree leases still name their registry file", okCore and core2.leaseFileName("/r/main") == "-r-main.json")
+  check("kept: --purge still takes a leftover cc-pins/", read("uninstall.sh"):find(" cc-pins ", 1, true) ~= nil)
 end
 
 -- ---- overlap radar and blockedBy on the panel (2026-09-29) ----

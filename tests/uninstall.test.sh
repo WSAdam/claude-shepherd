@@ -33,6 +33,7 @@ mkdir -p "$C/cc-lesson"; printf '{"v":1,"id":"1790000000-1"}' > "$C/cc-lesson/17
 mkdir -p "$C/cc-run"; printf '{"v":1,"id":"r1a2b3c4d"}' > "$C/cc-run/r1a2b3c4d.run.json"
 mkdir -p "$C/cc-resume"; printf '{"key":"abc","nonce":"ab","state":"waiting"}' > "$C/cc-resume/abc.json"
 mkdir -p "$C/cc-pins"; printf '{"v":1,"root":"/r","pins":[]}' > "$C/cc-pins/-r.json"
+printf '#!/bin/bash\n' > "$C/cc-pin.sh"   # 2026-11-19: retired with pinned links, no longer in SHIPPED
 mkdir -p "$C/cc-lease/db"; printf '{"v":1,"main":"/r","leases":{}}' > "$C/cc-lease/-r.json"
 mkdir -p "$C/cc-bridge"; printf '0.5.0' > "$C/cc-bridge/.installed"
 mkdir -p "$C/cc-send"; printf '{"nonce":"ab"}' > "$C/cc-send/shell.1790000000-1.answer"
@@ -126,8 +127,10 @@ assert_eq "--purge removes the lessons waiting for the coach" "gone" "$([ -e "$C
 assert_eq "--purge removes the checklist runs" "gone" "$([ -e "$C/cc-run" ] && echo there || echo gone)"
 # 2026-09-29: the resumes waiting for a usage limit's reset (cc-resume/) are Shepherd's state too
 assert_eq "--purge removes the resumes waiting for a limit reset" "gone" "$([ -e "$C/cc-resume" ] && echo there || echo gone)"
-# 2026-09-29: the pinned links (cc-pins/) are Shepherd's state too
+# 2026-09-29: the pinned links (cc-pins/) are Shepherd's state too (2026-11-19: a leftover of the
+# removed pinned links on an old install, still purged)
 assert_eq "--purge removes the pinned links" "gone" "$([ -e "$C/cc-pins" ] && echo there || echo gone)"
+assert_eq "--purge removes a retired cc-pin.sh" "gone" "$([ -e "$C/cc-pin.sh" ] && echo there || echo gone)"
 # 2026-09-29: the worktree leases (cc-lease/, with the default database folder inside it) too
 assert_eq "--purge removes the worktree leases" "gone" "$([ -e "$C/cc-lease" ] && echo there || echo gone)"
 # 2026-09-29: cc-send's requests and answers (cc-send/) too

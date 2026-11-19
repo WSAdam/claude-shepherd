@@ -96,7 +96,7 @@ Single user, no server, no accounts. Records store env-var names, never secrets.
   `stop_hook_active`, in Shepherd's own internal runs, or when the panel heartbeat is stale. The
   guards are off in code and on in `defaults/`.
 - **Scripts sessions run themselves:** `cc-merge.sh` (ready to merge), `cc-fleet.sh` (batches),
-  `cc-pin.sh`, `cc-lesson.sh`, `cc-run.sh`, `cc-send.sh`, `cc-ticket.sh`; plus
+  `cc-lesson.sh`, `cc-run.sh`, `cc-send.sh`, `cc-ticket.sh`; plus
   `cc-commits.sh` (commit stats) and `cc-scrub.js` (transcript scrubber). Shared bash helpers are
   in `cc-lib.sh`.
 - **[SHIPPED](SHIPPED)** is the one list of shipped files: `install.sh`, `uninstall.sh`, the
@@ -362,10 +362,10 @@ sections.
 each unit a worktree that Shepherd merged on a green gate. The
 [CHANGELOG section](CHANGELOG.md#2026-09-30--the-build-program) lists every unit; in short:
 
-- Cards: turn labels, the working-on line, Running N jobs, pinned links (`cc-pin.sh`), the
+- Cards: turn labels, the working-on line, Running N jobs, pinned links (`cc-pin.sh`; removed 2026-11-19), the
   scheduled-tasks lock check, API errors and usage limits read as errors.
-- Reaching a session: the session mailbox, `cc-send.sh`, tickets (`cc-ticket.sh`), Restart
-  fleet in place. (The decisions inbox, `cc-decide.sh` and ☰ → 📥 Inbox, was removed 2026-11-19.)
+- Reaching a session: the session mailbox, `cc-send.sh`, tickets (`cc-ticket.sh`). (Restart fleet
+  in place and the decisions inbox, `cc-decide.sh` and ☰ → 📥 Inbox, were removed 2026-11-19.)
 - Automation: readiness before typing, the automation door with dry run and the ⚡ Trace,
   auto-continue back-off, resume at the limit reset (`cc-resume.sh`), handoff notes, auto-compact with
   notes, task packets, the coach.

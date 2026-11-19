@@ -69,8 +69,6 @@ Every feature below has a reference page one click away. The panel lists the sam
 
 - [**Jump, nudge, stop, clear**](docs/controls.md#the-detail-panel): focus a session's tab, send it
   a message, stop its turn, or clear or compact it, from its tile.
-- [**Pinned links**](docs/controls.md#pinned-links): a session pins up to 8 links (its preview, its
-  PR, a file in its worktree) with `cc-pin.sh`, and they show as chips on its card.
 - [**Past sessions**](docs/usage-and-cost.md#past-sessions) lists every transcript in History, and ↻ Resume reopens one that's verified dead; [**Kept transcripts**](docs/usage-and-cost.md#kept-transcripts) keep your ★ projects' sessions past Claude Code's 30-day cleanup.
 - [**cc-send**](docs/automation.md#send-a-prompt-from-a-shell): `cc-send.sh <project|session> "prompt"
   --wait` hands a live session a prompt from any shell and prints its reply.
@@ -291,7 +289,7 @@ Full detail: [docs/approvals-and-policies.md](docs/approvals-and-policies.md#the
 |------|--------------|
 | [Install](docs/install.md) | Install, upgrade, uninstall, what the installer changes, the tab bridge, the Dock launcher |
 | [Fleet](docs/fleet.md) | Statuses, grey cards, project cards, Instances, leases, the detail panel and its tabs, search, groups, My List, playbooks, Run selected |
-| [Controls](docs/controls.md) | Clicks and menus, detail-panel buttons, pinned links, shared windows, spawning, hotkeys, Stream Deck, awake and lock |
+| [Controls](docs/controls.md) | Clicks and menus, detail-panel buttons, shared windows, spawning, hotkeys, Stream Deck, awake and lock |
 | [Approvals and policies](docs/approvals-and-policies.md) | The safety model, the gate, always-ask commands, the worktree fence, policies, questions, the three Stop guards |
 | [Merging and batches](docs/merging-and-batches.md) | Worktree tabs, ready to merge, gates, gate blame, the main-green check, the checker, red-first, receipts, batches, brief pre-flight, grant grading, the overlap radar, main moved, the demo, the tab bridge |
 | [Automation](docs/automation.md) | When automation types, dry run, queue and packets, queue hold and the Queues view, templates, respawn, notes, the mailbox, cc-send, tickets, resume, rules, routines, the coach, the fleet idle alert, A/B compare |

@@ -118,7 +118,7 @@ decision, a batch's grant) is a file bound to its request's nonce read from disk
 mailbox message, a notes request, a Stop guard). Each writer owns its own files: the hooks (`cc-status/`, a Stop guard's
 `cc-guard/<key>.<guard>`); the scripts sessions run (`cc-merge.sh` → `cc-merge/`, including the
 `<key>.notyet` a Not yet leaves; `cc-fleet.sh` → a batch's proposal; `cc-lesson.sh` → `cc-lesson/`;
-`cc-run.sh` → reports in `cc-run/`; `cc-ticket.sh`, `cc-send.sh`, `cc-pin.sh`);
+`cc-run.sh` → reports in `cc-run/`; `cc-ticket.sh`, `cc-send.sh`);
 and the panel (decision and answer files, a batch's own state, `cc-main-green.json`,
 `cc-keep/`, checklist runs). **[DECISION D-6, revised]**
 

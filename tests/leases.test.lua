@@ -3,7 +3,7 @@
 -- file. Each worktree Shepherd starts a session for now gets its own PORT and DB path: the pure
 -- allocation and texts in cc-core.lua, then the REAL shipped FX lease block (FX.LEASE_DIR ..
 -- FX.sweepLeases), sliced out of claude-dashboard.lua and loaded against a recorded hs (the
--- pins.test.lua pattern), over real files and a real git worktree in a temp dir.
+-- pins.test.lua pattern, a suite removed with pinned links 2026-11-19), over real files and a real git worktree in a temp dir.
 --
 -- Usage: lua tests/leases.test.lua [path/to/claude-dashboard.lua]
 

@@ -23021,126 +23021,6 @@ function M.isOpenableUrl(url)
   return type(url) == "string" and url:match("^[Hh][Tt][Tt][Pp][Ss]?://[^%s/]") ~= nil
 end
 
--- ---- Pinned links (build program unit 31, 2026-09-29) -----------------------------------------
--- cc-pin.sh keeps up to 8 links per WORKTREE in ~/.claude/cc-pins/<M.pinFileName(root)>: a preview
--- URL, a PR, a file. A session wrote them, so every link is data: the card shows only what
--- M.parsePins passes, and a click checks the link again (M.pinOpenPlan), a file's real path
--- included, before anything opens. cc-pin.sh holds the same rules in bash;
--- tests/fixtures/pin-links.tsv is the one table both are tested against.
-M.PINS_MAX = 8
-M.PIN_URL_MAX = 2000
-M.PIN_LABEL_MAX = 80
--- POSIX's shell metacharacters (| & ; ( ) < > and whitespace), the expansion and quoting characters
--- (` $ \ " ') and every control character. Nothing passes a link through a shell; this is defense
--- in depth. ? = # ~ % stay: they are URL syntax, and harmless to a shell.
--- 2026-09-30: so is & in an http(s) link -- it separates query parameters, and refusing it meant
--- no link with two of them (?a=1&b=2) could be pinned. A file's path still can't hold one.
-M.PIN_REFUSED_CHARS = "[%c%s|&;()<>`$\\\"']"
-M.PIN_REFUSED_HTTP_CHARS = "[%c%s|;()<>`$\\\"']"
-
--- The pins file's name for a worktree root: every byte that isn't [A-Za-z0-9] becomes "-" (cc-pin.sh's
--- `LC_ALL=C sed 's/[^A-Za-z0-9]/-/g'`). Two roots can share a name (/a/b-c and /a/b/c), so the file
--- names its root and every reader checks it. nil for a root that isn't absolute, holds a control
--- character, or makes a name past 255 bytes.
-function M.pinFileName(root)
-  if type(root) ~= "string" or root:sub(1, 1) ~= "/" or root:find("%c") then return nil end
-  local name = root:gsub("[^A-Za-z0-9]", "-") .. ".json"
-  if #name > 255 then return nil end
-  return name
-end
-
-function M.pinHasRefusedChar(s)
-  return type(s) == "string" and s:find(M.PIN_REFUSED_CHARS) ~= nil
-end
-
--- Is <path> <root> itself or inside it? Lexical, on absolute paths (a sibling that only shares the
--- prefix, /r/repox for /r/repo, is not inside).
-function M.pathUnder(path, root)
-  if type(path) ~= "string" or type(root) ~= "string" then return false end
-  root = M.normDir(root)
-  if root == "/" then return path:sub(1, 1) == "/" end
-  return path == root or path:sub(1, #root + 1) == root .. "/"
-end
-
--- One link -> { kind = "http"|"file", url, path (a file's) }, or nil and why. http(s) must pass
--- M.isOpenableUrl. A file is file:///<absolute path> with no %-escapes and no . or .. segment,
--- inside <root> (the session's git root).
-function M.pinCheck(url, root)
-  if type(url) ~= "string" or url == "" then return nil, "no link" end
-  if #url > M.PIN_URL_MAX then return nil, "the link is longer than " .. M.PIN_URL_MAX .. " characters" end
-  local http = M.isOpenableUrl(url)
-  if url:find(http and M.PIN_REFUSED_HTTP_CHARS or M.PIN_REFUSED_CHARS) then
-    return nil, "the link holds whitespace, a quote, a backslash, a control character or a shell metacharacter"
-  end
-  if http then return { kind = "http", url = url } end
-  local p = url:match("^[Ff][Ii][Ll][Ee]://(.*)$")
-  if not p then return nil, "only http(s) and file:// links can be pinned" end
-  if p:sub(1, 1) ~= "/" then return nil, "a file:// link names an absolute path (file:///path)" end
-  if p:find("%", 1, true) then return nil, "a file:// link can't carry %-escapes" end
-  local q = p .. "/"
-  if q:find("/./", 1, true) or q:find("/../", 1, true) then return nil, "a file:// link can't hold . or .. segments" end
-  if type(root) ~= "string" or root:sub(1, 1) ~= "/" then return nil, "there is no worktree to check the file against" end
-  if not M.pathUnder(p, root) then return nil, "the file isn't inside the worktree" end
-  return { kind = "file", url = url, path = p }
-end
-
--- What a chip says when the session gave no label: "PR #12" for a GitHub pull or GitLab merge
--- request, a file's name, else the host (port included) and the first path segment.
-function M.pinDefaultLabel(pin)
-  if type(pin) ~= "table" or type(pin.url) ~= "string" then return "" end
-  if pin.kind == "file" then
-    local p = pin.path or pin.url:gsub("^[Ff][Ii][Ll][Ee]://", "")
-    return p:match("([^/]+)/*$") or p
-  end
-  local n = pin.url:match("/pull/(%d+)") or pin.url:match("/merge_requests/(%d+)")
-  if n then return "PR #" .. n end
-  local host, rest = pin.url:match("^%a+://([^/?#]+)(.*)$")
-  if not host then return pin.url end
-  host = host:gsub("^.*@", "")   -- never a user:password@ in a chip
-  local seg = rest:match("^/([^/?#]+)")
-  return seg and (host .. "/" .. seg) or host
-end
-
--- A pins file -> { root, pins = { { url, kind, label } } }, or nil. With <root>, a file written for
--- another worktree (a name both share) is nil. Each link goes through M.pinCheck again against the
--- file's root; a label with a control character reads as the default, and one past
--- M.PIN_LABEL_MAX characters is cut. At most M.PINS_MAX reach the card.
-function M.parsePins(raw, root)
-  if type(raw) ~= "string" or raw == "" then return nil end
-  local ok, t = pcall(function() return M.json.decode(raw) end)
-  if not ok or type(t) ~= "table" or type(t.root) ~= "string" or t.root:sub(1, 1) ~= "/" then return nil end
-  if root ~= nil and M.normDir(t.root) ~= M.normDir(root) then return nil end
-  local out = {}
-  for _, p in ipairs(type(t.pins) == "table" and t.pins or {}) do
-    if #out >= M.PINS_MAX then break end
-    local c = type(p) == "table" and M.pinCheck(p.url, t.root) or nil
-    if c then
-      local label = (type(p.label) == "string" and not p.label:find("%c")) and M.capChars(p.label, M.PIN_LABEL_MAX) or ""
-      if label == "" then label = M.pinDefaultLabel(c) end
-      out[#out + 1] = { url = c.url, kind = c.kind, label = label }
-    end
-  end
-  return { root = t.root, pins = out }
-end
-
--- What a click on pin <i> of a card opens: { kind = "http", url } or { kind = "file", path }, or nil
--- and why. <pins> is the card's list (it.pins), <root> Shepherd's own git root for the session, and
--- <real> (optional) resolves a path's symlinks: a file opens only when its REAL path is inside the
--- root's real path, so a symlink swapped in after the pin can't lead outside the worktree.
-function M.pinOpenPlan(pins, i, root, real)
-  local n = math.tointeger(tonumber(i))
-  local p = type(pins) == "table" and n and pins[n] or nil
-  if type(p) ~= "table" then return nil, "that pin is gone" end
-  local c, why = M.pinCheck(p.url, root)
-  if not c then return nil, why end
-  if c.kind == "http" then return { kind = "http", url = c.url } end
-  if type(real) ~= "function" then return { kind = "file", path = c.path } end
-  local rp, rr = real(c.path), real(root)
-  if type(rp) ~= "string" or type(rr) ~= "string" then return nil, "the file isn't there any more" end
-  if not M.pathUnder(rp, rr) then return nil, "the file leads outside the worktree" end
-  return { kind = "file", path = rp }
-end
-
 -- ---- Worktree leases (build program unit 27, 2026-09-29) --------------------------------------
 -- Parallel units that each run a dev server or a database fought over one port and one file. Each
 -- worktree Shepherd starts a session for (New worktree tab, a batch unit, Instances Open) now gets
@@ -23181,9 +23061,18 @@ function M.leaseSettings(cfg, home)
            dbDir = dir(l.dbDir) or dir(M.LEASE_DB_DIR) or M.LEASE_DB_DIR }
 end
 
--- The registry's name for a main checkout (M.pinFileName's encoding). Two checkouts can share a
--- name, so the file names its main and every reader checks it.
-function M.leaseFileName(main) return M.pinFileName(M.normDir(main)) end
+-- The registry's name for a main checkout: every byte that isn't [A-Za-z0-9] becomes "-" (the
+-- shell's `LC_ALL=C sed 's/[^A-Za-z0-9]/-/g'`). Two checkouts can share a name (/a/b-c and /a/b/c),
+-- so the file names its main and every reader checks it. nil for a path that isn't absolute, holds a
+-- control character, or makes a name past 255 bytes. (Until 2026-11-19 this was M.pinFileName,
+-- shared with the pinned links that were removed then.)
+function M.leaseFileName(main)
+  local root = M.normDir(main)
+  if type(root) ~= "string" or root:sub(1, 1) ~= "/" or root:find("%c") then return nil end
+  local name = root:gsub("[^A-Za-z0-9]", "-") .. ".json"
+  if #name > 255 then return nil end
+  return name
+end
 
 -- A registry file -> { main, leases = { [worktree] = { port, db, at, seen } } }, or nil. With
 -- <main>, a file written for another checkout (a name both share) is nil. Only a well-formed lease
@@ -25975,9 +25864,6 @@ M.FEATURES = {
   { key = "pastsessions", cat = "Control", new = true, title = "Past sessions",
     what = "🗂 History lists every session Claude Code still has a transcript for, and every kept copy, beside the ledger's: its AI title or first prompt, its size and when it last moved, read in the background. ↻ Resume reopens one with its conversation -- VS Code as its tab, a terminal session with claude -r -- only once Shepherd has verified it isn't running anywhere (no card, no live session file, no process using its id). A session with only its kept copy left gets that copy put back first, never over a file.",
     why = "Pick up last week's conversation where it left off, without hunting for its id or risking a second copy of a session that's still running." },
-  { key = "pins", cat = "Control", new = true, title = "Pinned links",
-    what = "A session pins up to 8 links -- a preview URL, a PR, a file in its worktree -- with ~/.claude/cc-pin.sh add <link> [--label L], and they show as chips on its card and in the detail panel; a click opens one. Pins belong to the worktree, so they survive /clear, and go when its merge is verified. Only http(s) links and files under the session's git root are taken, never one holding a shell metacharacter, and each is checked again before it opens.",
-    why = "The page to look at, the PR to review or the report to read is one click from the card, not somewhere in the transcript." },
   { key = "send", cat = "Control", new = true, title = "cc-send",
     what = "~/.claude/cc-send.sh <session|project> \"prompt\" [--wait] hands a live session a prompt from any shell. A session is named by its key or name; a project by its repo root or name, and gets its best live session -- an idle one before a busy one, never one waiting on you, never the caller. It goes through the session mailbox, marked [shepherd] and ledgered: a busy session gets it at its turn end, an idle one typed where typing is safe, else it waits. --wait prints the reply on stdout and everything else on stderr; slash commands are refused. A send from a session to ANOTHER project's session is a crossing: it waits on the sender's card for your approval, and so does its reply.",
     why = "A script, a cron job or another session can hand work to a live session and use its answer, without anyone switching tabs." },

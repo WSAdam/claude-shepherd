@@ -35,9 +35,7 @@ assert_eq "user-story area heading is esc()'d"   "yes" "$(has 'esc(g.area)')"
 # commit stats (2026-09-25): commit subjects are anyone's text, and project names are relabels
 assert_eq "commit subject is esc()'d"            "yes" "$(has 'esc(c.subject')"
 assert_eq "commit project name is esc()'d"       "yes" "$(has 'esc(r.name')"
-# pinned links (2026-09-29): a session wrote each chip's label and link (cc-pin.sh)
-assert_eq "pin chip label is esc()'d"            "yes" "$(has 'esc(pn.label')"
-assert_eq "pin chip link is esc()'d"             "yes" "$(has 'esc(pn.url)')"
+# (2026-11-19: pinned links' chips went with them -- REQUIREMENT CHANGE)
 # overlap radar (2026-09-29): its lines carry branch and file names, which anyone can pick
 assert_eq "an Instances row's overlap line is esc()'d"      "yes" "$(has 'esc(im.overlap)')"
 assert_eq "an idle worktree's overlap line is esc()'d"      "yes" "$(has 'esc(iw.overlap)')"
@@ -101,14 +99,13 @@ assert_eq 'esc() encodes "'  "yes" "$(has '.replace(/"/g,"&quot;")')"
 # it.workingOn and workingOnHtml's `wk.` never reach HTML raw.
 # 2026-09-29 (automation trace): a Trace row's session name, summary and reason come from a
 # session or its queue -- traceRowHtml's `tr.` never reaches HTML raw.
-# 2026-09-29 (pinned links): a pin's label and link were written by a session (cc-pin.sh) --
-# it.pins and pinChipsHtml's `pn.` never reach HTML raw.
+# (2026-11-19: it.pins and pinChipsHtml's `pn.` went with pinned links.)
 # 2026-09-29 (overlap radar): it.overlap carries branch and file names; so does p.mergeOrder.
 # 2026-09-29 (worktree leases): it.lease and leaseBadge's `ls.` come from a file on disk.
 # 2026-09-29 (requirement ids): renderReqs' `rq.` -- a requirement's id, title and source.
 # 2026-09-29 (On purpose): onPurposeHtml's `op.` is an entry of a repo's DECISIONS.md.
 # (2026-11-19: it.hold and holdPanelHtml's `hd.` went with the hands-off hold.)
-SINK_RE="'[[:space:]]*\+[[:space:]]*(it\.(group|label|name|cwd|projectKey|status|branch|stackName|stackKey|sessTitle|wtRoot|merge|askLine|askView|workingOn|pins|overlap|lease)\b|p\.mergeOrder\b|\b(im|iw|mg|ak|wk|pn|ls|rq|op|tr)\.[A-Za-z]+\b|\bg\b)"
+SINK_RE="'[[:space:]]*\+[[:space:]]*(it\.(group|label|name|cwd|projectKey|status|branch|stackName|stackKey|sessTitle|wtRoot|merge|askLine|askView|workingOn|overlap|lease)\b|p\.mergeOrder\b|\b(im|iw|mg|ak|wk|ls|rq|op|tr)\.[A-Za-z]+\b|\bg\b)"
 raw_sinks="$(grep -nE "$SINK_RE" "$DASH" || true)"
 assert_eq "no user field concatenated RAW into panel HTML (must be esc()'d)" "" "$raw_sinks"
 
@@ -143,9 +140,7 @@ assert_eq "the merge review fills itself with textContent only (never innerHTML)
 tmp="$(mktemp)"; cp "$DASH" "$tmp"; printf '%s\n' "html += '<b>' + ak.question + '</b>';" >> "$tmp"
 planted="$(grep -cE "$SINK_RE" "$tmp")"; rm -f "$tmp"
 assert_eq "deny-list grep fires on a planted raw held-question sink" "1" "$planted"
-tmp="$(mktemp)"; cp "$DASH" "$tmp"; printf '%s\n' "h += '<span>' + pn.label + '</span>';" >> "$tmp"
-planted="$(grep -cE "$SINK_RE" "$tmp")"; rm -f "$tmp"
-assert_eq "deny-list grep fires on a planted raw pin-chip sink" "1" "$planted"
+# (2026-11-19: the planted pin-chip sink went with pinned links and the `pn.` prefix -- REQUIREMENT CHANGE)
 tmp="$(mktemp)"; cp "$DASH" "$tmp"; printf '%s\n' "h = '<span>:' + ls.port + '</span>';" >> "$tmp"
 planted="$(grep -cE "$SINK_RE" "$tmp")"; rm -f "$tmp"
 assert_eq "deny-list grep fires on a planted raw lease sink" "1" "$planted"

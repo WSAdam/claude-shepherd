@@ -9,7 +9,6 @@ cc-approve.sh         claude hook
 cc-popup.sh           claude hook
 cc-merge.sh           claude
 cc-fleet.sh           claude
-cc-pin.sh             claude
 cc-lesson.sh          claude
 cc-run.sh             claude
 cc-send.sh            claude

@@ -30,9 +30,9 @@ panel ──► ~/.claude/cc-bridge/<pid>.in/ ──► tab bridge (VS Code exte
 - [cc-worktree-guard.sh](../cc-worktree-guard.sh) denies an `EnterWorktree` into a worktree another
   live session is using, and [cc-resume.sh](../cc-resume.sh) waits out a usage limit
   ([Automation](automation.md#resume-at-the-limit-reset)).
-- [cc-pin.sh](../cc-pin.sh), [cc-send.sh](../cc-send.sh), [cc-ticket.sh](../cc-ticket.sh),
+- [cc-send.sh](../cc-send.sh), [cc-ticket.sh](../cc-ticket.sh),
   [cc-lesson.sh](../cc-lesson.sh) and [cc-run.sh](../cc-run.sh) are
-  the commands a session runs itself: pin a link, hand another session a prompt, file a ticket for
+  the commands a session runs itself: hand another session a prompt, file a ticket for
   another repo, file a lesson for the
   [coach](automation.md#the-coach), and report a [Run selected](fleet.md#my-list) item done or
   blocked.
