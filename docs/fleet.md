@@ -279,7 +279,7 @@ session is never in the snapshot.
 [Controls](controls.md#the-detail-panel). Its views sit in a **tab strip**:
 
 - **Activity** (the default): status, the **Wants** (the exact command) and **Why** (the
-  assistant's reasoning before a request; both clamp to two lines, click to expand), the agent's
+  assistant's reasoning before a request; each stops at five lines and scrolls past that), the agent's
   current **plan and TODO list** (its latest `TodoWrite` or plan-mode plan), a live **activity
   peek** ("Doing: …", the latest assistant line), and session lineage.
 - **Transcript**: up to the 60 most recent messages from the last 128 KB of the transcript, oldest

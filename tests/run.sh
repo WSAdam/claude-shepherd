@@ -160,6 +160,9 @@ echo ""
 echo "== node: hiding the detail panel's chrome, and the gate bringing it back (real browser) =="
 node "$DIR/detail-chrome.browser.test.js" || fail=1
 echo ""
+echo "== node: the detail panel's Wants: box and Why: line stop at five lines and scroll (real browser) =="
+node "$DIR/detail-wants.browser.test.js" || fail=1
+echo ""
 echo "== node: My List -- a check-off lands at once, collapsed Done isn't built (real browser) =="
 node "$DIR/worklist-checkoff.browser.test.js" || fail=1
 echo ""

@@ -18162,12 +18162,13 @@ local HTML = [[
   #d-controls .ctl { font-size:11px; color:var(--accent-text); display:flex; align-items:center; gap:4px; }
   #d-controls select { background:var(--surface-2); color:var(--text); border:1px solid var(--border);
     border-radius:6px; font-size:11px; padding:2px 4px; }
-  #d-activity, #d-pending { font-size:12px; margin:6px 0 0; cursor:pointer;
-    display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; }
+  /* 2026-11-19 (Adam: "compress that window to like 5 lines and add a scroll bar"): at most five
+     lines, then it scrolls. The old 2-line clamp needed display:-webkit-box, which renderDetail's
+     inline display:block overrode, so a long pending command filled the whole panel. */
+  #d-activity, #d-pending { font-size:12px; margin:6px 0 0; line-height:1.45;
+    max-height:calc(1.45em * 5); overflow-y:auto; overflow-wrap:anywhere; padding-right:4px; }
   #d-activity { color:var(--accent-text); }
   #d-pending  { color:var(--danger); }
-  #d-activity.expanded, #d-pending.expanded { -webkit-line-clamp:unset; }
-  .exp-hint { color:var(--dim); font-size:11px; }
   #d-actions { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
   #d-actions button { background:var(--surface); color:var(--text); border:1px solid var(--border);
                       border-radius:8px; font-size:12px; padding:5px 10px; cursor:pointer; }
@@ -19141,9 +19142,9 @@ local HTML = [[
     <div id="d-tabs"></div>
     <div id="d-tab-menu"></div>
     <div class="d-panel" data-tab="activity">
-      <div id="d-pending" onclick="toggleExpand('pending')"></div>
+      <div id="d-pending"></div>
       <div id="d-ask"></div>
-      <div id="d-activity" onclick="toggleExpand('activity')"></div>
+      <div id="d-activity"></div>
       <div id="d-prompt"></div>
       <div id="d-meta"></div>
       <div id="d-score"></div>
@@ -20234,7 +20235,6 @@ local HTML = [[
     var selectedKey = null;
     var searchQuery = "";   // free-text tile filter (🔍); empty = show all
     var activeGroup = "";   // group-chip filter; empty = all groups
-    var detailExpanded = { pending:false, activity:false };
     var pendingImage = null;  // data URL of an image pasted into the input
 
     function send(a, v, text, img, scope){
@@ -23107,7 +23107,6 @@ local HTML = [[
     }
     function selectTile(key){
       if(key !== selectedKey){
-        detailExpanded = { pending:false, activity:false };
         var dnSel = document.getElementById("deny-note"); if(dnSel) dnSel.value = "";   // a reason is for ONE session's request
         requestDecisions(key);  // gate decision log loads per selection, not per tick
         tplOpen = false; renderTemplates();
@@ -23460,12 +23459,6 @@ local HTML = [[
           + '</div>';
       }).join("");
       box.style.display = "block";
-    }
-    function toggleExpand(which){ detailExpanded[which] = !detailExpanded[which]; applyExpand(); }
-    function applyExpand(){
-      ["pending","activity"].forEach(function(which){
-        document.getElementById("d-" + which).classList.toggle("expanded", detailExpanded[which]);
-      });
     }
     function paintSelection(){
       // Project stacks: selection stays on the SESSION (so a lead change can never
@@ -24305,7 +24298,6 @@ local HTML = [[
         dcls.toggle("dc-gate", mode === "gate");
         dcls.toggle("dc-err", mode === "error");
       }
-      applyExpand();
       // NB: the tab bar + inline timeline are (re)built on selection / tab-click /
       // pin-toggle -- NOT here. renderDetail runs every 1s tick for the selected
       // tile; rebuilding the bar or re-painting the timeline <pre> each tick would
